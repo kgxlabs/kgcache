@@ -29,7 +29,14 @@ const GetCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
 
-    pub fn execute(self: CommandCommander) ErrorCommander!resp.RESPValue {
+    pub fn execute(self: GetCommander) ErrorCommander!resp.RESPValue {
+        if (self.arguments.len == 0) {
+            return .{
+                // TODO: use error from error module after refactor
+                .simple_error = "Wrong number of arguments",
+            };
+        }
+        // TODO: Implement
         return self.arguments[0];
     }
 };
@@ -39,6 +46,12 @@ const CommandCommander = struct {
     arguments: []resp.RESPValue,
 
     pub fn execute(self: CommandCommander) ErrorCommander!resp.RESPValue {
+        if (self.arguments.len == 0) {
+            return .{
+                // TODO: use error from error module after refactor
+                .simple_error = "Wrong number of arguments",
+            };
+        }
         // TODO: Implement introspection
         return self.arguments[0];
     }
@@ -50,7 +63,10 @@ const EchoCommander = struct {
 
     pub fn execute(self: EchoCommander) ErrorCommander!resp.RESPValue {
         if (self.arguments.len != 1) {
-            return ErrorCommander.MalformedCommandRequest;
+            return .{
+                // TODO: use error from error module after refactor
+                .simple_error = "Wrong number of arguments",
+            };
         }
 
         const argument = self.arguments[0];
@@ -71,15 +87,28 @@ const EchoCommander = struct {
     }
 };
 
+const PingCommander = struct {
+    command: CommandKind,
+    arguments: []resp.RESPValue,
+
+    pub fn execute(_: PingCommander) ErrorCommander!resp.RESPValue {
+        return .{
+            .simple_string = "PONG",
+        };
+    }
+};
+
 const Commander = union(enum) {
     _command: CommandCommander,
     _echo: EchoCommander,
     _get: GetCommander,
+    _ping: PingCommander,
 
     pub fn execute(self: Commander) ErrorCommander!resp.RESPValue {
         return switch (self) {
             ._command => |c| return c.execute(),
             ._echo => |c| return c.execute(),
+            ._ping => |c| return c.execute(),
             else => {
                 return ErrorCommander.UnknownCommand;
             },
@@ -100,6 +129,12 @@ pub fn init(value: resp.RESPValue) ErrorCommander!Commander {
         },
         .echo => {
             return Commander{ ._echo = EchoCommander{
+                .command = command,
+                .arguments = arguments,
+            } };
+        },
+        .ping => {
+            return Commander{ ._ping = PingCommander{
                 .command = command,
                 .arguments = arguments,
             } };

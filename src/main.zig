@@ -1,6 +1,6 @@
 const std = @import("std");
 const resp = @import("resp.zig");
-const commander = @import("commander.zig");
+const commander = @import("commands/commander.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -30,7 +30,8 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream) !void {
     defer connection.close(io);
 
     while (true) {
-        const connection_writer = connection.writer(io, &.{});
+        // TODO: use buffered writer
+        var connection_writer = connection.writer(io, &.{});
         var buf: [1024]u8 = undefined;
         var data = [_][]u8{&buf};
 
@@ -50,16 +51,15 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream) !void {
 
         // TODO: Write error response for the commander
         // TODO: Refactor to more idiomatic Zig
-        const c = try commander.init(allocator, commands);
+        const c = try commander.init(commands);
         // TODO: Write error response
         const result = try c.execute();
-        const serializer = resp.serializer(allocator);
+        const serializer = resp.serializer();
         const serialized_result = try serializer.serialize(allocator, result);
-        defer serializer.deinit(allocator);
+        defer serializer.deinit(allocator, serialized_result);
 
         // Write serialized string
 
-        var writer = connection_writer.interface;
-        try writer.writeAll(serialized_result);
+        try connection_writer.interface.writeAll(serialized_result);
     }
 }
