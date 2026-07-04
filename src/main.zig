@@ -1,5 +1,6 @@
 const std = @import("std");
 const resp = @import("resp.zig");
+const commander = @import("commander.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -29,10 +30,11 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream) !void {
     defer connection.close(io);
 
     while (true) {
-        var connection_writer = connection.writer(io, &.{});
+        const connection_writer = connection.writer(io, &.{});
         var buf: [1024]u8 = undefined;
         var data = [_][]u8{&buf};
 
+        // TODO: We are directly doing syscall to OS which is expensive. Refactor this to use buffered reader
         const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch break;
         if (bytes_read == 0) break;
 
@@ -40,10 +42,24 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream) !void {
         defer _ = gpa.deinit();
 
         const allocator = gpa.allocator();
-        var parser = resp.Parser{ .data = buf[0..bytes_read] };
+
+        var parser = resp.parser(buf[0..bytes_read]);
+        // TODO: Write error resposne for the parser
         const commands = try parser.parse(allocator);
         defer parser.deinit(allocator, commands);
 
-        try connection_writer.interface.writeAll("+PONG\r\n");
+        // TODO: Write error response for the commander
+        // TODO: Refactor to more idiomatic Zig
+        const c = try commander.init(allocator, commands);
+        // TODO: Write error response
+        const result = try c.execute();
+        const serializer = resp.serializer(allocator);
+        const serialized_result = try serializer.serialize(allocator, result);
+        defer serializer.deinit(allocator);
+
+        // Write serialized string
+
+        var writer = connection_writer.interface;
+        try writer.writeAll(serialized_result);
     }
 }
