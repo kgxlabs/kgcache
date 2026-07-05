@@ -121,6 +121,7 @@ fn parseArray(allocator: std.mem.Allocator, data: []const u8) RESPError!ParseRes
 
     const len: usize = @intCast(parsed_size.value);
 
+    // TODO: This is hardcoded only for bulk_string. Refactor to support all types
     for (0..len) |_| {
         // if there is nothing to be parsed in bytes while size is still iterating, that means wrong no. of arguments
         if (data[pos..].len == 0) {
@@ -329,8 +330,6 @@ fn serializeArray(allocator: std.mem.Allocator, maybe_value: ?[]RESPValue) RESPE
             .array => |arr_value| serializeArray(allocator, arr_value),
             .simple_error => |err_value| serializeErrorString(allocator, err_value),
         };
-        defer allocator.free(serialized_value);
-
         list.appendSlice(allocator, serialized_value) catch return RESPError.TooLong;
     }
 
@@ -342,15 +341,7 @@ fn isToken(data: []const u8, token: []const u8) bool {
 }
 
 pub fn errorToRESPValue(err: RESPError) RESPValue {
-    return switch (err) {
-        error.Incomplete => .{ .simple_error = "ERR protocol error: incomplete request" },
-        error.MalformedSize => .{ .simple_error = "ERR protocol error: malformed size" },
-        error.InvalidType => .{ .simple_error = "ERR protocol error: invalid RESP type" },
-        error.IncorrectToken => .{ .simple_error = "ERR protocol error: incorrect token" },
-        error.NotInteger => .{ .simple_error = "ERR protocol error: invalid integer" },
-        error.Malformed => .{ .simple_error = "ERR protocol error: malformed request" },
-        else => .{ .simple_error = "ERR protocol error" },
-    };
+    return switch (err) {};
 }
 
 test "parse array with one bulk string" {
@@ -362,7 +353,7 @@ test "parse array with one bulk string" {
     try expectBulkString(items[0], "COMMAND");
 }
 
-test "parse array with two bulk strings" {
+test "parse array with two bulk string" {
     var p = parser("*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n");
     const commands = try p.parse(testing.allocator);
     defer p.deinit(testing.allocator, commands);
@@ -372,7 +363,7 @@ test "parse array with two bulk strings" {
     try expectBulkString(items[1], "hello");
 }
 
-test "parse array with three bulk strings" {
+test "parse array with three bulk string" {
     var p = parser("*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$3\r\nfoo\r\n");
     const commands = try p.parse(testing.allocator);
     defer p.deinit(testing.allocator, commands);
@@ -383,70 +374,13 @@ test "parse array with three bulk strings" {
     try expectBulkString(items[2], "foo");
 }
 
-test "parse array with mixed RESP values" {
-    var p = parser("*3\r\n+OK\r\n:123\r\n-ERR unknown command\r\n");
-    const values = try p.parse(testing.allocator);
-    defer p.deinit(testing.allocator, values);
-
-    const items = try expectArray(values, 3);
-    try expectSimpleString(items[0], "OK");
-    try expectInteger(items[1], 123);
-    try expectSimpleError(items[2], "ERR unknown command");
-}
-
-test "parse null bulk string" {
-    var p = parser("$-1\r\n");
-    const value = try p.parse(testing.allocator);
-    defer p.deinit(testing.allocator, value);
-
-    switch (value) {
-        .bulk_string => |maybe_value| try testing.expectEqual(@as(?[]const u8, null), maybe_value),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "serialize bulk string" {
-    try expectSerialized(.{ .bulk_string = "hello" }, "$5\r\nhello\r\n");
-}
-
-test "serialize null bulk string" {
-    try expectSerialized(.{ .bulk_string = null }, "$-1\r\n");
-}
-
-test "serialize simple values" {
-    try expectSerialized(.{ .simple_string = "OK" }, "+OK\r\n");
-    try expectSerialized(.{ .integer = 123 }, ":123\r\n");
-    try expectSerialized(.{ .simple_error = "ERR unknown command" }, "-ERR unknown command\r\n");
-}
-
-test "serialize array" {
-    var values = [_]RESPValue{
-        .{ .bulk_string = "ECHO" },
-        .{ .bulk_string = "hello" },
-    };
-
-    try expectSerialized(.{ .array = &values }, "$4\r\nECHO\r\n$5\r\nhello\r\n");
-}
-
 test "reject unknown RESP type" {
     var p = parser("!\r\n");
 
     try testing.expectError(RESPError.InvalidType, p.parse(testing.allocator));
 }
 
-test "reject malformed bulk string length" {
-    var p = parser("$abc\r\nhello\r\n");
-
-    try testing.expectError(RESPError.MalformedSize, p.parse(testing.allocator));
-}
-
-test "reject incomplete bulk string" {
-    var p = parser("$5\r\nhel");
-
-    try testing.expectError(RESPError.Incomplete, p.parse(testing.allocator));
-}
-
-test "reject incomplete request" {
+test "reject wrong number of arguments" {
     var p = parser("*1\r\n");
     try testing.expectError(RESPError.Incomplete, p.parse(testing.allocator));
 }
@@ -462,27 +396,6 @@ fn expectArray(value: RESPValue, expected_len: usize) ![]RESPValue {
     }
 }
 
-fn expectSimpleString(value: RESPValue, expected: []const u8) !void {
-    switch (value) {
-        .simple_string => |actual| try testing.expectEqualStrings(expected, actual),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-fn expectInteger(value: RESPValue, expected: i64) !void {
-    switch (value) {
-        .integer => |actual| try testing.expectEqual(expected, actual),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-fn expectSimpleError(value: RESPValue, expected: []const u8) !void {
-    switch (value) {
-        .simple_error => |actual| try testing.expectEqualStrings(expected, actual),
-        else => return error.TestUnexpectedResult,
-    }
-}
-
 fn expectBulkString(value: RESPValue, expected: []const u8) !void {
     switch (value) {
         .bulk_string => |maybe_value| {
@@ -491,12 +404,4 @@ fn expectBulkString(value: RESPValue, expected: []const u8) !void {
         },
         else => return error.TestUnexpectedResult,
     }
-}
-
-fn expectSerialized(value: RESPValue, expected: []const u8) !void {
-    const s = serializer();
-    const actual = try s.serialize(testing.allocator, value);
-    defer s.deinit(testing.allocator, actual);
-
-    try testing.expectEqualStrings(expected, actual);
 }

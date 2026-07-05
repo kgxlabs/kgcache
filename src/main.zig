@@ -1,6 +1,6 @@
 const std = @import("std");
 const resp = @import("resp.zig");
-const commander = @import("commands/commander.zig");
+const commander = @import("commander.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -43,23 +43,54 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream) !void {
         defer _ = gpa.deinit();
 
         const allocator = gpa.allocator();
+        const serializer = resp.serializer();
 
         var parser = resp.parser(buf[0..bytes_read]);
-        // TODO: Write error resposne for the parser
-        const commands = try parser.parse(allocator);
+        // NOTE: There is a potential memory leak when error occurs.
+        // This is the scenario: error can happens when parsing Array type and there are some array items already allocated.
+        // We don't need to worry about that because we already errdefer it in parser implementation
+        const commands = parser.parse(allocator) catch |err| {
+            const err_value = resp.errorToRESPValue(err);
+
+            const serialized_value = try serializer.serialize(allocator, err_value);
+            defer allocator.free(serialized_value);
+
+            try connection_writer.interface.writeAll(serialized_value);
+            return;
+        };
         defer parser.deinit(allocator, commands);
 
-        // TODO: Write error response for the commander
-        // TODO: Refactor to more idiomatic Zig
-        const c = try commander.init(commands);
-        // TODO: Write error response
-        const result = try c.execute();
-        const serializer = resp.serializer();
-        const serialized_result = try serializer.serialize(allocator, result);
+        const c = commander.init(commands) catch |err| {
+            const err_value = commander.errorToRESPValue(err);
+
+            const serialized_value = try serializer.serialize(allocator, err_value);
+            defer allocator.free(serialized_value);
+
+            try connection_writer.interface.writeAll(serialized_value);
+            return;
+        };
+
+        // TODO: There is a potential memory leak when error occurs.
+        // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
+        // How do we handle that scenario to free the memory?
+        const result = c.execute() catch |err| {
+            const err_value = commander.errorToRESPValue(err);
+
+            const serialized_value = try serializer.serialize(allocator, err_value);
+            defer allocator.free(serialized_value);
+
+            try connection_writer.interface.writeAll(serialized_value);
+            return;
+        };
+
+        const serialized_result = serializer.serialize(allocator, result) catch {
+            try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
+            return;
+        };
+
         defer serializer.deinit(allocator, serialized_result);
 
         // Write serialized string
-
         try connection_writer.interface.writeAll(serialized_result);
     }
 }
