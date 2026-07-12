@@ -1,5 +1,6 @@
 const std = @import("std");
 const resp = @import("resp.zig");
+const store = @import("store.zig");
 const testing = std.testing;
 
 const CommandKind = enum {
@@ -29,6 +30,7 @@ const CommanderError = error{
 const GetCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
+    data_store: *store.Store,
 
     pub fn execute(self: GetCommander) CommanderError!resp.RESPValue {
         if (self.arguments.len == 0) {
@@ -45,6 +47,7 @@ const GetCommander = struct {
 const CommandCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
+    data_store: *store.Store,
 
     pub fn execute(self: CommandCommander) CommanderError!resp.RESPValue {
         if (self.arguments.len == 0) {
@@ -61,6 +64,7 @@ const CommandCommander = struct {
 const EchoCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
+    data_store: *store.Store,
 
     pub fn execute(self: EchoCommander) CommanderError!resp.RESPValue {
         if (self.arguments.len != 1) {
@@ -91,6 +95,7 @@ const EchoCommander = struct {
 const PingCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
+    data_store: *store.Store,
 
     pub fn execute(_: PingCommander) CommanderError!resp.RESPValue {
         return .{
@@ -117,7 +122,7 @@ const Commander = union(enum) {
     }
 };
 
-pub fn init(value: resp.RESPValue) CommanderError!Commander {
+pub fn init(data_store: *store.Store, value: resp.RESPValue) CommanderError!Commander {
     const command = try parseKeyword(value);
     const arguments = try parseArguments(value);
 
@@ -126,18 +131,21 @@ pub fn init(value: resp.RESPValue) CommanderError!Commander {
             return Commander{ ._command = CommandCommander{
                 .command = command,
                 .arguments = arguments,
+                .data_store = data_store,
             } };
         },
         .echo => {
             return Commander{ ._echo = EchoCommander{
                 .command = command,
                 .arguments = arguments,
+                .data_store = data_store,
             } };
         },
         .ping => {
             return Commander{ ._ping = PingCommander{
                 .command = command,
                 .arguments = arguments,
+                .data_store = data_store,
             } };
         },
         else => {

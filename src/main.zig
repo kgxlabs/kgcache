@@ -1,6 +1,7 @@
 const std = @import("std");
 const resp = @import("resp.zig");
 const commander = @import("commander.zig");
+const store = @import("store.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -14,19 +15,26 @@ pub fn main(init: std.process.Init) !void {
         .reuse_address = true,
     });
     defer server.deinit(io);
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
 
-    try listen(io, &server);
+    const allocator = gpa.allocator();
+
+    var data_store = store.init(allocator);
+    defer data_store.deinit();
+
+    try listen(io, &server, &data_store);
 }
 
-fn listen(io: std.Io, server: *std.Io.net.Server) !void {
+fn listen(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store) !void {
     while (true) {
         const connection = try server.accept(io);
-        const handle = try std.Thread.spawn(.{}, handleConnection, .{ io, connection });
+        const handle = try std.Thread.spawn(.{}, handleConnection, .{ io, connection, data_store });
         handle.detach();
     }
 }
 
-fn handleConnection(io: std.Io, connection: std.Io.net.Stream) !void {
+fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Store) !void {
     defer connection.close(io);
 
     while (true) {
@@ -60,7 +68,7 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream) !void {
         };
         defer parser.deinit(allocator, commands);
 
-        const c = commander.init(commands) catch |err| {
+        const c = commander.init(data_store, commands) catch |err| {
             const err_value = commander.errorToRESPValue(err);
 
             const serialized_value = try serializer.serialize(allocator, err_value);
