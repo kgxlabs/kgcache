@@ -30,9 +30,8 @@ const CommanderError = error{
 const GetCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
-    data_store: *store.Store,
 
-    pub fn execute(self: GetCommander) CommanderError!resp.RESPValue {
+    pub fn execute(self: GetCommander, _: *store.Store) CommanderError!resp.RESPValue {
         if (self.arguments.len == 0) {
             return .{
                 // TODO: use error from error module after refactor
@@ -47,9 +46,8 @@ const GetCommander = struct {
 const CommandCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
-    data_store: *store.Store,
 
-    pub fn execute(self: CommandCommander) CommanderError!resp.RESPValue {
+    pub fn execute(self: CommandCommander, _: *store.Store) CommanderError!resp.RESPValue {
         if (self.arguments.len == 0) {
             return .{
                 // TODO: use error from error module after refactor
@@ -64,9 +62,8 @@ const CommandCommander = struct {
 const EchoCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
-    data_store: *store.Store,
 
-    pub fn execute(self: EchoCommander) CommanderError!resp.RESPValue {
+    pub fn execute(self: EchoCommander, _: *store.Store) CommanderError!resp.RESPValue {
         if (self.arguments.len != 1) {
             return .{
                 // TODO: use error from error module after refactor
@@ -95,9 +92,8 @@ const EchoCommander = struct {
 const PingCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
-    data_store: *store.Store,
 
-    pub fn execute(_: PingCommander) CommanderError!resp.RESPValue {
+    pub fn execute(_: PingCommander, _: *store.Store) CommanderError!resp.RESPValue {
         return .{
             .simple_string = "PONG",
         };
@@ -110,11 +106,11 @@ const Commander = union(enum) {
     _get: GetCommander,
     _ping: PingCommander,
 
-    pub fn execute(self: Commander) CommanderError!resp.RESPValue {
+    pub fn execute(self: Commander, data_store: *store.Store) CommanderError!resp.RESPValue {
         return switch (self) {
-            ._command => |c| return c.execute(),
-            ._echo => |c| return c.execute(),
-            ._ping => |c| return c.execute(),
+            ._command => |c| return c.execute(data_store),
+            ._echo => |c| return c.execute(data_store),
+            ._ping => |c| return c.execute(data_store),
             else => {
                 return CommanderError.UnknownCommand;
             },
@@ -122,7 +118,7 @@ const Commander = union(enum) {
     }
 };
 
-pub fn init(data_store: *store.Store, value: resp.RESPValue) CommanderError!Commander {
+pub fn init(value: resp.RESPValue) CommanderError!Commander {
     const command = try parseKeyword(value);
     const arguments = try parseArguments(value);
 
@@ -131,21 +127,18 @@ pub fn init(data_store: *store.Store, value: resp.RESPValue) CommanderError!Comm
             return Commander{ ._command = CommandCommander{
                 .command = command,
                 .arguments = arguments,
-                .data_store = data_store,
             } };
         },
         .echo => {
             return Commander{ ._echo = EchoCommander{
                 .command = command,
                 .arguments = arguments,
-                .data_store = data_store,
             } };
         },
         .ping => {
             return Commander{ ._ping = PingCommander{
                 .command = command,
                 .arguments = arguments,
-                .data_store = data_store,
             } };
         },
         else => {

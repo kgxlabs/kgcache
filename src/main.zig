@@ -68,7 +68,7 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *stor
         };
         defer parser.deinit(allocator, commands);
 
-        const c = commander.init(data_store, commands) catch |err| {
+        const c = commander.init(commands) catch |err| {
             const err_value = commander.errorToRESPValue(err);
 
             const serialized_value = try serializer.serialize(allocator, err_value);
@@ -81,7 +81,7 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *stor
         // TODO: There is a potential memory leak when error occurs.
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
         // How do we handle that scenario to free the memory?
-        const result = c.execute() catch |err| {
+        const result = c.execute(data_store) catch |err| {
             const err_value = commander.errorToRESPValue(err);
 
             const serialized_value = try serializer.serialize(allocator, err_value);
