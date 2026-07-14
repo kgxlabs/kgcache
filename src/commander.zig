@@ -1,6 +1,7 @@
 const std = @import("std");
 const resp = @import("resp.zig");
 const store = @import("store.zig");
+const object = @import("object.zig");
 const testing = std.testing;
 
 const CommandKind = enum {
@@ -8,6 +9,7 @@ const CommandKind = enum {
     echo,
     get,
     ping,
+    set,
 
     pub fn parse(keyword: []const u8) CommanderError!CommandKind {
         if (std.ascii.eqlIgnoreCase(keyword, "command")) return .command;
@@ -25,21 +27,38 @@ const CommanderError = error{
     UnsupportedArgumentType,
     MalformedCommandRequest,
     WrongNumberArguments,
+    UnableToConvertObject,
 };
 
 const GetCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
 
-    pub fn execute(self: GetCommander, _: *store.Store) CommanderError!resp.RESPValue {
+    pub fn execute(self: GetCommander, data_store: *store.Store) CommanderError!resp.RESPValue {
         if (self.arguments.len == 0) {
             return .{
                 // TODO: use error from error module after refactor
                 .simple_error = "Wrong number of arguments",
             };
         }
-        // TODO: Implement
-        return self.arguments[0];
+
+        const key = try keyFromArg(self.arguments[0]);
+        // TODO: Improve error message
+        const obj_value = data_store.get(key) catch return resp.RESPValue{ .simple_error = "Unable to get" };
+
+        const resp_value = object.toRESP(obj_value) catch return CommanderError.UnableToConvertObject;
+        return resp_value;
+    }
+};
+
+const SetCommander = struct {
+    command: CommandKind,
+    arguments: []resp.RESPValue,
+
+    pub fn execute(_: SetCommander, _: *store.Store) CommanderError!resp.RESPValue {
+        return resp.RESPValue{
+            .simple_string = "OK",
+        };
     }
 };
 
@@ -154,6 +173,7 @@ pub fn errorToRESPValue(err: CommanderError) resp.RESPValue {
         error.UnsupportedArgumentType => .{ .simple_error = "ERR unsupported argument type" },
         error.MalformedCommandRequest => .{ .simple_error = "ERR malformed command request" },
         error.WrongNumberArguments => .{ .simple_error = "ERR wrong number of arguments" },
+        error.UnableToConvertObject => .{ .simple_error = "ERR unable to conver object" },
     };
 }
 
@@ -215,6 +235,16 @@ fn parseArguments(value: resp.RESPValue) CommanderError![]resp.RESPValue {
         else => {
             return CommanderError.UnknownCommand;
         },
+    };
+}
+
+fn keyFromArg(arg: resp.RESPValue) CommanderError![]const u8 {
+    return switch (arg) {
+        .bulk_string => |maybe_str| {
+            const str = maybe_str orelse return CommanderError.MalformedCommandRequest;
+            return str;
+        },
+        else => return CommanderError.UnsupportedArgumentType,
     };
 }
 
