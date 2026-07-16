@@ -3,7 +3,7 @@ const resp = @import("resp.zig");
 
 pub const Object = union(enum) {
     string: []const u8,
-    // TODO: Add more types
+    // TODO: Add more types --- list, set, sorted set, hash, stream
 };
 
 // TODO: Currently only handles string. handle more types in future

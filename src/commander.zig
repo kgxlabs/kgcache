@@ -53,7 +53,9 @@ const GetCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
 
-    pub fn execute(self: GetCommander, data_store: *store.Store) CommanderError!resp.RESPValue {
+    const Self = @This();
+
+    pub fn execute(self: *const Self, data_store: *store.Store) CommanderError!resp.RESPValue {
         if (self.arguments.len == 0) {
             return .{
                 // TODO: use error from error module after refactor
@@ -61,11 +63,17 @@ const GetCommander = struct {
             };
         }
 
-        const key = try keyFromArg(self.arguments[0]);
+        const key = try bulkstringFromArg(self.arguments[0]);
         // TODO: Improve error message
-        const obj_value = data_store.get(key) catch return resp.RESPValue{ .simple_error = "Unable to get" };
+        const maybe_obj_value = data_store.get(key) catch return resp.RESPValue{ .simple_error = "Unable to get" };
 
-        const resp_value = object.toRESP(obj_value) catch return CommanderError.UnableToConvertObject;
+        if (maybe_obj_value == null) {
+            return resp.RESPValue{
+                .bulk_string = null,
+            };
+        }
+
+        const resp_value = object.toRESP(maybe_obj_value.?) catch return CommanderError.UnableToConvertObject;
         return resp_value;
     }
 };
@@ -74,9 +82,32 @@ const SetCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
 
-    pub fn execute(_: SetCommander, _: *store.Store) CommanderError!resp.RESPValue {
-        return resp.RESPValue{
-            .simple_string = "OK",
+    const Self = @This();
+
+    pub fn execute(self: *const Self, data_store: *store.Store) CommanderError!resp.RESPValue {
+        if (self.arguments.len < 2) {
+            return CommanderError.WrongNumberArguments;
+        }
+        // TODO: extract options
+        // everything after key value pair must be supported options
+
+        const key = try bulkstringFromArg(self.arguments[0]);
+        const value = try bulkstringFromArg(self.arguments[1]);
+
+        const maybe_obj = data_store.set(key, value) catch |err| {
+            return store.errorToString(err);
+        };
+
+        if (maybe_obj == null) {
+            return resp.RESPValue{
+                .simple_string = "OK",
+            };
+        }
+
+        const obj = maybe_obj.?;
+
+        return object.toRESP(obj) catch {
+            return CommanderError.UnableToConvertObject;
         };
     }
 };
@@ -85,7 +116,9 @@ const CommandCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
 
-    pub fn execute(self: CommandCommander, _: *store.Store) CommanderError!resp.RESPValue {
+    const Self = @This();
+
+    pub fn execute(self: *const Self, _: *store.Store) CommanderError!resp.RESPValue {
         if (self.arguments.len == 0) {
             return .{
                 // TODO: use error from error module after refactor
@@ -101,7 +134,9 @@ const EchoCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
 
-    pub fn execute(self: EchoCommander, _: *store.Store) CommanderError!resp.RESPValue {
+    const Self = @This();
+
+    pub fn execute(self: *const Self, _: *store.Store) CommanderError!resp.RESPValue {
         if (self.arguments.len != 1) {
             return .{
                 // TODO: use error from error module after refactor
@@ -131,7 +166,9 @@ const PingCommander = struct {
     command: CommandKind,
     arguments: []resp.RESPValue,
 
-    pub fn execute(_: PingCommander, _: *store.Store) CommanderError!resp.RESPValue {
+    const Self = @This();
+
+    pub fn execute(_: *const Self, _: *store.Store) CommanderError!resp.RESPValue {
         return .{
             .simple_string = "PONG",
         };
@@ -245,7 +282,7 @@ fn parseArguments(value: resp.RESPValue) CommanderError![]resp.RESPValue {
     };
 }
 
-fn keyFromArg(arg: resp.RESPValue) CommanderError![]const u8 {
+fn bulkstringFromArg(arg: resp.RESPValue) CommanderError![]const u8 {
     return switch (arg) {
         .bulk_string => |maybe_str| {
             const str = maybe_str orelse return CommanderError.MalformedCommandRequest;
