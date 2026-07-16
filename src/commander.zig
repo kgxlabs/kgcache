@@ -16,6 +16,7 @@ const CommandKind = enum {
         if (std.ascii.eqlIgnoreCase(keyword, "echo")) return .echo;
         if (std.ascii.eqlIgnoreCase(keyword, "get")) return .get;
         if (std.ascii.eqlIgnoreCase(keyword, "ping")) return .ping;
+        if (std.ascii.eqlIgnoreCase(keyword, "set")) return .set;
 
         return error.UnknownCommand;
     }
@@ -28,6 +29,24 @@ const CommanderError = error{
     MalformedCommandRequest,
     WrongNumberArguments,
     UnableToConvertObject,
+};
+
+const Commander = union(enum) {
+    _command: CommandCommander,
+    _echo: EchoCommander,
+    _get: GetCommander,
+    _ping: PingCommander,
+    _set: SetCommander,
+
+    pub fn execute(self: Commander, data_store: *store.Store) CommanderError!resp.RESPValue {
+        return switch (self) {
+            ._command => |c| return c.execute(data_store),
+            ._echo => |c| return c.execute(data_store),
+            ._get => |c| return c.execute(data_store),
+            ._ping => |c| return c.execute(data_store),
+            ._set => |c| return c.execute(data_store),
+        };
+    }
 };
 
 const GetCommander = struct {
@@ -119,24 +138,6 @@ const PingCommander = struct {
     }
 };
 
-const Commander = union(enum) {
-    _command: CommandCommander,
-    _echo: EchoCommander,
-    _get: GetCommander,
-    _ping: PingCommander,
-
-    pub fn execute(self: Commander, data_store: *store.Store) CommanderError!resp.RESPValue {
-        return switch (self) {
-            ._command => |c| return c.execute(data_store),
-            ._echo => |c| return c.execute(data_store),
-            ._ping => |c| return c.execute(data_store),
-            else => {
-                return CommanderError.UnknownCommand;
-            },
-        };
-    }
-};
-
 pub fn init(value: resp.RESPValue) CommanderError!Commander {
     const command = try parseKeyword(value);
     const arguments = try parseArguments(value);
@@ -156,6 +157,12 @@ pub fn init(value: resp.RESPValue) CommanderError!Commander {
         },
         .ping => {
             return Commander{ ._ping = PingCommander{
+                .command = command,
+                .arguments = arguments,
+            } };
+        },
+        .set => {
+            return Commander{ ._set = SetCommander{
                 .command = command,
                 .arguments = arguments,
             } };

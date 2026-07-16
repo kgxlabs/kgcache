@@ -22,7 +22,6 @@ fn stringFromRESP(maybe_str: ?[]const u8) !Object {
 pub fn toRESP(value: Object) !resp.RESPValue {
     return switch (value) {
         .string => |str| return stringToRESP(str),
-        else => return error.InvalidType,
     };
 }
 
