@@ -2,7 +2,7 @@
 
 A Redis-like cache server written in Zig.
 
-`kgcache` is part of the broader [`kgx`](https://github.com/kgxlabs) project, alongside sibling projects such as `kghttp`, which includes `kgbuf` and `kgurl`. The goal is to build a small, understandable cache/database server from first principles while growing toward broad Redis compatibility over time.
+`kgcache` is part of the broader [`kgx`](https://github.com/kgxlabs) project, alongside sibling projects such as [`kghttp`](https://github.com/kgxlabs/kghttp), which is a HTTP layer built from scratch. The goal is to build a small, understandable cache/database server from first principles while growing toward broad Redis compatibility over time.
 
 This project is early-stage. The current code focuses on RESP parsing/serialization, TCP request handling, command dispatch, and the first command/object abstractions.
 
