@@ -95,7 +95,9 @@ const SetCommander = struct {
         const value = try bulkstringFromArg(self.arguments[1]);
 
         const maybe_obj = data_store.set(key, value) catch |err| {
-            return store.errorToString(err);
+            return resp.RESPValue{
+                .simple_error = store.errorToString(err),
+            };
         };
 
         if (maybe_obj == null) {
@@ -192,6 +194,14 @@ pub fn init(value: resp.RESPValue) CommanderError!Commander {
                 .arguments = arguments,
             } };
         },
+        .get => {
+            return Commander{
+                ._get = GetCommander{
+                    .command = command,
+                    .arguments = arguments,
+                },
+            };
+        },
         .ping => {
             return Commander{ ._ping = PingCommander{
                 .command = command,
@@ -203,9 +213,6 @@ pub fn init(value: resp.RESPValue) CommanderError!Commander {
                 .command = command,
                 .arguments = arguments,
             } };
-        },
-        else => {
-            return CommanderError.UnknownCommand;
         },
     };
 }
@@ -298,7 +305,7 @@ test "execute ping command" {
     };
 
     const c = try init(.{ .array = &values });
-    const result = try c.execute();
+    const result = try executeWithMemoryStore(c);
 
     try expectSimpleString(result, "PONG");
 }
@@ -310,7 +317,7 @@ test "execute echo command" {
     };
 
     const c = try init(.{ .array = &values });
-    const result = try c.execute();
+    const result = try executeWithMemoryStore(c);
 
     try expectBulkString(result, "hello");
 }
@@ -337,7 +344,15 @@ test "reject unsupported argument type" {
 
     const c = try init(.{ .array = &values });
 
-    try testing.expectError(CommanderError.UnsupportedArgumentType, c.execute());
+    try testing.expectError(CommanderError.UnsupportedArgumentType, executeWithMemoryStore(c));
+}
+
+fn executeWithMemoryStore(c: Commander) CommanderError!resp.RESPValue {
+    var memory_store = store.MemoryStore.init(testing.allocator);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    return c.execute(&data_store);
 }
 
 fn expectBulkString(value: resp.RESPValue, expected: []const u8) !void {
