@@ -89,8 +89,8 @@ fn set(ptr: *anyopaque, key: []const u8, value: []const u8) Store.Error!?object.
     return null;
 }
 
-test "set value with no options should return null" {
-    var memory_store = MemoryStore.init(testing.allocator);
+test "set stores a value and returns null" {
+    var memory_store = testMemoryStore();
     var data_store = memory_store.store();
 
     defer data_store.deinit();
@@ -106,6 +106,46 @@ test "set value with no options should return null" {
     try expectObjectString(get_value, value);
 }
 
+test "get returns null for a missing key" {
+    var memory_store = testMemoryStore();
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    const value = try data_store.get("missing");
+
+    try testing.expect(value == null);
+}
+
+test "set replaces an existing value" {
+    var memory_store = testMemoryStore();
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    _ = try data_store.set("key", "first");
+    const result = try data_store.set("key", "second");
+
+    try testing.expect(result == null);
+
+    const value = try data_store.get("key") orelse return error.TestUnexpectedResult;
+    try expectObjectString(value, "second");
+}
+
+test "set owns the key and value bytes" {
+    var memory_store = testMemoryStore();
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    var key = [_]u8{ 'k', 'e', 'y' };
+    var value = [_]u8{ 'o', 'n', 'e' };
+    _ = try data_store.set(&key, &value);
+
+    @memset(&key, 'x');
+    @memset(&value, 'x');
+
+    const stored_value = try data_store.get("key") orelse return error.TestUnexpectedResult;
+    try expectObjectString(stored_value, "one");
+}
+
 fn expectObjectString(value: object.Object, expected: []const u8) !void {
     switch (value) {
         .string => |str| {
@@ -114,9 +154,6 @@ fn expectObjectString(value: object.Object, expected: []const u8) !void {
     }
 }
 
-fn testDataStore(allocator: std.mem.Allocator) Store {
-    return Store{
-        ._map = ValueMap.init(allocator),
-        ._exp_map = ExpirationMap.init(allocator),
-    };
+fn testMemoryStore() MemoryStore {
+    return MemoryStore.init(testing.allocator);
 }
