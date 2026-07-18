@@ -20,7 +20,9 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = gpa.allocator();
 
-    var data_store = store.init(allocator);
+    var mem_store = store.MemoryStore.init(allocator);
+    var data_store = mem_store.store();
+
     defer data_store.deinit();
 
     try listen(io, &server, &data_store);
