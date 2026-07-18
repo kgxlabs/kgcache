@@ -1,6 +1,7 @@
+const std = @import("std");
 const object = @import("../object.zig");
 
-pub const Error = error{};
+pub const Error = std.mem.Allocator.Error || error{};
 
 const Store = @This();
 

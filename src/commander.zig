@@ -95,7 +95,9 @@ const SetCommander = struct {
         const value = try bulkstringFromArg(self.arguments[1]);
 
         const maybe_obj = data_store.set(key, value) catch |err| {
-            return store.errorToString(err);
+            return resp.RESPValue{
+                .simple_error = store.errorToString(err),
+            };
         };
 
         if (maybe_obj == null) {
