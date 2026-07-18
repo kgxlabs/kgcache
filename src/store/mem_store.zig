@@ -61,12 +61,6 @@ fn set(ptr: *anyopaque, key: []const u8, value: []const u8) Store.Error!?object.
     return null;
 }
 
-pub fn errorToString(err: Store.Error) []const u8 {
-    return switch (err) {
-        else => "Something went wrong",
-    };
-}
-
 test "set value with no options should return null" {
     const map = ValueMap.init(testing.allocator);
     const exp_map = ExpirationMap.init(testing.allocator);
