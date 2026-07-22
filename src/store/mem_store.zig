@@ -1,5 +1,5 @@
 const std = @import("std");
-const Store = @import("store.zig");
+const Store = @import("interface.zig");
 const object = @import("../object.zig");
 const entry = @import("../entry.zig");
 const testing = std.testing;

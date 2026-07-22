@@ -1,4 +1,4 @@
-const Store = @import("store.zig");
+const Store = @import("interface.zig");
 const object = @import("../object.zig");
 
 const MockStore = @This();
