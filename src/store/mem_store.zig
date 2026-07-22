@@ -2,6 +2,7 @@ const std = @import("std");
 const Store = @import("interface.zig");
 const object = @import("../object.zig");
 const entry = @import("../entry.zig");
+const Request = @import("../commander/request.zig");
 const testing = std.testing;
 
 const MemoryStore = @This();
@@ -60,11 +61,11 @@ fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-fn set(ptr: *anyopaque, key: []const u8, value: []const u8) Store.Error!?object.Object {
+fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     // TODO: Accept options params and process them
-    if (self._map.getPtr(key)) |existing| {
-        const owned_value = try self._allocator.dupe(u8, value);
+    if (self._map.getPtr(req.key)) |existing| {
+        const owned_value = try self._allocator.dupe(u8, req.value);
 
         const old_value = existing.value;
         // TODO: Handle all types
@@ -74,10 +75,10 @@ fn set(ptr: *anyopaque, key: []const u8, value: []const u8) Store.Error!?object.
         return null;
     }
 
-    const owned_key = try self._allocator.dupe(u8, key);
+    const owned_key = try self._allocator.dupe(u8, req.key);
     errdefer self._allocator.free(owned_key);
 
-    const owned_value = try self._allocator.dupe(u8, value);
+    const owned_value = try self._allocator.dupe(u8, req.value);
     errdefer self._allocator.free(owned_value);
 
     self._map.put(owned_key, .{

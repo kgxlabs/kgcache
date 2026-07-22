@@ -1,5 +1,6 @@
 const Store = @import("interface.zig");
 const object = @import("../object.zig");
+const Request = @import("../commander/request.zig");
 
 const MockStore = @This();
 
@@ -35,11 +36,11 @@ fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
     return self.get_result;
 }
 
-fn set(ptr: *anyopaque, key: []const u8, value: []const u8) Store.Error!?object.Object {
+fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.set_calls += 1;
-    self.last_set_key = key;
-    self.last_set_value = value;
+    self.last_set_key = req.key;
+    self.last_set_value = req.value;
     return self.set_result;
 }
 
