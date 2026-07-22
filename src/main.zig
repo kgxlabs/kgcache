@@ -70,7 +70,7 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *stor
         };
         defer parser.deinit(allocator, commands);
 
-        const c = commander.init(commands) catch |err| {
+        const c = commander.init(allocator, commands) catch |err| {
             const err_value = commander.errorToRESPValue(err);
 
             const serialized_value = try serializer.serialize(allocator, err_value);
@@ -79,6 +79,7 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *stor
             try connection_writer.interface.writeAll(serialized_value);
             return;
         };
+        defer c.deinit();
 
         // TODO: There is a potential memory leak when error occurs.
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.

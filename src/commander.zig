@@ -1,8 +1,13 @@
 const std = @import("std");
 const resp = @import("resp.zig");
-const store = @import("store.zig");
-const object = @import("object.zig");
-const testing = std.testing;
+
+pub const Commander = @import("commander/interface.zig");
+pub const Command = @import("commander/command.zig");
+pub const Echo = @import("commander/echo.zig");
+pub const Get = @import("commander/get.zig");
+pub const Ping = @import("commander/ping.zig");
+pub const Set = @import("commander/set.zig");
+pub const Error = Commander.Error;
 
 const CommandKind = enum {
     command,
@@ -11,7 +16,7 @@ const CommandKind = enum {
     ping,
     set,
 
-    pub fn parse(keyword: []const u8) CommanderError!CommandKind {
+    fn parse(keyword: []const u8) Error!CommandKind {
         if (std.ascii.eqlIgnoreCase(keyword, "command")) return .command;
         if (std.ascii.eqlIgnoreCase(keyword, "echo")) return .echo;
         if (std.ascii.eqlIgnoreCase(keyword, "get")) return .get;
@@ -22,202 +27,29 @@ const CommandKind = enum {
     }
 };
 
-const CommanderError = error{
-    UnknownCommand,
-    UnsupportedKeyword,
-    UnsupportedArgumentType,
-    MalformedCommandRequest,
-    WrongNumberArguments,
-    UnableToConvertObject,
-};
-
-const Commander = union(enum) {
-    _command: CommandCommander,
-    _echo: EchoCommander,
-    _get: GetCommander,
-    _ping: PingCommander,
-    _set: SetCommander,
-
-    pub fn execute(self: Commander, data_store: *store.Store) CommanderError!resp.RESPValue {
-        return switch (self) {
-            ._command => |c| return c.execute(data_store),
-            ._echo => |c| return c.execute(data_store),
-            ._get => |c| return c.execute(data_store),
-            ._ping => |c| return c.execute(data_store),
-            ._set => |c| return c.execute(data_store),
-        };
-    }
-};
-
-const GetCommander = struct {
-    command: CommandKind,
-    arguments: []resp.RESPValue,
-
-    const Self = @This();
-
-    pub fn execute(self: *const Self, data_store: *store.Store) CommanderError!resp.RESPValue {
-        if (self.arguments.len == 0) {
-            return .{
-                // TODO: use error from error module after refactor
-                .simple_error = "Wrong number of arguments",
-            };
-        }
-
-        const key = try bulkstringFromArg(self.arguments[0]);
-        // TODO: Improve error message
-        const maybe_obj_value = data_store.get(key) catch return resp.RESPValue{ .simple_error = "Unable to get" };
-
-        if (maybe_obj_value == null) {
-            return resp.RESPValue{
-                .bulk_string = null,
-            };
-        }
-
-        const resp_value = object.toRESP(maybe_obj_value.?) catch return CommanderError.UnableToConvertObject;
-        return resp_value;
-    }
-};
-
-const SetCommander = struct {
-    command: CommandKind,
-    arguments: []resp.RESPValue,
-
-    const Self = @This();
-
-    pub fn execute(self: *const Self, data_store: *store.Store) CommanderError!resp.RESPValue {
-        if (self.arguments.len < 2) {
-            return CommanderError.WrongNumberArguments;
-        }
-        // TODO: extract options
-        // everything after key value pair must be supported options
-
-        const key = try bulkstringFromArg(self.arguments[0]);
-        const value = try bulkstringFromArg(self.arguments[1]);
-
-        const maybe_obj = data_store.set(key, value) catch |err| {
-            return resp.RESPValue{
-                .simple_error = store.errorToString(err),
-            };
-        };
-
-        if (maybe_obj == null) {
-            return resp.RESPValue{
-                .simple_string = "OK",
-            };
-        }
-
-        const obj = maybe_obj.?;
-
-        return object.toRESP(obj) catch {
-            return CommanderError.UnableToConvertObject;
-        };
-    }
-};
-
-const CommandCommander = struct {
-    command: CommandKind,
-    arguments: []resp.RESPValue,
-
-    const Self = @This();
-
-    pub fn execute(self: *const Self, _: *store.Store) CommanderError!resp.RESPValue {
-        if (self.arguments.len == 0) {
-            return .{
-                // TODO: use error from error module after refactor
-                .simple_error = "Wrong number of arguments",
-            };
-        }
-        // TODO: Implement introspection
-        return self.arguments[0];
-    }
-};
-
-const EchoCommander = struct {
-    command: CommandKind,
-    arguments: []resp.RESPValue,
-
-    const Self = @This();
-
-    pub fn execute(self: *const Self, _: *store.Store) CommanderError!resp.RESPValue {
-        if (self.arguments.len != 1) {
-            return .{
-                // TODO: use error from error module after refactor
-                .simple_error = "Wrong number of arguments",
-            };
-        }
-
-        const argument = self.arguments[0];
-
-        switch (argument) {
-            .bulk_string => |maybe_str| {
-                if (maybe_str == null) {
-                    return CommanderError.MalformedCommandRequest;
-                }
-
-                const str = maybe_str.?;
-                return .{ .bulk_string = str };
-            },
-            else => {
-                return CommanderError.UnsupportedArgumentType;
-            },
-        }
-    }
-};
-
-const PingCommander = struct {
-    command: CommandKind,
-    arguments: []resp.RESPValue,
-
-    const Self = @This();
-
-    pub fn execute(_: *const Self, _: *store.Store) CommanderError!resp.RESPValue {
-        return .{
-            .simple_string = "PONG",
-        };
-    }
-};
-
-pub fn init(value: resp.RESPValue) CommanderError!Commander {
-    const command = try parseKeyword(value);
+pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander {
+    const command_kind = try parseKeyword(value);
     const arguments = try parseArguments(value);
 
-    return switch (command) {
-        .command => {
-            return Commander{ ._command = CommandCommander{
-                .command = command,
-                .arguments = arguments,
-            } };
-        },
-        .echo => {
-            return Commander{ ._echo = EchoCommander{
-                .command = command,
-                .arguments = arguments,
-            } };
-        },
-        .get => {
-            return Commander{
-                ._get = GetCommander{
-                    .command = command,
-                    .arguments = arguments,
-                },
-            };
-        },
-        .ping => {
-            return Commander{ ._ping = PingCommander{
-                .command = command,
-                .arguments = arguments,
-            } };
-        },
-        .set => {
-            return Commander{ ._set = SetCommander{
-                .command = command,
-                .arguments = arguments,
-            } };
-        },
+    return switch (command_kind) {
+        .command => try create(Command, allocator, arguments),
+        .echo => try create(Echo, allocator, arguments),
+        .get => try create(Get, allocator, arguments),
+        .ping => try create(Ping, allocator, arguments),
+        .set => try create(Set, allocator, arguments),
     };
 }
 
-pub fn errorToRESPValue(err: CommanderError) resp.RESPValue {
+fn create(comptime T: type, allocator: std.mem.Allocator, arguments: []resp.RESPValue) Error!Commander {
+    const implementation = try allocator.create(T);
+    implementation.* = .{
+        .allocator = allocator,
+        .arguments = arguments,
+    };
+    return implementation.commander();
+}
+
+pub fn errorToRESPValue(err: Error) resp.RESPValue {
     return switch (err) {
         error.UnknownCommand => .{ .simple_error = "ERR unknown command" },
         error.UnsupportedKeyword => .{ .simple_error = "ERR unsupported command keyword" },
@@ -225,149 +57,49 @@ pub fn errorToRESPValue(err: CommanderError) resp.RESPValue {
         error.MalformedCommandRequest => .{ .simple_error = "ERR malformed command request" },
         error.WrongNumberArguments => .{ .simple_error = "ERR wrong number of arguments" },
         error.UnableToConvertObject => .{ .simple_error = "ERR unable to conver object" },
+        error.OutOfMemory => .{ .simple_error = "ERR out of memory" },
     };
 }
 
-fn parseKeyword(value: resp.RESPValue) CommanderError!CommandKind {
+fn parseKeyword(value: resp.RESPValue) Error!CommandKind {
     return switch (value) {
         .array => |maybe_commands| {
-            const commands = maybe_commands orelse return CommanderError.UnknownCommand;
+            const commands = maybe_commands orelse return error.UnknownCommand;
+            if (commands.len == 0) return error.MalformedCommandRequest;
 
-            if (commands.len == 0) {
-                return CommanderError.MalformedCommandRequest;
-            }
-
-            const keyword = commands[0];
-
-            return switch (keyword) {
-                .bulk_string => |maybe_keyword| {
-                    if (maybe_keyword == null) {
-                        return CommanderError.UnknownCommand;
-                    }
-                    return try CommandKind.parse(maybe_keyword.?);
-                },
-                else => {
-                    return CommanderError.UnsupportedKeyword;
-                },
+            return switch (commands[0]) {
+                .bulk_string => |maybe_keyword| CommandKind.parse(maybe_keyword orelse return error.UnknownCommand),
+                else => error.UnsupportedKeyword,
             };
         },
-        else => {
-            return CommanderError.UnknownCommand;
-        },
+        else => error.UnknownCommand,
     };
 }
 
-fn parseArguments(value: resp.RESPValue) CommanderError![]resp.RESPValue {
+fn parseArguments(value: resp.RESPValue) Error![]resp.RESPValue {
     return switch (value) {
-        .array => |maybe_command_req| {
-            if (maybe_command_req == null) {
-                return CommanderError.UnknownCommand;
-            }
+        .array => |maybe_request| {
+            const request = maybe_request orelse return error.UnknownCommand;
+            if (request.len == 0) return error.MalformedCommandRequest;
 
-            const command_req = maybe_command_req.?;
-
-            if (command_req.len <= 0) {
-                return CommanderError.MalformedCommandRequest;
-            }
-
-            const arguments = command_req[1..];
-
+            const arguments = request[1..];
             for (arguments) |argument| {
-                switch (argument) {
-                    .array => {
-                        return CommanderError.UnsupportedArgumentType;
-                    },
-                    else => {},
-                }
+                if (argument == .array) return error.UnsupportedArgumentType;
             }
-
             return arguments;
         },
-        else => {
-            return CommanderError.UnknownCommand;
-        },
+        else => error.UnknownCommand,
     };
-}
-
-fn bulkstringFromArg(arg: resp.RESPValue) CommanderError![]const u8 {
-    return switch (arg) {
-        .bulk_string => |maybe_str| {
-            const str = maybe_str orelse return CommanderError.MalformedCommandRequest;
-            return str;
-        },
-        else => return CommanderError.UnsupportedArgumentType,
-    };
-}
-
-test "execute ping command" {
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "PING" },
-    };
-
-    const c = try init(.{ .array = &values });
-    const result = try executeWithMemoryStore(c);
-
-    try expectSimpleString(result, "PONG");
-}
-
-test "execute echo command" {
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "ECHO" },
-        .{ .bulk_string = "hello" },
-    };
-
-    const c = try init(.{ .array = &values });
-    const result = try executeWithMemoryStore(c);
-
-    try expectBulkString(result, "hello");
 }
 
 test "reject unknown command" {
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "UNKNOWN" },
-    };
-
-    try testing.expectError(CommanderError.UnknownCommand, init(.{ .array = &values }));
+    const testing = std.testing;
+    var values = [_]resp.RESPValue{.{ .bulk_string = "UNKNOWN" }};
+    try testing.expectError(error.UnknownCommand, init(testing.allocator, .{ .array = &values }));
 }
 
 test "reject empty command array" {
+    const testing = std.testing;
     var values = [_]resp.RESPValue{};
-
-    try testing.expectError(CommanderError.MalformedCommandRequest, init(.{ .array = &values }));
-}
-
-test "reject unsupported argument type" {
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "ECHO" },
-        .{ .integer = 1 },
-    };
-
-    const c = try init(.{ .array = &values });
-
-    try testing.expectError(CommanderError.UnsupportedArgumentType, executeWithMemoryStore(c));
-}
-
-fn executeWithMemoryStore(c: Commander) CommanderError!resp.RESPValue {
-    var memory_store = store.MemoryStore.init(testing.allocator);
-    var data_store = memory_store.store();
-    defer data_store.deinit();
-
-    return c.execute(&data_store);
-}
-
-fn expectBulkString(value: resp.RESPValue, expected: []const u8) !void {
-    switch (value) {
-        .bulk_string => |maybe_value| {
-            const actual = maybe_value orelse return error.TestUnexpectedResult;
-            try testing.expectEqualStrings(expected, actual);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-fn expectSimpleString(value: resp.RESPValue, expected: []const u8) !void {
-    switch (value) {
-        .simple_string => |actual| try testing.expectEqualStrings(expected, actual),
-        else => return error.TestUnexpectedResult,
-    }
+    try testing.expectError(error.MalformedCommandRequest, init(testing.allocator, .{ .array = &values }));
 }
