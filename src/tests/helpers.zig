@@ -6,6 +6,10 @@ const commander = @import("../commander.zig");
 const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 
+pub fn initCommand(allocator: std.mem.Allocator, value: resp.RESPValue) commander.Error!commander.Commander {
+    return commander.init(allocator, value);
+}
+
 pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp.RESPValue {
     const testing = std.testing;
     defer command.deinit();

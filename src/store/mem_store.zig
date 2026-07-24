@@ -99,7 +99,7 @@ test "set stores a value and returns null" {
     const key = "foo";
     const value = "barz";
 
-    const set_value = try data_store.set(key, value);
+    const set_value = try data_store.set(.{ .key = key, .value = value });
 
     try testing.expect(set_value == null);
 
@@ -122,8 +122,8 @@ test "set replaces an existing value" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    _ = try data_store.set("key", "first");
-    const result = try data_store.set("key", "second");
+    _ = try data_store.set(.{ .key = "key", .value = "first" });
+    const result = try data_store.set(.{ .key = "key", .value = "second" });
 
     try testing.expect(result == null);
 
@@ -138,7 +138,7 @@ test "set owns the key and value bytes" {
 
     var key = [_]u8{ 'k', 'e', 'y' };
     var value = [_]u8{ 'o', 'n', 'e' };
-    _ = try data_store.set(&key, &value);
+    _ = try data_store.set(.{ .key = &key, .value = &value });
 
     @memset(&key, 'x');
     @memset(&value, 'x');

@@ -2,6 +2,7 @@ const std = @import("std");
 const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 const Commander = @import("interface.zig");
+const TestHelpers = @import("../tests/helpers.zig");
 
 const Ping = @This();
 
@@ -26,7 +27,7 @@ fn deinit(ptr: *anyopaque) void {
 test "execute ping command" {
     const testing = std.testing;
     var values = [_]resp.RESPValue{.{ .bulk_string = "PING" }};
-    const command = try commander.init(testing.allocator, .{ .array = &values });
+    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
     defer command.deinit();
 
     var memory_store = store.MemoryStore.init(testing.allocator);

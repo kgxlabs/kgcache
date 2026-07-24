@@ -40,7 +40,7 @@ test "execute echo command" {
         .{ .bulk_string = "hello" },
     };
 
-    const result = try TestHelpers.executeWithMemoryStore(try commander.init(testing.allocator, .{ .array = &values }));
+    const result = try TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values }));
     switch (result) {
         .bulk_string => |maybe_actual| try testing.expectEqualStrings("hello", maybe_actual orelse return error.TestUnexpectedResult),
         else => return error.TestUnexpectedResult,
@@ -56,6 +56,6 @@ test "reject unsupported argument type" {
 
     try testing.expectError(
         error.UnsupportedArgumentType,
-        TestHelpers.executeWithMemoryStore(try commander.init(testing.allocator, .{ .array = &values })),
+        TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values })),
     );
 }
