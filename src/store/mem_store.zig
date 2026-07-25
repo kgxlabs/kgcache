@@ -66,12 +66,20 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     // TODO: Accept options params and process them
     if (self._map.getPtr(req.key)) |existing| {
         const owned_value = try self._allocator.dupe(u8, req.value);
+        errdefer self._allocator.free(owned_value);
 
         const old_value = existing.value;
         // TODO: Handle all types
         existing.value = .{ .string = owned_value };
 
         self._allocator.free(old_value.string);
+
+        if (req.response != null and req.response.?.get) {
+            return object.Object{
+                .string = owned_value,
+            };
+        }
+
         return null;
     }
 
@@ -87,6 +95,12 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
         },
     }) catch return Store.Error.OutOfMemory;
 
+    if (req.response != null and req.response.?.get) {
+        return object.Object{
+            .string = owned_value,
+        };
+    }
+
     return null;
 }
 
@@ -96,15 +110,40 @@ test "set stores a value and returns null" {
 
     defer data_store.deinit();
 
-    const key = "foo";
-    const value = "barz";
-
-    const set_value = try data_store.set(.{ .key = key, .value = value });
+    const req: Request.SetRequest = .{
+        .key = "foo",
+        .value = "barz",
+        .condition = null,
+        .expiration = null,
+        .response = null,
+    };
+    const set_value = try data_store.set(req);
 
     try testing.expect(set_value == null);
 
-    const get_value = try data_store.get(key) orelse return error.TestUnexpectedResult;
-    try expectObjectString(get_value, value);
+    const get_value = try data_store.get(req.key) orelse return error.TestUnexpectedResult;
+    try expectObjectString(get_value, req.value);
+}
+
+test "set stores a value and returns value" {
+    var memory_store = testMemoryStore();
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    const req: Request.SetRequest = .{
+        .key = "foo",
+        .value = "barz",
+        .condition = null,
+        .expiration = null,
+        .response = .{ .get = true },
+    };
+
+    const set_value = try data_store.set(req);
+
+    try expectObjectString(set_value, req.value);
+
+    const get_value = try data_store.get(req.key) orelse return error.TestUnexpectedResult;
+    try expectObjectString(get_value, req.value);
 }
 
 test "get returns null for a missing key" {
@@ -122,8 +161,24 @@ test "set replaces an existing value" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    _ = try data_store.set(.{ .key = "key", .value = "first" });
-    const result = try data_store.set(.{ .key = "key", .value = "second" });
+    const first_req: Request.SetRequest = .{
+        .key = "key",
+        .value = "first",
+        .condition = null,
+        .expiration = null,
+        .response = null,
+    };
+    _ = try data_store.set(first_req);
+
+    const second_req: Request.SetRequest = .{
+        .key = "key",
+        .value = "second",
+        .condition = null,
+        .expiration = null,
+        .response = null,
+    };
+
+    const result = try data_store.set(second_req);
 
     try testing.expect(result == null);
 
@@ -138,7 +193,15 @@ test "set owns the key and value bytes" {
 
     var key = [_]u8{ 'k', 'e', 'y' };
     var value = [_]u8{ 'o', 'n', 'e' };
-    _ = try data_store.set(.{ .key = &key, .value = &value });
+
+    const req: Request.SetRequest = .{
+        .key = &key,
+        .value = &value,
+        .condition = null,
+        .expiration = null,
+        .response = null,
+    };
+    _ = try data_store.set(req);
 
     @memset(&key, 'x');
     @memset(&value, 'x');
@@ -147,7 +210,9 @@ test "set owns the key and value bytes" {
     try expectObjectString(stored_value, "one");
 }
 
-fn expectObjectString(value: object.Object, expected: []const u8) !void {
+fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {
+    const value = maybe_value orelse return error.Null;
+
     switch (value) {
         .string => |str| {
             try testing.expectEqualStrings(expected, str);
