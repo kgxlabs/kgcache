@@ -11,6 +11,8 @@ pub const Error = std.mem.Allocator.Error || error{
     MalformedCommandRequest,
     WrongNumberArguments,
     UnableToConvertObject,
+    UnsupportedOption,
+    Syntax,
 };
 
 ptr: *anyopaque,

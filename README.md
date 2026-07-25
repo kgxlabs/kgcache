@@ -1,28 +1,25 @@
 # kgcache
 
-A Redis-like cache server written in Zig.
+`kgcache` is a small Redis-protocol-compatible, in-memory cache server written in Zig. It listens on `127.0.0.1:6379` and currently supports storing and retrieving string values over RESP2.
 
-`kgcache` is part of the broader [`kgx`](https://github.com/kgxlabs) project, alongside sibling projects such as [`kghttp`](https://github.com/kgxlabs/kghttp), which is a HTTP layer built from scratch. The goal is to build a small, understandable cache/database server from first principles while growing toward broad Redis compatibility over time.
+It is an early-stage project in the [`kgx`](https://github.com/kgxlabs) family. The implementation favors a small, inspectable codebase while command and protocol compatibility grow incrementally.
 
-This project is early-stage. The current code focuses on RESP parsing/serialization, TCP request handling, command dispatch, and the first command/object abstractions.
+## Current capabilities
 
-## Current Status
-
-| Area | Status | Notes |
-|------|--------|-------|
-| TCP server | **Started** | Listens on `127.0.0.1:6379` and handles each accepted connection in a thread |
-| RESP protocol | **Started** | Parses arrays, bulk strings, simple strings, integers, simple errors, and null bulk strings |
-| RESP serialization | **Started** | Serializes bulk strings, simple strings, integers, errors, and basic arrays |
-| Commands | **Partial** | `PING`, `ECHO`, and minimal `COMMAND` behavior are wired; `GET` and `SET` are not yet complete |
-| Store | **Stub** | Store shape exists, but real key/value storage is still planned |
-| Object model | **Started** | String object support exists; more Redis data types are planned |
-| CLI client | **Planned** | `kgcache-cli` will provide a first-party command-line client for talking to `kgcache` |
+| Area | Available behavior |
+| --- | --- |
+| Server | TCP server on `127.0.0.1:6379`; each connection is handled on a detached thread |
+| Storage | Process-local, in-memory string key/value store backed by `StringHashMap` |
+| Commands | `PING`, `ECHO`, `GET`, and `SET`; command names are case-insensitive |
+| RESP | Parses RESP2 arrays, bulk strings (including null), simple strings, integers, and errors; serializes the same value types |
+| Errors | Returns RESP error replies for malformed requests and unsupported commands or argument types |
 
 ## Requirements
 
-- Zig **0.16.0** or newer
+- Zig 0.16.0 or newer
+- Optional: `redis-cli` for the examples below
 
-## Getting Started
+## Run it
 
 Build the server:
 
@@ -30,69 +27,79 @@ Build the server:
 zig build
 ```
 
-Run the server:
+Run it:
 
 ```bash
 zig build run
 ```
 
-In another shell, send RESP commands with `redis-cli`:
+The installed executable is named `main` and is written to `zig-out/bin/main`.
+
+In another terminal, use a RESP-compatible client such as `redis-cli`:
 
 ```bash
-redis-cli ping
-redis-cli echo hello
+redis-cli PING
+# PONG
+
+redis-cli SET greeting hello
+# OK
+
+redis-cli GET greeting
+# "hello"
+
+redis-cli GET missing
+# (nil)
+
+redis-cli ECHO hello
+# "hello"
 ```
 
-Run the current tests:
+The values live only for the lifetime of the server process.
+
+## Command behavior
+
+| Command | Current behavior |
+| --- | --- |
+| `PING` | Responds with the simple string `PONG`. Arguments are currently ignored. |
+| `ECHO <message>` | Returns `<message>` as a bulk string. Exactly one non-null bulk-string argument is required. |
+| `SET <key> <value>` | Stores a string value and returns `OK`. Extra arguments are currently ignored; conditional and expiration options are not implemented. |
+| `GET <key>` | Returns the stored bulk string, or a null bulk string when the key does not exist. Extra arguments are currently ignored. |
+| `COMMAND <value>` | Placeholder only: returns its first argument; no Redis command introspection is implemented. |
+
+## Development
+
+Run the project test step:
 
 ```bash
-zig test src/root.zig
+zig build test
 ```
 
-## Repository Layout
+The source tree contains tests for RESP parsing and serialization, command dispatch, and the in-memory store.
+
+## Repository layout
 
 ```text
 .
-├── build.zig              # Zig build configuration
+├── build.zig
 ├── src/
-│   ├── main.zig           # TCP server entry point
-│   ├── resp.zig           # RESP parser and serializer
-│   ├── commander.zig      # Command parsing and execution
-│   ├── store.zig          # Store interface and current stub
-│   ├── object.zig         # Internal object model
-│   ├── entry.zig          # Store entry type
-│   ├── string.zig         # String helpers
-│   └── map/Map.zig        # Future map implementation area
+│   ├── main.zig              # TCP server and connection loop
+│   ├── resp.zig              # RESP parser, serializer, and protocol errors
+│   ├── commander.zig         # Command dispatch
+│   ├── commander/            # PING, ECHO, GET, SET, and command abstractions
+│   ├── store/                # Store interface, in-memory store, and mock store
+│   ├── object.zig            # Internal string object representation
+│   └── tests.zig             # Test entry point
 └── README.md
 ```
 
-## Future Plan
+## Current limitations
 
-The long-term plan is to include almost everything Redis includes, while keeping the implementation readable and incremental. Compatibility should grow feature by feature instead of hiding unfinished behavior behind broad claims.
-
-Planned areas:
-
-- Core key/value commands: `GET`, `SET`, `DEL`, `EXISTS`, `EXPIRE`, `TTL`, `INCR`, `DECR`, and related variants
-- First-party client: `kgcache-cli` for interactive use, scripting, debugging, and local development
-- Redis data types: strings, lists, hashes, sets, sorted sets, streams, bitmaps, hyperloglogs, and geospatial indexes
-- Command coverage: broad command support across data structures, server introspection, configuration, client handling, and admin commands
-- Protocol support: more complete RESP2 behavior, RESP3 support, pipelining, and improved client compatibility
-- Storage engine: real in-memory storage, expiration handling, memory accounting, eviction policies, and object encoding strategies
-- Persistence: RDB-style snapshots, append-only file behavior, rewrite/compaction, and recovery on startup
-- Replication: primary/replica mode, synchronization, backlog handling, and failover-ready internals
-- Pub/sub: channel subscriptions, pattern subscriptions, and sharded pub/sub behavior
-- Transactions and scripting: `MULTI`/`EXEC`, optimistic locking, Lua-compatible scripting or an equivalent scripting layer
-- Clustering: hash slots, cluster metadata, redirects, resharding foundations, and multi-node operation
-- Observability: logging, metrics, slow logs, command stats, latency tracking, and debug tooling
-- Reliability: fuzz tests for RESP, command conformance tests, integration tests with Redis clients, and benchmarks
-
-## Philosophy
-
-- **Redis-compatible over Redis-shaped** - behavior should match client expectations, not only command names
-- **Incremental correctness** - ship small features with tests before widening the surface area
-- **Readable internals** - this is part of `kgx`, so the implementation should be easy to inspect and learn from
-- **Performance-aware** - use Zig's control over memory and I/O deliberately, but keep clarity first while the design is still forming
+- Only in-memory string values are supported; data is not persisted.
+- No expiration, eviction, transactions, pub/sub, replication, clustering, authentication, or RESP3 support.
+- The server uses a fixed 1 KiB read buffer and handles one parsed request per read, so pipelining and requests split across reads are not supported yet.
+- Command argument validation is intentionally incomplete for `PING`, `GET`, and `SET`.
+- The built-in `COMMAND` handler is a placeholder, not Redis-compatible introspection.
 
 ## License
 
-No license file is included yet.
+No license file is currently included.
