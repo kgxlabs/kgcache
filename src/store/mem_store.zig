@@ -7,7 +7,7 @@ const testing = std.testing;
 
 const MemoryStore = @This();
 
-const ValueMap = std.StringHashMap(entry.ObjectEntry);
+const ValueMap = std.StringHashMap(entry.Object);
 const ExpirationMap = std.StringHashMap(entry.ObjectExpirationMs);
 
 _allocator: std.mem.Allocator,
