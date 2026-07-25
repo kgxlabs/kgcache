@@ -65,6 +65,10 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     // TODO: Accept options params and process them
     if (self._map.getPtr(req.key)) |existing| {
+        if (shouldSkipIfExist(req.condition)) {
+            return makeSetResponse(req, existing.value);
+        }
+
         const owned_value = try self._allocator.dupe(u8, req.value);
         errdefer self._allocator.free(owned_value);
 
@@ -73,14 +77,11 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
         existing.value = .{ .string = owned_value };
 
         self._allocator.free(old_value.string);
+        return makeSetResponse(req, existing.value);
+    }
 
-        if (req.response != null and req.response.?.get) {
-            return object.Object{
-                .string = owned_value,
-            };
-        }
-
-        return null;
+    if (shouldSkipIfNotExist(req.condition)) {
+        return makeSetResponse(req, null);
     }
 
     const owned_key = try self._allocator.dupe(u8, req.key);
@@ -89,16 +90,40 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const owned_value = try self._allocator.dupe(u8, req.value);
     errdefer self._allocator.free(owned_value);
 
+    const value: object.Object = .{
+        .string = owned_value,
+    };
+
     self._map.put(owned_key, .{
-        .value = .{
-            .string = owned_value,
-        },
+        .value = value,
     }) catch return Store.Error.OutOfMemory;
 
+    return makeSetResponse(req, value);
+}
+
+fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
+    if (maybe_condition) |condition| {
+        if (std.meta.activeTag(condition) == .nx) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn shouldSkipIfNotExist(maybe_condition: ?Request.SetCondition) bool {
+    if (maybe_condition) |condition| {
+        if (std.meta.activeTag(condition) == .xx) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Object {
     if (req.response != null and req.response.?.get) {
-        return object.Object{
-            .string = owned_value,
-        };
+        return value;
     }
 
     return null;
