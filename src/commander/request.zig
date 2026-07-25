@@ -3,9 +3,10 @@ pub const SetRequest = struct {
     value: []const u8,
     condition: ?SetCondition,
     expiration: ?SetExpiration,
-    // NOTE: may be when redis adds more response related options, we will make this SetResponse tagged union as well
-    // But for now, this is enough
-    get: bool = false,
+    // NOTE: This could be overkill since for `SET` command we will only ever get `GET` response option
+    // I am doing this way for purely consistency
+    // TODO: Refactor if I find a better alternative
+    response: ?SetResponse,
 };
 
 pub const SetCondition = union(enum) {
@@ -24,4 +25,8 @@ pub const SetExpiration = union(enum) {
     pxat: u64,
     // we don't need any value since we are goona keep the existing TTL
     keepttl: void,
+};
+
+pub const SetResponse = union(enum) {
+    get: bool,
 };

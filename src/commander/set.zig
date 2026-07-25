@@ -55,7 +55,7 @@ fn bind(argv: []resp.RESPValue) Commander.Error!Request.SetRequest {
         .value = "",
         .condition = null,
         .expiration = null,
-        .get = false,
+        .response = null,
     };
 
     if (argv.len < schema.required) {
@@ -73,11 +73,30 @@ fn bind(argv: []resp.RESPValue) Commander.Error!Request.SetRequest {
         const keyword = try command_arguments.bulkString(argv[pos]);
         const definition = Schema.Set.Options.get(keyword) orelse return Commander.Error.Syntax;
 
-        // Validate
+        // Validate , Consume and Apply
+        // NOTE: For `SET` command all the possible option groups are non-repeatable
+        const consumed = switch (definition.group) {
+            .condition => blk: {
+                if (req.condition != null)
+                    return Commander.Error.Syntax;
 
-        // Consume
+                break :blk Schema.Set.apply(&req, definition, &.{}) catch return Commander.Error.UnsupportedOption;
+            },
+            .expiration => blk: {
+                if (req.expiration != null)
+                    return Commander.Error.Syntax;
 
-        // Apply
+                break :blk Schema.Set.apply(&req, definition, &.{}) catch return Commander.Error.UnsupportedOption;
+            },
+            .response => blk: {
+                if (req.response != null)
+                    return Commander.Error.Syntax;
+
+                break :blk Schema.Set.apply(&req, definition, &.{}) catch return Commander.Error.UnsupportedOption;
+            },
+        };
+
+        pos += consumed;
     }
 
     return req;

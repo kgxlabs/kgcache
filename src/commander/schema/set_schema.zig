@@ -27,22 +27,29 @@ const get_def = Interface.OptionDefinition{
     .keyword = "GET",
     .arity = 0,
     .group = .response,
+    .repeatable = false,
 };
 
-pub fn apply(req: *Request.SetRequest, def: *const Interface.OptionDefinition, _: []const []const u8) !void {
-    if (KGHelpers.eqlStringIgnoreCase(def.*.keyword, nx_def.keyword)) {
+pub fn apply(req: *Request.SetRequest, def: *const Interface.OptionDefinition, _: []const []const u8) !usize {
+    if (KGHelpers.eqlStringIgnoreCase(def.keyword, nx_def.keyword)) {
         req.condition = .nx;
-        return;
+        return 1;
     }
 
-    if (KGHelpers.eqlStringIgnoreCase(def.*.keyword, xx_def.keyword)) {
+    if (KGHelpers.eqlStringIgnoreCase(def.keyword, xx_def.keyword)) {
         req.condition = .xx;
-        return;
+        return 1;
     }
 
-    if (KGHelpers.eqlStringIgnoreCase(def.*.keyword, get_def.keyword)) {
-        req.get = true;
-        return;
+    if (KGHelpers.eqlStringIgnoreCase(def.keyword, get_def.keyword)) {
+        if (req.response == null) {
+            req.response = Request.SetResponse{
+                .get = false,
+            };
+        }
+
+        req.response.?.get = true;
+        return 1;
     }
 
     unreachable;

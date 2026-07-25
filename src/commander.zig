@@ -58,6 +58,7 @@ pub fn errorToRESPValue(err: Error) resp.RESPValue {
         error.WrongNumberArguments => .{ .simple_error = "ERR wrong number of arguments" },
         error.UnableToConvertObject => .{ .simple_error = "ERR unable to conver object" },
         error.OutOfMemory => .{ .simple_error = "ERR out of memory" },
+        error.UnsupportedOption => .{ .simple_error = "ERR unsupported option" },
         error.Syntax => .{ .simple_error = "ERR syntax error" },
     };
 }
