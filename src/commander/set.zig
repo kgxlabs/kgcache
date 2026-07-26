@@ -6,6 +6,7 @@ const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 const Request = @import("request.zig");
 const Schema = @import("schema.zig");
+const time = @import("../time.zig");
 
 const Set = @This();
 
@@ -24,7 +25,8 @@ const vtable = Commander.VTable{
 fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store) Commander.Error!resp.RESPValue {
     const self: *Set = @ptrCast(@alignCast(ptr));
 
-    const req = try bind(self.arguments);
+    const now_ms = std.Io.Clock.real.now(io).toMilliseconds();
+    const req = try bind(self.arguments, now_ms);
     const maybe_object = data_store.set(io, req) catch |err| {
         return .{ .simple_error = store.errorToString(err) };
     };
@@ -48,14 +50,15 @@ const schema: Schema.Interface.SchemaDefinition = .{
     },
 };
 
-fn bind(argv: []resp.RESPValue) Commander.Error!Request.SetRequest {
+fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) Commander.Error!Request.SetRequest {
     var pos: usize = 0;
     var req: Request.SetRequest = .{
         .key = "",
         .value = "",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
         .response = null,
+        .keepttl = false,
     };
 
     if (argv.len < schema.required) {
@@ -80,19 +83,19 @@ fn bind(argv: []resp.RESPValue) Commander.Error!Request.SetRequest {
                 if (req.condition != null)
                     return Commander.Error.Syntax;
 
-                break :blk Schema.Set.apply(&req, definition, &.{}) catch return Commander.Error.UnsupportedOption;
+                break :blk Schema.Set.apply(&req, definition, argv[pos..], now_ms) catch return Commander.Error.UnsupportedOption;
             },
             .expiration => blk: {
-                if (req.expiration != null)
+                if (req.expires_at != null or req.keepttl)
                     return Commander.Error.Syntax;
 
-                break :blk Schema.Set.apply(&req, definition, &.{}) catch return Commander.Error.UnsupportedOption;
+                break :blk Schema.Set.apply(&req, definition, argv[pos..], now_ms) catch return Commander.Error.UnsupportedOption;
             },
             .response => blk: {
                 if (req.response != null)
                     return Commander.Error.Syntax;
 
-                break :blk Schema.Set.apply(&req, definition, &.{}) catch return Commander.Error.UnsupportedOption;
+                break :blk Schema.Set.apply(&req, definition, argv[pos..], now_ms) catch return Commander.Error.UnsupportedOption;
             },
         };
 

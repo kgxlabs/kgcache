@@ -2,6 +2,7 @@ const std = @import("std");
 const Storage = @import("interface.zig");
 const entry = @import("../entry.zig");
 const object = @import("../object.zig");
+const time = @import("../time.zig");
 
 const DefaultStorage = @This();
 
@@ -75,7 +76,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     return value;
 }
 
-pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, _: ?entry.ObjectExpirationMs) Storage.Error!entry.Object {
+pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, expires_at: ?time.UnixMs) Storage.Error!entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
 
     const string_value = switch (value) {
@@ -87,7 +88,39 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, _: ?entry.Obj
         errdefer self._allocator.free(owned_value);
 
         const old_value = existing.value;
+
+        // no expiration set and no existing expiration
+        if (expires_at == null and existing.exp_index != null) {
+            swapRemoveExpiration(self, existing);
+            existing.exp_index = null;
+        }
+
+        // update if expiration set and existing expiration
+        if (expires_at != null and existing.exp_index != null) {
+            const last_index: usize = @intCast(self._expirables.items.len);
+            if (existing.exp_index.? > last_index) {
+                unreachable;
+            }
+
+            self._expirables.items[existing.exp_index.?].expires_at = expires_at.?;
+        }
+
+        // Append new if expiration set but no existing expiration
+        if (expires_at != null and existing.exp_index == null) {
+            const stored_key_ptr = self._entry_map.getKeyPtr(key) orelse unreachable;
+            const stored_key = stored_key_ptr.*;
+
+            self._expirables.append(self._allocator, .{
+                .key = stored_key,
+                .expires_at = expires_at.?,
+            }) catch return Storage.Error.OutOfMemory;
+
+            const index: usize = @intCast(self._expirables.items.len - 1);
+            existing.exp_index = @intCast(index);
+        }
+
         // TODO: Handle all types
+        // NOTE: Setting map only after all the fallible work to make sure that allocation failure does not cause corruption on existing value.
         existing.value = .{ .string = owned_value };
 
         self._allocator.free(old_value.string);
@@ -100,12 +133,18 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, _: ?entry.Obj
     const owned_value = try self._allocator.dupe(u8, string_value);
     errdefer self._allocator.free(owned_value);
 
-    const entry_object: entry.Object = .{
-        .value = .{
-            .string = owned_value,
-        },
+    var entry_object: entry.Object = .{
+        .value = .{ .string = owned_value },
         .exp_index = null,
     };
+
+    if (expires_at) |expires_ms| {
+        self._expirables.append(self._allocator, .{ .key = owned_key, .expires_at = expires_ms }) catch return Storage.Error.OutOfMemory;
+        errdefer _ = self._expirables.pop();
+
+        const index: usize = @intCast(self._expirables.items.len - 1);
+        entry_object.exp_index = @intCast(index);
+    }
 
     self._entry_map.put(owned_key, entry_object) catch return Storage.Error.OutOfMemory;
 
@@ -120,13 +159,35 @@ pub fn getExp(_: *anyopaque, _: []const u8) Storage.Error!?entry.ObjectExpiratio
     return null;
 }
 
-pub fn setExp(_: *anyopaque, _: []const u8, _: ?entry.ObjectExpirationMs) Storage.Error!entry.ObjectExpiration {
+pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {
     return entry.ObjectExpiration{
         .key = "foo",
-        .expiration_ms = 1785000509089,
+        .expires_at = 1785000509089,
     };
 }
 
 pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
     return;
+}
+
+// Move the last item to index and overwrite it and then pop the last item hole
+// NOTE: This is not a actual swap but rather make the hole and pop it
+fn swapRemoveExpiration(ptr: *anyopaque, entry_object: *entry.Object) void {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    const index: usize = @intCast(entry_object.exp_index orelse return);
+    const last_index = self._expirables.items.len - 1;
+
+    // If we have invalid index, that means our bookkeeping is broken
+    if (index > last_index) unreachable;
+
+    if (index != last_index) {
+        const moved = self._expirables.items[last_index];
+        self._expirables.items[index] = moved;
+
+        const moved_entry = self._entry_map.getPtr(moved.key) orelse unreachable;
+        moved_entry.exp_index = @intCast(index);
+    }
+
+    _ = self._expirables.pop();
+    entry_object.exp_index = null;
 }

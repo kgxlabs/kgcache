@@ -73,7 +73,7 @@ fn set(ptr: *anyopaque, io: std.Io, req: Request.SetRequest) Store.Error!?object
 
     const stored_entry = try self._storage.put(req.key, .{
         .string = req.value,
-    }, null);
+    }, req.expires_at);
 
     return makeSetResponse(req, stored_entry.value);
 }
@@ -126,7 +126,8 @@ test "set stores a value and returns null" {
         .key = "foo",
         .value = "barz",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
     const set_value = try data_store.set(testing.io, req);
@@ -147,7 +148,8 @@ test "set stores a value and returns value" {
         .key = "foo",
         .value = "barz",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = .{ .get = true },
     };
 
@@ -180,7 +182,8 @@ test "set replaces an existing value" {
         .key = "key",
         .value = "first",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
     _ = try data_store.set(testing.io, first_req);
@@ -189,7 +192,8 @@ test "set replaces an existing value" {
         .key = "key",
         .value = "second",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
 
@@ -211,14 +215,16 @@ test "set with NX does not replace an existing value" {
         .key = "key",
         .value = "first",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     });
     _ = try data_store.set(testing.io, .{
         .key = "key",
         .value = "second",
         .condition = .nx,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     });
 
@@ -236,7 +242,8 @@ test "set with XX does not create a missing value" {
         .key = "missing",
         .value = "value",
         .condition = .xx,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     });
 
@@ -256,7 +263,8 @@ test "set owns the key and value bytes" {
         .key = &key,
         .value = &value,
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
     _ = try data_store.set(testing.io, req);
