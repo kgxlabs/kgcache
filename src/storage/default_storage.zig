@@ -5,7 +5,16 @@ const object = @import("../object.zig");
 
 const DefaultStorage = @This();
 
+// Each entry stores an expiration-list index even when it is `null`; see
+// `entry.Object.exp_index`. On this 64-bit target the value is 24 bytes. This
+// is only the map value: `StringHashMap` also stores the key slice, metadata,
+// and unused capacity required by its load factor.
 const EntryObjectMap = std.StringHashMap(entry.Object);
+
+// An expiration record is exactly 24 bytes on this 64-bit target: a 16-byte
+// key slice (pointer + length) and an 8-byte millisecond timestamp. `ArrayList`
+// allocates by capacity, so unused reserved slots consume the same 24 bytes.
+// Only keys with an expiration need an entry in this list.
 const Expirables = std.ArrayList(entry.ObjectExpiration);
 
 _allocator: std.mem.Allocator,
