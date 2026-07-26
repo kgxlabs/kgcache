@@ -2,11 +2,11 @@ const std = @import("std");
 const resp = @import("resp.zig");
 const commander = @import("commander.zig");
 const store = @import("store.zig");
+const DefaultStorage = @import("storage/default_storage.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
     try std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, "Logs from your program will appear here!\n");
 
     const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 6379);
@@ -20,9 +20,12 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = gpa.allocator();
 
-    var mem_store = store.MemoryStore.init(allocator);
+    var default_storage = DefaultStorage.init(allocator);
+    var mem_store = store.MemoryStore.init(default_storage.storage());
     var data_store = mem_store.store();
 
+    // `MemoryStore` owns the storage interface, so `data_store.deinit()` also
+    // deinitializes `default_storage`. Do not deinitialize it separately.
     defer data_store.deinit();
 
     try listen(io, &server, &data_store);
@@ -84,7 +87,7 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *stor
         // TODO: There is a potential memory leak when error occurs.
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
         // How do we handle that scenario to free the memory?
-        const result = c.execute(data_store) catch |err| {
+        const result = c.execute(io, data_store) catch |err| {
             const err_value = commander.errorToRESPValue(err);
 
             const serialized_value = try serializer.serialize(allocator, err_value);

@@ -4,16 +4,18 @@ const std = @import("std");
 const commander = @import("../commander.zig");
 const resp = @import("../resp.zig");
 const store = @import("../store.zig");
+const DefaultStorage = @import("../storage/default_storage.zig");
 
 pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp.RESPValue {
     const testing = std.testing;
     defer command.deinit();
 
-    var memory_store = store.MemoryStore.init(testing.allocator);
+    var default_storage = DefaultStorage.init(testing.allocator);
+    var memory_store = store.MemoryStore.init(default_storage.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    return command.execute(&data_store);
+    return command.execute(testing.io, &data_store);
 }
 
 pub fn initCommand(allocator: std.mem.Allocator, value: resp.RESPValue) commander.Error!commander.Commander {

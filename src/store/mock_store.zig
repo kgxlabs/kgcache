@@ -29,14 +29,14 @@ const vtable = Store.VTable{
     .deinit = deinit,
 };
 
-fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
+fn get(ptr: *anyopaque, _: @import("std").Io, key: []const u8) Store.Error!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.get_calls += 1;
     self.last_get_key = key;
     return self.get_result;
 }
 
-fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
+fn set(ptr: *anyopaque, _: @import("std").Io, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.set_calls += 1;
     self.last_set_key = req.key;

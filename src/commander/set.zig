@@ -21,11 +21,11 @@ const vtable = Commander.VTable{
     .deinit = deinit,
 };
 
-fn execute(ptr: *anyopaque, data_store: *store.Store) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store) Commander.Error!resp.RESPValue {
     const self: *Set = @ptrCast(@alignCast(ptr));
 
     const req = try bind(self.arguments);
-    const maybe_object = data_store.set(req) catch |err| {
+    const maybe_object = data_store.set(io, req) catch |err| {
         return .{ .simple_error = store.errorToString(err) };
     };
 

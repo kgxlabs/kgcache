@@ -16,7 +16,7 @@ pub fn commander(self: *Get) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, data_store: *store.Store) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store) Commander.Error!resp.RESPValue {
     const self: *Get = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 0) {
@@ -24,7 +24,7 @@ fn execute(ptr: *anyopaque, data_store: *store.Store) Commander.Error!resp.RESPV
     }
 
     const key = try command_arguments.bulkString(self.arguments[0]);
-    const maybe_object = data_store.get(key) catch return .{ .simple_error = "Unable to get" };
+    const maybe_object = data_store.get(io, key) catch return .{ .simple_error = "Unable to get" };
 
     if (maybe_object == null) {
         return .{ .bulk_string = null };
