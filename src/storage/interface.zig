@@ -5,6 +5,8 @@ const time = @import("../time.zig");
 
 pub const Error = error{
     OutOfMemory,
+    InvalidIndex,
+    UnableToExpire,
 };
 
 const Storage = @This();
@@ -12,9 +14,14 @@ const Storage = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 
+pub const PutOptions = struct {
+    expires_at: ?time.UnixMs,
+    keepttl: bool = false,
+};
+
 pub const VTable = struct {
     get: *const fn (*anyopaque, []const u8) Error!?entry.Object,
-    put: *const fn (*anyopaque, []const u8, object.Object, ?time.UnixMs) Error!entry.Object,
+    put: *const fn (*anyopaque, []const u8, object.Object, PutOptions) Error!entry.Object,
     remove: *const fn (*anyopaque, []const u8) Error!void,
     getExp: *const fn (*anyopaque, []const u8) Error!?entry.ObjectExpiration,
     setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
@@ -26,8 +33,8 @@ pub fn get(self: Storage, key: []const u8) Error!?entry.Object {
     return self.vtable.get(self.ptr, key);
 }
 
-pub fn put(self: Storage, key: []const u8, entry_object: object.Object, expires_at: ?time.UnixMs) Error!entry.Object {
-    return self.vtable.put(self.ptr, key, entry_object, expires_at);
+pub fn put(self: Storage, key: []const u8, entry_object: object.Object, options: PutOptions) Error!entry.Object {
+    return self.vtable.put(self.ptr, key, entry_object, options);
 }
 
 pub fn remove(self: Storage, key: []const u8) Error!void {

@@ -19,6 +19,7 @@ const EntryObjectMap = std.StringHashMap(entry.Object);
 const Expirables = std.ArrayList(entry.ObjectExpiration);
 
 _allocator: std.mem.Allocator,
+_io: std.Io,
 _entry_map: EntryObjectMap,
 _expirables: Expirables,
 
@@ -40,10 +41,12 @@ pub fn storage(self: *DefaultStorage) Storage {
 }
 
 pub fn init(
+    io: std.Io,
     allocator: std.mem.Allocator,
 ) DefaultStorage {
     return .{
         ._allocator = allocator,
+        ._io = io,
         ._entry_map = EntryObjectMap.init(allocator),
         ._expirables = .empty,
     };
@@ -72,11 +75,17 @@ pub fn deinit(ptr: *anyopaque) void {
 
 pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    const is_removed = maybeExpire(self, key) catch return Storage.Error.UnableToExpire;
+    if (is_removed) {
+        return null;
+    }
+
     const value = self._entry_map.get(key) orelse return null;
+
     return value;
 }
 
-pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, expires_at: ?time.UnixMs) Storage.Error!entry.Object {
+pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
 
     const string_value = switch (value) {
@@ -90,29 +99,33 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, expires_at: ?
         const old_value = existing.value;
 
         // no expiration set and no existing expiration
-        if (expires_at == null and existing.exp_index != null) {
-            swapRemoveExpiration(self, existing);
+        // only update if keepttl is false
+        if (options.expires_at == null and existing.exp_index != null and !options.keepttl) {
+            try swapRemoveExpiration(self, existing);
             existing.exp_index = null;
         }
 
+        //NOTE: we dont need to handle expiration set and existing expiration since it is invalid option stacking and
+        //it should be handled at the set commander validation layer
+
         // update if expiration set and existing expiration
-        if (expires_at != null and existing.exp_index != null) {
-            const last_index: usize = @intCast(self._expirables.items.len);
+        if (options.expires_at != null and existing.exp_index != null) {
+            const last_index: usize = @intCast(self._expirables.items.len - 1);
             if (existing.exp_index.? > last_index) {
                 unreachable;
             }
 
-            self._expirables.items[existing.exp_index.?].expires_at = expires_at.?;
+            self._expirables.items[existing.exp_index.?].expires_at = options.expires_at.?;
         }
 
         // Append new if expiration set but no existing expiration
-        if (expires_at != null and existing.exp_index == null) {
+        if (options.expires_at != null and existing.exp_index == null) {
             const stored_key_ptr = self._entry_map.getKeyPtr(key) orelse unreachable;
             const stored_key = stored_key_ptr.*;
 
             self._expirables.append(self._allocator, .{
                 .key = stored_key,
-                .expires_at = expires_at.?,
+                .expires_at = options.expires_at.?,
             }) catch return Storage.Error.OutOfMemory;
 
             const index: usize = @intCast(self._expirables.items.len - 1);
@@ -138,7 +151,7 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, expires_at: ?
         .exp_index = null,
     };
 
-    if (expires_at) |expires_ms| {
+    if (options.expires_at) |expires_ms| {
         self._expirables.append(self._allocator, .{ .key = owned_key, .expires_at = expires_ms }) catch return Storage.Error.OutOfMemory;
         errdefer _ = self._expirables.pop();
 
@@ -172,13 +185,12 @@ pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
 
 // Move the last item to index and overwrite it and then pop the last item hole
 // NOTE: This is not a actual swap but rather make the hole and pop it
-fn swapRemoveExpiration(ptr: *anyopaque, entry_object: *entry.Object) void {
-    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) !void {
     const index: usize = @intCast(entry_object.exp_index orelse return);
     const last_index = self._expirables.items.len - 1;
 
     // If we have invalid index, that means our bookkeeping is broken
-    if (index > last_index) unreachable;
+    if (index < 0 or index > last_index) unreachable;
 
     if (index != last_index) {
         const moved = self._expirables.items[last_index];
@@ -190,4 +202,36 @@ fn swapRemoveExpiration(ptr: *anyopaque, entry_object: *entry.Object) void {
 
     _ = self._expirables.pop();
     entry_object.exp_index = null;
+}
+
+fn maybeExpire(
+    self: *DefaultStorage,
+    key: []const u8,
+) !bool {
+    if (self._entry_map.getPtr(key)) |entry_object| {
+        if (entry_object.exp_index) |exp_index| {
+            const index: usize = @intCast(exp_index);
+            const last_index = self._expirables.items.len - 1;
+
+            if (index < 0 or index > last_index) unreachable;
+
+            const expirable = self._expirables.items[index];
+
+            const is_expired = time.isPastTime(self._io, expirable.expires_at);
+            if (is_expired) {
+                try swapRemoveExpiration(self, entry_object);
+
+                const removed = self._entry_map.fetchRemove(key) orelse unreachable;
+                self._allocator.free(removed.key);
+
+                switch (removed.value.value) {
+                    .string => |str| self._allocator.free(str),
+                }
+
+                return true;
+            }
+        }
+    }
+
+    return false;
 }

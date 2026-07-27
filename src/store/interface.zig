@@ -2,7 +2,10 @@ const std = @import("std");
 const object = @import("../object.zig");
 const Request = @import("../commander/request.zig");
 
-pub const Error = std.mem.Allocator.Error || error{UnsupportedCondition};
+pub const Error = std.mem.Allocator.Error || error{
+    UnsupportedCondition,
+    SomethingWentWrong,
+};
 
 const Store = @This();
 

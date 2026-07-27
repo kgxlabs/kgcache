@@ -5,6 +5,7 @@ pub const MockStore = @import("store/mock_store.zig");
 pub fn errorToString(err: Store.Error) []const u8 {
     return switch (err) {
         error.UnsupportedCondition => "Unsupported condition",
-        else => "Something went wrong",
+        error.OutOfMemory => "Out of memory",
+        error.SomethingWentWrong => "Something went wrong",
     };
 }

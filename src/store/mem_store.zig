@@ -47,7 +47,9 @@ fn get(ptr: *anyopaque, io: std.Io, key: []const u8) Store.Error!?object.Object 
     self._mutex.lockUncancelable(io);
     defer self._mutex.unlock(io);
 
-    const value = try self._storage.get(key) orelse return null;
+    // TODO: Refactor with robust error propagation design
+    const maybe_value = self._storage.get(key) catch return Store.Error.SomethingWentWrong;
+    const value = maybe_value orelse return null;
     return value.value;
 }
 
@@ -63,17 +65,23 @@ fn set(ptr: *anyopaque, io: std.Io, req: Request.SetRequest) Store.Error!?object
     self._mutex.lockUncancelable(io);
     defer self._mutex.unlock(io);
 
-    const existing_entry = try self._storage.get(req.key);
+    // TODO: Refactor with robust error propagation design
+    const existing_entry = self._storage.get(req.key) catch return Store.Error.SomethingWentWrong;
     if (existing_entry != null and shouldSkipIfExist(req.condition)) {
         return makeSetResponse(req, existing_entry.?.value);
     }
+
     if (existing_entry == null and shouldSkipIfNotExist(req.condition)) {
         return makeSetResponse(req, null);
     }
 
-    const stored_entry = try self._storage.put(req.key, .{
+    // TODO: Refactor with robust error propagation design
+    const stored_entry = self._storage.put(req.key, .{
         .string = req.value,
-    }, req.expires_at);
+    }, .{
+        .expires_at = req.expires_at,
+        .keepttl = req.keepttl,
+    }) catch return Store.Error.SomethingWentWrong;
 
     return makeSetResponse(req, stored_entry.value);
 }

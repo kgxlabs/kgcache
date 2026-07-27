@@ -24,7 +24,8 @@ fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store) Commander.Erro
     }
 
     const key = try command_arguments.bulkString(self.arguments[0]);
-    const maybe_object = data_store.get(io, key) catch return .{ .simple_error = "Unable to get" };
+    // TODO: refactor the error to get more descriptive error message
+    const maybe_object = data_store.get(io, key) catch return Commander.Error.SomethingWentWrong;
 
     if (maybe_object == null) {
         return .{ .bulk_string = null };

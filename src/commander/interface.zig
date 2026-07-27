@@ -13,6 +13,7 @@ pub const Error = std.mem.Allocator.Error || error{
     UnableToConvertObject,
     UnsupportedOption,
     Syntax,
+    SomethingWentWrong,
 };
 
 ptr: *anyopaque,

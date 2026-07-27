@@ -60,6 +60,7 @@ pub fn errorToRESPValue(err: Error) resp.RESPValue {
         error.OutOfMemory => .{ .simple_error = "ERR out of memory" },
         error.UnsupportedOption => .{ .simple_error = "ERR unsupported option" },
         error.Syntax => .{ .simple_error = "ERR syntax error" },
+        error.SomethingWentWrong => .{ .simple_error = "ERR something went wrong" },
     };
 }
 

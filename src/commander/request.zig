@@ -5,7 +5,7 @@ pub const SetRequest = struct {
     value: []const u8,
     condition: ?SetCondition,
     expires_at: ?time.UnixMs,
-    keepttl: bool,
+    keepttl: bool = false,
     // NOTE: This could be overkill since for `SET` command we will only ever get `GET` response option
     // I am doing this way for purely consistency
     // TODO: Refactor if I find a better alternative

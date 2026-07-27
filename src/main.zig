@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = gpa.allocator();
 
-    var default_storage = DefaultStorage.init(allocator);
+    var default_storage = DefaultStorage.init(io, allocator);
     var mem_store = store.MemoryStore.init(default_storage.storage());
     var data_store = mem_store.store();
 

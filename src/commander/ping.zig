@@ -31,7 +31,7 @@ test "execute ping command" {
     const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
     defer command.deinit();
 
-    var default_storage = DefaultStorage.init(testing.allocator);
+    var default_storage = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = store.MemoryStore.init(default_storage.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
