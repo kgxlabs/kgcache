@@ -2,7 +2,8 @@ const std = @import("std");
 const resp = @import("resp.zig");
 const commander = @import("commander.zig");
 const store = @import("store.zig");
-const DefaultStorage = @import("storage/default_storage.zig");
+const helpers = @import("helpers.zig");
+const storage = @import("storage.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -20,7 +21,8 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = gpa.allocator();
 
-    var default_storage = DefaultStorage.init(io, allocator);
+    const mutex: std.Io.Mutex = .init;
+    var default_storage = storage.DefaultStorage.init(io, mutex, allocator);
     var mem_store = store.MemoryStore.init(default_storage.storage());
     var data_store = mem_store.store();
 
@@ -36,6 +38,17 @@ fn listen(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store) !voi
         const connection = try server.accept(io);
         const handle = try std.Thread.spawn(.{}, handleConnection, .{ io, connection, data_store });
         handle.detach();
+    }
+}
+
+fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
+    var expired_count = 0;
+    const duration = std.Io.Duration.fromMilliseconds(100);
+
+    while (true) {
+        try std.Io.sleep(io, duration);
+
+        const index = helpers.random(0, max);
     }
 }
 

@@ -9,14 +9,6 @@ const testing = std.testing;
 const MemoryStore = @This();
 
 _storage: Storage,
-// This mutex belongs to the Store layer because it protects multi-step command
-// semantics (for example, SET NX: get → decide → put), not storage primitives.
-// `lockUncancelable` sleeps while it waits instead of busy-spinning. A client
-// disconnect does not currently cancel this wait; the server notices disconnects
-// on later socket reads or writes. If we later add request cancellation, use
-// `try lock(io)` and handle its cancellation error in the Store API.
-_mutex: std.Io.Mutex = .init,
-
 /// Takes ownership of `storage`: `deinit` calls `Storage.deinit` on it.
 pub fn init(storage: Storage) MemoryStore {
     return .{
@@ -42,10 +34,8 @@ const vtable = Store.VTable{
     .deinit = deinit,
 };
 
-fn get(ptr: *anyopaque, io: std.Io, key: []const u8) Store.Error!?object.Object {
+fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._mutex.lockUncancelable(io);
-    defer self._mutex.unlock(io);
 
     // TODO: Refactor with robust error propagation design
     const maybe_value = self._storage.get(key) catch return Store.Error.SomethingWentWrong;
@@ -58,12 +48,9 @@ fn get(ptr: *anyopaque, io: std.Io, key: []const u8) Store.Error!?object.Object 
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-fn set(ptr: *anyopaque, io: std.Io, req: Request.SetRequest) Store.Error!?object.Object {
+fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     try validateCondition(req.condition);
-
-    self._mutex.lockUncancelable(io);
-    defer self._mutex.unlock(io);
 
     // TODO: Refactor with robust error propagation design
     const existing_entry = self._storage.get(req.key) catch return Store.Error.SomethingWentWrong;
