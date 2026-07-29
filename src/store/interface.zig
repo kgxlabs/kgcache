@@ -5,6 +5,7 @@ const Request = @import("../commander/request.zig");
 pub const Error = std.mem.Allocator.Error || error{
     UnsupportedCondition,
     SomethingWentWrong,
+    CancelledCommand,
 };
 
 const Store = @This();

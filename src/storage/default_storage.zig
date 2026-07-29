@@ -20,7 +20,7 @@ const Expirables = std.ArrayList(entry.ObjectExpiration);
 
 _allocator: std.mem.Allocator,
 _io: std.Io,
-_mutex: std.Io.Mutex,
+_mutex: std.Io.Mutex = .init,
 _entry_map: EntryObjectMap,
 _expirables: Expirables,
 
@@ -38,25 +38,35 @@ pub fn storage(self: *DefaultStorage) Storage {
     return .{
         .ptr = self,
         .vtable = &vtable,
+        ._io = self._io,
+        ._mutex = self._mutex,
     };
 }
 
 pub fn init(
     io: std.Io,
-    mutex: std.Io.Mutex,
     allocator: std.mem.Allocator,
 ) DefaultStorage {
     return .{
         ._allocator = allocator,
         ._io = io,
-        ._mutex = mutex,
         ._entry_map = EntryObjectMap.init(allocator),
         ._expirables = .empty,
     };
 }
 
+pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    self._mutex.lock(self._io) catch return Storage.Error.TxCancelled;
+
+    return Storage.Tx{
+        ._storage = self,
+    };
+}
+
 pub fn deinit(ptr: *anyopaque) void {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    // This is the only place in storage that will directly use lock
     // We are locking the entire duration of all the items
     // This is fine since deinit onlly triggers when a storage is shutting down and
     // we wont be accepting anymore instructions at that point anyway
@@ -83,8 +93,6 @@ pub fn deinit(ptr: *anyopaque) void {
 
 pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
 
     const is_removed = removeByKey(self, key, .expired_only) catch return Storage.Error.UnableToExpire;
     if (is_removed) {
@@ -98,9 +106,6 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
 
 pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     const string_value = switch (value) {
         .string => |string| string,
     };
@@ -179,18 +184,12 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     try removeByKey(self, key, .unconditional);
     return;
 }
 
 pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     return try removeByKey(self, key, .expired_only);
 }
 
@@ -205,8 +204,12 @@ pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry
     };
 }
 
-pub fn getExpCount(ptr: *anyopaque) Storage.Error!usize {
-    // TODO: For tomorrow, think really hard about where should mutex lock sits
+pub fn getRandomExpirable(ptr: *anyopaque) Storage.Error!entry.Object {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    return entry.ObjectExpiration{
+        .expires_at = 0,
+        .key = "foo",
+    };
 }
 
 pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
@@ -216,7 +219,6 @@ pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
 // TODO: The only reason we return bool from this function is to support get method
 // Find a way to support get method without exposing bool
 fn removeByKey(self: *DefaultStorage, key: []const u8, mode: Storage.RemovalMode) !bool {
-    // NOTE: not acquiring locks here since the callers must always lock it.
     if (self._entry_map.getPtr(key)) |entry_object| {
         if (entry_object.exp_index) |exp_index| {
             const index: usize = @intCast(exp_index);

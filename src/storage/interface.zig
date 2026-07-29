@@ -7,12 +7,15 @@ pub const Error = error{
     OutOfMemory,
     InvalidIndex,
     UnableToExpire,
+    TxCancelled,
 };
 
 const Storage = @This();
 
 ptr: *anyopaque,
 vtable: *const VTable,
+_io: std.Io,
+_mutex: std.Io.Mutex = .init,
 
 pub const PutOptions = struct {
     expires_at: ?time.UnixMs,
@@ -22,6 +25,14 @@ pub const PutOptions = struct {
 pub const RemovalMode = enum {
     expired_only,
     unconditional,
+};
+
+pub const Tx = struct {
+    _storage: Storage,
+
+    pub fn end(self: *Tx) void {
+        return self.storage._mutex.unlock(self.storage._io);
+    }
 };
 
 pub const VTable = struct {
@@ -36,10 +47,15 @@ pub const VTable = struct {
     removeIfExpired: *const fn (*anyopaque, []const u8) Error!bool,
     getExp: *const fn (*anyopaque, []const u8) Error!?entry.ObjectExpiration,
     setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
-    getExpCount: *const fn (*anyopaque) Error!usize,
+    getRandomExpirable: *const fn (*anyopaque) Error!entry.ObjectExpiration,
     clearExp: *const fn (*anyopaque, []const u8) Error!void,
+    begin: *const fn (*anyopaque) Error!Tx,
     deinit: *const fn (*anyopaque) void,
 };
+
+pub fn begin(self: Storage) Error!Tx {
+    return self.vtable.begin(self.ptr);
+}
 
 pub fn get(self: Storage, key: []const u8) Error!?entry.Object {
     return self.vtable.get(self.ptr, key);
@@ -65,8 +81,8 @@ pub fn setExp(self: Storage, key: []const u8, expires_at: ?time.UnixMs) Error!en
     return self.vtable.setExp(self.ptr, key, expires_at);
 }
 
-pub fn getExpCount(self: Storage) Error!?usize {
-    return self.vtable.getExpCount(self.ptr);
+pub fn getRandomExpirable(self: Storage) Error!entry.ObjectExpiration {
+    return self.vtable.getRandomExpirable(self);
 }
 
 pub fn clearExp(self: Storage, key: []const u8) Error!void {

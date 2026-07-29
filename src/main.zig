@@ -47,8 +47,13 @@ fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
 
     while (true) {
         try std.Io.sleep(io, duration);
-
-        const index = helpers.random(0, max);
+        const tx = try data_storage.begin();
+        // NOTE: Reminder end the transaction
+        const expirable_item = try data_storage.getRandomExpirable();
+        const is_removed = try data_storage.removeIfExpired(expirable_item.key);
+        if (is_removed) {
+            expired_count += 1;
+        }
     }
 }
 

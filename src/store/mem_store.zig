@@ -36,6 +36,8 @@ const vtable = Store.VTable{
 
 fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    defer tx.end();
 
     // TODO: Refactor with robust error propagation design
     const maybe_value = self._storage.get(key) catch return Store.Error.SomethingWentWrong;
@@ -50,7 +52,11 @@ fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
 // PXAT unix-time-milliseconds | KEEPTTL]
 fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+
     try validateCondition(req.condition);
+
+    const tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    defer tx.end();
 
     // TODO: Refactor with robust error propagation design
     const existing_entry = self._storage.get(req.key) catch return Store.Error.SomethingWentWrong;
