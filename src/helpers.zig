@@ -14,14 +14,9 @@ pub fn isEpochMs(value: i64) bool {
     return value >= 946684800000 and value <= 4102444800000;
 }
 
-pub fn random(min: usize, max: usize) usize {
-    var prng = std.Random.DefaultPrng.init(seed: {
-        var seed: u64 = undefined;
-        // get random seed from OS
-        try std.posix.getrandom(std.mem.asBytes(&seed));
-        break :seed seed;
-    });
-    const rand = prng.random();
+pub fn random(io: std.Io, min: usize, max: usize) usize {
+    var io_rand_source: std.Random.IoSource = .{ .io = io };
+    const rand = io_rand_source.interface();
 
     return rand.intRangeAtMost(usize, min, max);
 }

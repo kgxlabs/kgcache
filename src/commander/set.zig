@@ -28,7 +28,7 @@ fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store) Commander.Erro
     const now_ms = std.Io.Clock.real.now(io).toMilliseconds();
     const req = try bind(self.arguments, now_ms);
 
-    const maybe_object = data_store.set(io, req) catch |err| {
+    const maybe_object = data_store.set(req) catch |err| {
         return .{ .simple_error = store.errorToString(err) };
     };
 

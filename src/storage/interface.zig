@@ -31,7 +31,7 @@ pub const Tx = struct {
     _storage: Storage,
 
     pub fn end(self: *Tx) void {
-        return self.storage._mutex.unlock(self.storage._io);
+        return self._storage._mutex.unlock(self._storage._io);
     }
 };
 

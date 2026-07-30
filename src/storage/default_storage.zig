@@ -60,7 +60,7 @@ pub fn init(
 }
 
 pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
-    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    var self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     self._mutex.lock(self._io) catch return Storage.Error.TxCancelled;
 
     return Storage.Tx{
@@ -188,7 +188,7 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    try removeByKey(self, key, .unconditional);
+    _ = try removeByKey(self, key, .unconditional);
     return;
 }
 
@@ -210,8 +210,8 @@ pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry
 
 pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!bool {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    const last_index = self._expirables.items - 1;
-    const random_index = helpers.random(0, last_index);
+    const last_index = self._expirables.items.len - 1;
+    const random_index = helpers.random(self._io, 0, last_index);
 
     // This could be unnecessary since random could actually guaranteed valid number between min and max
     // TODO: Remove this if we are sure to trust random
@@ -242,7 +242,7 @@ fn removeByKey(self: *DefaultStorage, key: []const u8, mode: Storage.RemovalMode
             const is_expired = time.isPastTime(self._io, expirable.expires_at);
             const force_remove = mode == .unconditional;
 
-            if (is_expired || force_remove) {
+            if (is_expired or force_remove) {
                 try swapRemoveExpiration(self, entry_object);
 
                 const removed = self._entry_map.fetchRemove(key) orelse unreachable;

@@ -6,6 +6,7 @@ pub fn errorToString(err: Store.Error) []const u8 {
     return switch (err) {
         error.UnsupportedCondition => "Unsupported condition",
         error.OutOfMemory => "Out of memory",
+        error.CancelledCommand => "Command cancelled",
         error.SomethingWentWrong => "Something went wrong",
     };
 }

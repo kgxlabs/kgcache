@@ -36,7 +36,7 @@ const vtable = Store.VTable{
 
 fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    const tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = self._storage.begin() catch return Store.Error.CancelledCommand;
     defer tx.end();
 
     // TODO: Refactor with robust error propagation design
@@ -55,7 +55,7 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
 
     try validateCondition(req.condition);
 
-    const tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = self._storage.begin() catch return Store.Error.CancelledCommand;
     defer tx.end();
 
     // TODO: Refactor with robust error propagation design
