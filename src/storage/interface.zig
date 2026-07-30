@@ -47,7 +47,7 @@ pub const VTable = struct {
     removeIfExpired: *const fn (*anyopaque, []const u8) Error!bool,
     getExp: *const fn (*anyopaque, []const u8) Error!?entry.ObjectExpiration,
     setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
-    getRandomExpirable: *const fn (*anyopaque) Error!entry.ObjectExpiration,
+    tryExpireRandom: *const fn (*anyopaque) Error!bool,
     clearExp: *const fn (*anyopaque, []const u8) Error!void,
     begin: *const fn (*anyopaque) Error!Tx,
     deinit: *const fn (*anyopaque) void,
@@ -81,8 +81,8 @@ pub fn setExp(self: Storage, key: []const u8, expires_at: ?time.UnixMs) Error!en
     return self.vtable.setExp(self.ptr, key, expires_at);
 }
 
-pub fn getRandomExpirable(self: Storage) Error!entry.ObjectExpiration {
-    return self.vtable.getRandomExpirable(self);
+pub fn tryExpireRandom(self: Storage) Error!?bool {
+    return self.vtable.tryExpireRandom(self.ptr);
 }
 
 pub fn clearExp(self: Storage, key: []const u8) Error!void {

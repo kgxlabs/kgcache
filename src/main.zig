@@ -4,6 +4,7 @@ const commander = @import("commander.zig");
 const store = @import("store.zig");
 const helpers = @import("helpers.zig");
 const storage = @import("storage.zig");
+const time = @import("time.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -21,8 +22,7 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = gpa.allocator();
 
-    const mutex: std.Io.Mutex = .init;
-    var default_storage = storage.DefaultStorage.init(io, mutex, allocator);
+    var default_storage = storage.DefaultStorage.init(io, allocator);
     var mem_store = store.MemoryStore.init(default_storage.storage());
     var data_store = mem_store.store();
 
@@ -42,19 +42,50 @@ fn listen(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store) !voi
 }
 
 fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
-    var expired_count = 0;
-    const duration = std.Io.Duration.fromMilliseconds(100);
+    const round_duration = std.Io.Duration.fromMilliseconds(100);
+    const timeout_duration = std.Io.Duration.fromMilliseconds(100);
+    const budget_ms = 10;
+    const batch_size = 20;
+    const threshold = 25;
 
     while (true) {
-        try std.Io.sleep(io, duration);
-        const tx = try data_storage.begin();
-        // NOTE: Reminder end the transaction
-        const expirable_item = try data_storage.getRandomExpirable();
-        const is_removed = try data_storage.removeIfExpired(expirable_item.key);
-        if (is_removed) {
-            expired_count += 1;
+        try io.sleep(round_duration, .awake);
+
+        // batch starts
+        batch: while (true) {
+            var expired_count = 0;
+            const burst_start_ms = time.nowMs(io);
+
+            for (0..batch_size) |_| {
+                const is_removed = try expireRandom(data_storage);
+                if (is_removed) {
+                    expired_count += 1;
+                }
+
+                // throttle if it took more than budget
+                if (time.nowMs(io) - burst_start_ms >= budget_ms) {
+                    try io.sleep(timeout_duration, .awake);
+                }
+            }
+
+            // When batch size is reached, > 25% expired => immediately start next batch, otherwise continue to next batch
+            const expired_percentage = (expired_count * 100 / batch_size) * 100;
+            if (expired_percentage >= threshold) {
+                continue :batch;
+            }
         }
     }
+}
+
+// NOTE: We are releasing lock on when err and when the transaction succeeded so that we dont starve the main threads
+fn expireRandom(data_storage: storage.Interface) !bool {
+    const tx = try data_storage.begin();
+    errdefer tx.end();
+
+    const is_removed = try data_storage.tryExpireRandom() orelse return false;
+    tx.end();
+
+    return is_removed;
 }
 
 fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Store) !void {

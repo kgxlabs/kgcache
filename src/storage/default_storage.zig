@@ -3,6 +3,7 @@ const Storage = @import("interface.zig");
 const entry = @import("../entry.zig");
 const object = @import("../object.zig");
 const time = @import("../time.zig");
+const helpers = @import("../helpers.zig");
 
 const DefaultStorage = @This();
 
@@ -25,12 +26,15 @@ _entry_map: EntryObjectMap,
 _expirables: Expirables,
 
 const vtable: Storage.VTable = .{
+    .begin = begin,
     .get = get,
     .put = put,
     .remove = remove,
     .getExp = getExp,
     .setExp = setExp,
     .clearExp = clearExp,
+    .removeIfExpired = removeIfExpired,
+    .tryExpireRandom = tryExpireRandom,
     .deinit = deinit,
 };
 
@@ -60,7 +64,7 @@ pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
     self._mutex.lock(self._io) catch return Storage.Error.TxCancelled;
 
     return Storage.Tx{
-        ._storage = self,
+        ._storage = self.storage(),
     };
 }
 
@@ -204,12 +208,19 @@ pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry
     };
 }
 
-pub fn getRandomExpirable(ptr: *anyopaque) Storage.Error!entry.Object {
+pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!bool {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    return entry.ObjectExpiration{
-        .expires_at = 0,
-        .key = "foo",
-    };
+    const last_index = self._expirables.items - 1;
+    const random_index = helpers.random(0, last_index);
+
+    // This could be unnecessary since random could actually guaranteed valid number between min and max
+    // TODO: Remove this if we are sure to trust random
+    if (random_index < 0 or random_index > last_index) {
+        return Storage.Error.InvalidIndex;
+    }
+
+    const item = self._expirables.items[random_index];
+    return try self.removeByKey(item.key, .expired_only);
 }
 
 pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
