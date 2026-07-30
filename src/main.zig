@@ -23,8 +23,13 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
 
     var default_storage = storage.DefaultStorage.init(io, allocator);
-    var mem_store = store.MemoryStore.init(default_storage.storage());
+    const data_storage = default_storage.storage();
+    var mem_store = store.MemoryStore.init(data_storage);
     var data_store = mem_store.store();
+
+    // Spin up active expiration
+    const handle = try std.Thread.spawn(.{}, handleExpiration, .{ io, data_storage });
+    handle.detach();
 
     // `MemoryStore` owns the storage interface, so `data_store.deinit()` also
     // deinitializes `default_storage`. Do not deinitialize it separately.
@@ -44,16 +49,23 @@ fn listen(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store) !voi
 fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
     const round_duration = std.Io.Duration.fromMilliseconds(100);
     const timeout_duration = std.Io.Duration.fromMilliseconds(100);
-    const budget_ms = 10;
-    const batch_size = 20;
-    const threshold = 25;
+    const budget_ms: i8 = 10;
+    const batch_size: i8 = 20;
+    const threshold: i8 = 25;
 
     while (true) {
         try io.sleep(round_duration, .awake);
 
+        var tx = try data_storage.begin();
+        errdefer tx.end();
+        if (data_storage.getExpirableCount() == 0) {
+            tx.end();
+            continue;
+        }
+
         // batch starts
         batch: while (true) {
-            var expired_count = 0;
+            var expired_count: i8 = 0;
             const burst_start_ms = time.nowMs(io);
 
             for (0..batch_size) |_| {
@@ -68,21 +80,23 @@ fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
                 }
             }
 
-            // When batch size is reached, > 25% expired => immediately start next batch, otherwise continue to next batch
-            const expired_percentage = (expired_count * 100 / batch_size) * 100;
+            // When batch size is reached, >= 25% expired => immediately start next batch.
+            const expired_percentage = @divTrunc(expired_count * 100, batch_size);
             if (expired_percentage >= threshold) {
                 continue :batch;
             }
+
+            break :batch;
         }
     }
 }
 
 // NOTE: We are releasing lock on when err and when the transaction succeeded so that we dont starve the main threads
 fn expireRandom(data_storage: storage.Interface) !bool {
-    const tx = try data_storage.begin();
+    var tx = try data_storage.begin();
     errdefer tx.end();
 
-    const is_removed = try data_storage.tryExpireRandom() orelse return false;
+    const is_removed = try data_storage.tryExpireRandom();
     tx.end();
 
     return is_removed;

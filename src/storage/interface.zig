@@ -15,7 +15,7 @@ const Storage = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 _io: std.Io,
-_mutex: std.Io.Mutex = .init,
+_mutex: *std.Io.Mutex,
 
 pub const PutOptions = struct {
     expires_at: ?time.UnixMs,
@@ -28,10 +28,11 @@ pub const RemovalMode = enum {
 };
 
 pub const Tx = struct {
-    _storage: Storage,
+    _io: std.Io,
+    _mutex: *std.Io.Mutex,
 
     pub fn end(self: *Tx) void {
-        return self._storage._mutex.unlock(self._storage._io);
+        return self._mutex.unlock(self._io);
     }
 };
 
@@ -47,6 +48,7 @@ pub const VTable = struct {
     removeIfExpired: *const fn (*anyopaque, []const u8) Error!bool,
     getExp: *const fn (*anyopaque, []const u8) Error!?entry.ObjectExpiration,
     setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
+    getExpirableCount: *const fn (*anyopaque) u32,
     tryExpireRandom: *const fn (*anyopaque) Error!bool,
     clearExp: *const fn (*anyopaque, []const u8) Error!void,
     begin: *const fn (*anyopaque) Error!Tx,
@@ -81,7 +83,11 @@ pub fn setExp(self: Storage, key: []const u8, expires_at: ?time.UnixMs) Error!en
     return self.vtable.setExp(self.ptr, key, expires_at);
 }
 
-pub fn tryExpireRandom(self: Storage) Error!?bool {
+pub fn getExpirableCount(self: Storage) u32 {
+    return self.vtable.getExpirableCount(self.ptr);
+}
+
+pub fn tryExpireRandom(self: Storage) Error!bool {
     return self.vtable.tryExpireRandom(self.ptr);
 }
 

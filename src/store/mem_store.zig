@@ -117,7 +117,7 @@ fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Objec
 }
 
 test "set stores a value and returns null" {
-    var backend = DefaultStorage.init(testing.allocator);
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
 
@@ -131,16 +131,16 @@ test "set stores a value and returns null" {
         .keepttl = false,
         .response = null,
     };
-    const set_value = try data_store.set(testing.io, req);
+    const set_value = try data_store.set(req);
 
     try testing.expect(set_value == null);
 
-    const get_value = try data_store.get(testing.io, req.key) orelse return error.TestUnexpectedResult;
+    const get_value = try data_store.get(req.key) orelse return error.TestUnexpectedResult;
     try expectObjectString(get_value, req.value);
 }
 
 test "set stores a value and returns value" {
-    var backend = DefaultStorage.init(testing.allocator);
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -154,27 +154,27 @@ test "set stores a value and returns value" {
         .response = .{ .get = true },
     };
 
-    const set_value = try data_store.set(testing.io, req);
+    const set_value = try data_store.set(req);
 
     try expectObjectString(set_value, req.value);
 
-    const get_value = try data_store.get(testing.io, req.key) orelse return error.TestUnexpectedResult;
+    const get_value = try data_store.get(req.key) orelse return error.TestUnexpectedResult;
     try expectObjectString(get_value, req.value);
 }
 
 test "get returns null for a missing key" {
-    var backend = DefaultStorage.init(testing.allocator);
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    const value = try data_store.get(testing.io, "missing");
+    const value = try data_store.get("missing");
 
     try testing.expect(value == null);
 }
 
 test "set replaces an existing value" {
-    var backend = DefaultStorage.init(testing.allocator);
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -187,7 +187,7 @@ test "set replaces an existing value" {
         .keepttl = false,
         .response = null,
     };
-    _ = try data_store.set(testing.io, first_req);
+    _ = try data_store.set(first_req);
 
     const second_req: Request.SetRequest = .{
         .key = "key",
@@ -198,21 +198,21 @@ test "set replaces an existing value" {
         .response = null,
     };
 
-    const result = try data_store.set(testing.io, second_req);
+    const result = try data_store.set(second_req);
 
     try testing.expect(result == null);
 
-    const value = try data_store.get(testing.io, "key") orelse return error.TestUnexpectedResult;
+    const value = try data_store.get("key") orelse return error.TestUnexpectedResult;
     try expectObjectString(value, "second");
 }
 
 test "set with NX does not replace an existing value" {
-    var backend = DefaultStorage.init(testing.allocator);
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    _ = try data_store.set(testing.io, .{
+    _ = try data_store.set(.{
         .key = "key",
         .value = "first",
         .condition = null,
@@ -220,7 +220,7 @@ test "set with NX does not replace an existing value" {
         .keepttl = false,
         .response = null,
     });
-    _ = try data_store.set(testing.io, .{
+    _ = try data_store.set(.{
         .key = "key",
         .value = "second",
         .condition = .nx,
@@ -229,17 +229,17 @@ test "set with NX does not replace an existing value" {
         .response = null,
     });
 
-    const value = try data_store.get(testing.io, "key") orelse return error.TestUnexpectedResult;
+    const value = try data_store.get("key") orelse return error.TestUnexpectedResult;
     try expectObjectString(value, "first");
 }
 
 test "set with XX does not create a missing value" {
-    var backend = DefaultStorage.init(testing.allocator);
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    _ = try data_store.set(testing.io, .{
+    _ = try data_store.set(.{
         .key = "missing",
         .value = "value",
         .condition = .xx,
@@ -248,11 +248,11 @@ test "set with XX does not create a missing value" {
         .response = null,
     });
 
-    try testing.expect(try data_store.get(testing.io, "missing") == null);
+    try testing.expect(try data_store.get("missing") == null);
 }
 
 test "set owns the key and value bytes" {
-    var backend = DefaultStorage.init(testing.allocator);
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
     var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -268,12 +268,12 @@ test "set owns the key and value bytes" {
         .keepttl = false,
         .response = null,
     };
-    _ = try data_store.set(testing.io, req);
+    _ = try data_store.set(req);
 
     @memset(&key, 'x');
     @memset(&value, 'x');
 
-    const stored_value = try data_store.get(testing.io, "key") orelse return error.TestUnexpectedResult;
+    const stored_value = try data_store.get("key") orelse return error.TestUnexpectedResult;
     try expectObjectString(stored_value, "one");
 }
 

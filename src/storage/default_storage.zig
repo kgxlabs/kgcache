@@ -34,6 +34,7 @@ const vtable: Storage.VTable = .{
     .setExp = setExp,
     .clearExp = clearExp,
     .removeIfExpired = removeIfExpired,
+    .getExpirableCount = getExpirableCount,
     .tryExpireRandom = tryExpireRandom,
     .deinit = deinit,
 };
@@ -43,7 +44,7 @@ pub fn storage(self: *DefaultStorage) Storage {
         .ptr = self,
         .vtable = &vtable,
         ._io = self._io,
-        ._mutex = self._mutex,
+        ._mutex = &self._mutex,
     };
 }
 
@@ -64,7 +65,8 @@ pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
     self._mutex.lock(self._io) catch return Storage.Error.TxCancelled;
 
     return Storage.Tx{
-        ._storage = self.storage(),
+        ._io = self._io,
+        ._mutex = &self._mutex,
     };
 }
 
@@ -210,17 +212,26 @@ pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry
 
 pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!bool {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    if (self._expirables.items.len == 0) {
+        return false;
+    }
+
     const last_index = self._expirables.items.len - 1;
     const random_index = helpers.random(self._io, 0, last_index);
 
     // This could be unnecessary since random could actually guaranteed valid number between min and max
     // TODO: Remove this if we are sure to trust random
-    if (random_index < 0 or random_index > last_index) {
+    if (random_index > last_index) {
         return Storage.Error.InvalidIndex;
     }
 
     const item = self._expirables.items[random_index];
     return try self.removeByKey(item.key, .expired_only);
+}
+
+pub fn getExpirableCount(ptr: *anyopaque) u32 {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    return @intCast(self._expirables.items.len);
 }
 
 pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
@@ -278,4 +289,52 @@ fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) !voi
 
     _ = self._expirables.pop();
     entry_object.exp_index = null;
+}
+
+test "tryExpireRandom returns false when no entries have an expiration" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    try testing.expect(!(try backend_storage.tryExpireRandom()));
+}
+
+test "transactions release the storage mutex" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var first = try backend_storage.begin();
+    first.end();
+
+    var second = try backend_storage.begin();
+    second.end();
+}
+
+test "active expiration sampling releases the storage mutex" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var put_tx = try backend_storage.begin();
+    _ = try backend_storage.put("expiring", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) + 1_000,
+    });
+    put_tx.end();
+
+    var expiration_tx = try backend_storage.begin();
+    _ = try backend_storage.tryExpireRandom();
+    expiration_tx.end();
+
+    var next_tx = try backend_storage.begin();
+    next_tx.end();
 }
