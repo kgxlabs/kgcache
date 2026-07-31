@@ -3,6 +3,7 @@ const resp = @import("resp.zig");
 
 pub const Commander = @import("commander/interface.zig");
 pub const Command = @import("commander/command.zig");
+pub const DBSize = @import("commander/dbsize.zig");
 pub const Echo = @import("commander/echo.zig");
 pub const Get = @import("commander/get.zig");
 pub const Ping = @import("commander/ping.zig");
@@ -11,6 +12,7 @@ pub const Error = Commander.Error;
 
 const CommandKind = enum {
     command,
+    dbsize,
     echo,
     get,
     ping,
@@ -18,6 +20,7 @@ const CommandKind = enum {
 
     fn parse(keyword: []const u8) Error!CommandKind {
         if (std.ascii.eqlIgnoreCase(keyword, "command")) return .command;
+        if (std.ascii.eqlIgnoreCase(keyword, "dbsize")) return .dbsize;
         if (std.ascii.eqlIgnoreCase(keyword, "echo")) return .echo;
         if (std.ascii.eqlIgnoreCase(keyword, "get")) return .get;
         if (std.ascii.eqlIgnoreCase(keyword, "ping")) return .ping;
@@ -33,6 +36,7 @@ pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander
 
     return switch (command_kind) {
         .command => try create(Command, allocator, arguments),
+        .dbsize => try create(DBSize, allocator, arguments),
         .echo => try create(Echo, allocator, arguments),
         .get => try create(Get, allocator, arguments),
         .ping => try create(Ping, allocator, arguments),

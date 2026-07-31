@@ -31,10 +31,11 @@ pub fn store(self: *MemoryStore) Store {
 const vtable = Store.VTable{
     .get = get,
     .set = set,
+    .dbsize = dbsize,
     .deinit = deinit,
 };
 
-fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
+pub fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     var tx = self._storage.begin() catch return Store.Error.CancelledCommand;
     defer tx.end();
@@ -50,7 +51,7 @@ fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
+pub fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
 
     try validateCondition(req.condition);
@@ -77,6 +78,11 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     }) catch return Store.Error.SomethingWentWrong;
 
     return makeSetResponse(req, stored_entry.value);
+}
+
+pub fn dbsize(ptr: *anyopaque) u32 {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    return self._storage.size();
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {

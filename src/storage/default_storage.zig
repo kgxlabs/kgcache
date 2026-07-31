@@ -8,7 +8,7 @@ const helpers = @import("../helpers.zig");
 const DefaultStorage = @This();
 
 // Each entry stores an expiration-list index even when it is `null`; see
-// `entry.Object.exp_index`. On this 64-bit target the value is 24 bytes. This
+// `entry.Object.exp_index`. On this 64-bit target the value is 32 bytes. This
 // is only the map value: `StringHashMap` also stores the key slice, metadata,
 // and unused capacity required by its load factor.
 const EntryObjectMap = std.StringHashMap(entry.Object);
@@ -37,6 +37,7 @@ const vtable: Storage.VTable = .{
     .getExpirableCount = getExpirableCount,
     .tryExpireRandom = tryExpireRandom,
     .deinit = deinit,
+    .size = size,
 };
 
 pub fn storage(self: *DefaultStorage) Storage {
@@ -134,7 +135,7 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 
         // update if expiration set and existing expiration
         if (options.expires_at != null and existing.exp_index != null) {
-            const last_index: usize = @intCast(self._expirables.items.len - 1);
+            const last_index = self._expirables.items.len - 1;
             if (existing.exp_index.? > last_index) {
                 unreachable;
             }
@@ -152,8 +153,8 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
                 .expires_at = options.expires_at.?,
             }) catch return Storage.Error.OutOfMemory;
 
-            const index: usize = @intCast(self._expirables.items.len - 1);
-            existing.exp_index = @intCast(index);
+            const index = self._expirables.items.len - 1;
+            existing.exp_index = index;
         }
 
         // TODO: Handle all types
@@ -179,8 +180,8 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
         self._expirables.append(self._allocator, .{ .key = owned_key, .expires_at = expires_ms }) catch return Storage.Error.OutOfMemory;
         errdefer _ = self._expirables.pop();
 
-        const index: usize = @intCast(self._expirables.items.len - 1);
-        entry_object.exp_index = @intCast(index);
+        const index = self._expirables.items.len - 1;
+        entry_object.exp_index = index;
     }
 
     self._entry_map.put(owned_key, entry_object) catch return Storage.Error.OutOfMemory;
@@ -238,12 +239,17 @@ pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
     return;
 }
 
+pub fn size(ptr: *anyopaque) u32 {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    return @intCast(self._entry_map.count());
+}
+
 // TODO: The only reason we return bool from this function is to support get method
 // Find a way to support get method without exposing bool
 fn removeByKey(self: *DefaultStorage, key: []const u8, mode: Storage.RemovalMode) !bool {
     if (self._entry_map.getPtr(key)) |entry_object| {
         if (entry_object.exp_index) |exp_index| {
-            const index: usize = @intCast(exp_index);
+            const index = exp_index;
             const last_index = self._expirables.items.len - 1;
 
             if (index < 0 or index > last_index) unreachable;
@@ -273,7 +279,7 @@ fn removeByKey(self: *DefaultStorage, key: []const u8, mode: Storage.RemovalMode
 // Move the last item to index and overwrite it and then pop the last item hole
 // NOTE: This is not a actual swap but rather make the hole and pop it
 fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) !void {
-    const index: usize = @intCast(entry_object.exp_index orelse return);
+    const index = entry_object.exp_index orelse return;
     const last_index = self._expirables.items.len - 1;
 
     // If we have invalid index, that means our bookkeeping is broken
@@ -284,7 +290,7 @@ fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) !voi
         self._expirables.items[index] = moved;
 
         const moved_entry = self._entry_map.getPtr(moved.key) orelse unreachable;
-        moved_entry.exp_index = @intCast(index);
+        moved_entry.exp_index = index;
     }
 
     _ = self._expirables.pop();
@@ -302,6 +308,24 @@ test "tryExpireRandom returns false when no entries have an expiration" {
     defer tx.end();
 
     try testing.expect(!(try backend_storage.tryExpireRandom()));
+}
+
+test "size counts all stored entries, not just expirable ones" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    _ = try backend_storage.put("persistent", .{ .string = "value" }, .{ .expires_at = null });
+    _ = try backend_storage.put("expiring", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) + 1_000,
+    });
+
+    try testing.expectEqual(2, backend_storage.size());
 }
 
 test "transactions release the storage mutex" {

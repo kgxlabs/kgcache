@@ -51,6 +51,7 @@ pub const VTable = struct {
     getExpirableCount: *const fn (*anyopaque) u32,
     tryExpireRandom: *const fn (*anyopaque) Error!bool,
     clearExp: *const fn (*anyopaque, []const u8) Error!void,
+    size: *const fn (*anyopaque) u32,
     begin: *const fn (*anyopaque) Error!Tx,
     deinit: *const fn (*anyopaque) void,
 };
@@ -93,6 +94,10 @@ pub fn tryExpireRandom(self: Storage) Error!bool {
 
 pub fn clearExp(self: Storage, key: []const u8) Error!void {
     return self.vtable.clearExp(self.ptr, key);
+}
+
+pub fn size(self: Storage) u32 {
+    return self.vtable.size(self.ptr);
 }
 
 pub fn deinit(self: Storage) void {

@@ -16,6 +16,7 @@ vtable: *const VTable,
 pub const VTable = struct {
     get: *const fn (*anyopaque, []const u8) Error!?object.Object,
     set: *const fn (*anyopaque, Request.SetRequest) Error!?object.Object,
+    dbsize: *const fn (*anyopaque) u32,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -25,6 +26,10 @@ pub fn get(self: Store, key: []const u8) Error!?object.Object {
 
 pub fn set(self: Store, req: Request.SetRequest) Error!?object.Object {
     return self.vtable.set(self.ptr, req);
+}
+
+pub fn dbsize(self: Store) u32 {
+    return self.vtable.dbsize(self.ptr);
 }
 
 pub fn deinit(self: Store) void {

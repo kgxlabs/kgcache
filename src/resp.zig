@@ -41,7 +41,7 @@ fn errorMessage(err: RESPError) []const u8 {
     return switch (err) {
         error.Malformed => "malformed requst",
         error.NotArray => "value is not an array",
-        error.UnknownType => "ERR unable to serialize unknown type",
+        error.UnknownType => "unknown type",
         else => "something went wrong",
     };
 }

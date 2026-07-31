@@ -56,10 +56,7 @@ fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
     while (true) {
         try io.sleep(round_duration, .awake);
 
-        var tx = try data_storage.begin();
-        errdefer tx.end();
         if (data_storage.getExpirableCount() == 0) {
-            tx.end();
             continue;
         }
 
