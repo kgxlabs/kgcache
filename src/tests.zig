@@ -4,6 +4,8 @@ test {
     _ = @import("commander/echo.zig");
     _ = @import("commander/ping.zig");
     _ = @import("store.zig");
+    _ = @import("store/mock_store.zig");
     _ = @import("entry.zig");
+    _ = @import("storage/default_storage.zig");
     _ = @import("object.zig");
 }

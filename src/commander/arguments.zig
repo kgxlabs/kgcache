@@ -7,3 +7,10 @@ pub fn bulkString(argument: resp.RESPValue) Commander.Error![]const u8 {
         else => Commander.Error.UnsupportedArgumentType,
     };
 }
+
+pub fn integer(argument: resp.RESPValue) Commander.Error!u32 {
+    return switch (argument) {
+        .integer => |maybe_int| maybe_int orelse Commander.Error.MalformedCommandRequest,
+        else => Commander.Error.UnsupportedArgumentType,
+    };
+}

@@ -1,40 +1,24 @@
 const std = @import("std");
 const Store = @import("interface.zig");
+const Storage = @import("../storage/interface.zig");
+const DefaultStorage = @import("../storage/default_storage.zig");
 const object = @import("../object.zig");
-const entry = @import("../entry.zig");
 const Request = @import("../commander/request.zig");
 const testing = std.testing;
 
 const MemoryStore = @This();
 
-const ValueMap = std.StringHashMap(entry.ObjectEntry);
-const ExpirationMap = std.StringHashMap(entry.ObjectExpirationMs);
-
-_allocator: std.mem.Allocator,
-_map: ValueMap,
-_exp_map: ExpirationMap,
-
-pub fn init(allocator: std.mem.Allocator) MemoryStore {
+_storage: Storage,
+/// Takes ownership of `storage`: `deinit` calls `Storage.deinit` on it.
+pub fn init(storage: Storage) MemoryStore {
     return .{
-        ._allocator = allocator,
-        ._map = ValueMap.init(allocator),
-        ._exp_map = ExpirationMap.init(allocator),
+        ._storage = storage,
     };
 }
 
 pub fn deinit(ptr: *anyopaque) void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    var iterator = self._map.iterator();
-    while (iterator.next()) |item| {
-        self._allocator.free(item.key_ptr.*);
-
-        switch (item.value_ptr.value) {
-            .string => |value| self._allocator.free(value),
-        }
-    }
-
-    self._map.deinit();
-    self._exp_map.deinit();
+    self._storage.deinit();
 }
 
 pub fn store(self: *MemoryStore) Store {
@@ -47,12 +31,18 @@ pub fn store(self: *MemoryStore) Store {
 const vtable = Store.VTable{
     .get = get,
     .set = set,
+    .dbsize = dbsize,
     .deinit = deinit,
 };
 
-fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
+pub fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    const value = self._map.get(key) orelse return null;
+    var tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    defer tx.end();
+
+    // TODO: Refactor with robust error propagation design
+    const maybe_value = self._storage.get(key) catch return Store.Error.SomethingWentWrong;
+    const value = maybe_value orelse return null;
     return value.value;
 }
 
@@ -61,64 +51,67 @@ fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
+pub fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    // TODO: Accept options params and process them
-    if (self._map.getPtr(req.key)) |existing| {
-        if (shouldSkipIfExist(req.condition)) {
-            return makeSetResponse(req, existing.value);
-        }
 
-        const owned_value = try self._allocator.dupe(u8, req.value);
-        errdefer self._allocator.free(owned_value);
+    try validateCondition(req.condition);
 
-        const old_value = existing.value;
-        // TODO: Handle all types
-        existing.value = .{ .string = owned_value };
+    var tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    defer tx.end();
 
-        self._allocator.free(old_value.string);
-        return makeSetResponse(req, existing.value);
+    // TODO: Refactor with robust error propagation design
+    const existing_entry = self._storage.get(req.key) catch return Store.Error.SomethingWentWrong;
+    if (existing_entry != null and shouldSkipIfExist(req.condition)) {
+        return makeSetResponse(req, existing_entry.?.value);
     }
 
-    if (shouldSkipIfNotExist(req.condition)) {
+    if (existing_entry == null and shouldSkipIfNotExist(req.condition)) {
         return makeSetResponse(req, null);
     }
 
-    const owned_key = try self._allocator.dupe(u8, req.key);
-    errdefer self._allocator.free(owned_key);
+    // TODO: Refactor with robust error propagation design
+    const stored_entry = self._storage.put(req.key, .{
+        .string = req.value,
+    }, .{
+        .expires_at = req.expires_at,
+        .keepttl = req.keepttl,
+    }) catch return Store.Error.SomethingWentWrong;
 
-    const owned_value = try self._allocator.dupe(u8, req.value);
-    errdefer self._allocator.free(owned_value);
+    return makeSetResponse(req, stored_entry.value);
+}
 
-    const value: object.Object = .{
-        .string = owned_value,
-    };
-
-    self._map.put(owned_key, .{
-        .value = value,
-    }) catch return Store.Error.OutOfMemory;
-
-    return makeSetResponse(req, value);
+pub fn dbsize(ptr: *anyopaque) u32 {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    return self._storage.size();
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
     if (maybe_condition) |condition| {
-        if (std.meta.activeTag(condition) == .nx) {
-            return true;
-        }
+        return switch (condition) {
+            .nx => true,
+            .xx => false,
+            else => false,
+        };
     }
-
     return false;
 }
 
 fn shouldSkipIfNotExist(maybe_condition: ?Request.SetCondition) bool {
     if (maybe_condition) |condition| {
-        if (std.meta.activeTag(condition) == .xx) {
-            return true;
-        }
+        return switch (condition) {
+            .nx => false,
+            .xx => true,
+            else => false,
+        };
     }
-
     return false;
+}
+
+fn validateCondition(maybe_condition: ?Request.SetCondition) Store.Error!void {
+    if (maybe_condition) |condition| switch (condition) {
+        .nx, .xx => {},
+        else => return error.UnsupportedCondition,
+    };
 }
 
 fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Object {
@@ -130,7 +123,8 @@ fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Objec
 }
 
 test "set stores a value and returns null" {
-    var memory_store = testMemoryStore();
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
 
     defer data_store.deinit();
@@ -139,7 +133,8 @@ test "set stores a value and returns null" {
         .key = "foo",
         .value = "barz",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
     const set_value = try data_store.set(req);
@@ -151,7 +146,8 @@ test "set stores a value and returns null" {
 }
 
 test "set stores a value and returns value" {
-    var memory_store = testMemoryStore();
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -159,7 +155,8 @@ test "set stores a value and returns value" {
         .key = "foo",
         .value = "barz",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = .{ .get = true },
     };
 
@@ -172,7 +169,8 @@ test "set stores a value and returns value" {
 }
 
 test "get returns null for a missing key" {
-    var memory_store = testMemoryStore();
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -182,7 +180,8 @@ test "get returns null for a missing key" {
 }
 
 test "set replaces an existing value" {
-    var memory_store = testMemoryStore();
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -190,7 +189,8 @@ test "set replaces an existing value" {
         .key = "key",
         .value = "first",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
     _ = try data_store.set(first_req);
@@ -199,7 +199,8 @@ test "set replaces an existing value" {
         .key = "key",
         .value = "second",
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
 
@@ -211,8 +212,54 @@ test "set replaces an existing value" {
     try expectObjectString(value, "second");
 }
 
+test "set with NX does not replace an existing value" {
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var memory_store = MemoryStore.init(backend.storage());
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    _ = try data_store.set(.{
+        .key = "key",
+        .value = "first",
+        .condition = null,
+        .expires_at = null,
+        .keepttl = false,
+        .response = null,
+    });
+    _ = try data_store.set(.{
+        .key = "key",
+        .value = "second",
+        .condition = .nx,
+        .expires_at = null,
+        .keepttl = false,
+        .response = null,
+    });
+
+    const value = try data_store.get("key") orelse return error.TestUnexpectedResult;
+    try expectObjectString(value, "first");
+}
+
+test "set with XX does not create a missing value" {
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var memory_store = MemoryStore.init(backend.storage());
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    _ = try data_store.set(.{
+        .key = "missing",
+        .value = "value",
+        .condition = .xx,
+        .expires_at = null,
+        .keepttl = false,
+        .response = null,
+    });
+
+    try testing.expect(try data_store.get("missing") == null);
+}
+
 test "set owns the key and value bytes" {
-    var memory_store = testMemoryStore();
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var memory_store = MemoryStore.init(backend.storage());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -223,7 +270,8 @@ test "set owns the key and value bytes" {
         .key = &key,
         .value = &value,
         .condition = null,
-        .expiration = null,
+        .expires_at = null,
+        .keepttl = false,
         .response = null,
     };
     _ = try data_store.set(req);
@@ -243,8 +291,4 @@ fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {
             try testing.expectEqualStrings(expected, str);
         },
     }
-}
-
-fn testMemoryStore() MemoryStore {
-    return MemoryStore.init(testing.allocator);
 }

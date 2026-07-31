@@ -13,18 +13,19 @@ pub const Error = std.mem.Allocator.Error || error{
     UnableToConvertObject,
     UnsupportedOption,
     Syntax,
+    SomethingWentWrong,
 };
 
 ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    execute: *const fn (*anyopaque, *store.Store) Error!resp.RESPValue,
+    execute: *const fn (*anyopaque, std.Io, *store.Store) Error!resp.RESPValue,
     deinit: *const fn (*anyopaque) void,
 };
 
-pub fn execute(self: Commander, data_store: *store.Store) Error!resp.RESPValue {
-    return self.vtable.execute(self.ptr, data_store);
+pub fn execute(self: Commander, io: std.Io, data_store: *store.Store) Error!resp.RESPValue {
+    return self.vtable.execute(self.ptr, io, data_store);
 }
 
 pub fn deinit(self: Commander) void {
