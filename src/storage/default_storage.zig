@@ -328,6 +328,48 @@ test "size counts all stored entries, not just expirable ones" {
     try testing.expectEqual(2, backend_storage.size());
 }
 
+test "removing an expiration keeps the moved entry index valid" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    const expires_at = time.nowMs(testing.io) + 60_000;
+    _ = try backend_storage.put("first", .{ .string = "one" }, .{ .expires_at = expires_at });
+    _ = try backend_storage.put("second", .{ .string = "two" }, .{ .expires_at = expires_at });
+
+    try backend_storage.remove("first");
+    _ = try backend_storage.put("second", .{ .string = "updated" }, .{ .expires_at = expires_at + 1 });
+
+    const second = try backend_storage.get("second") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("updated", second.value.string);
+    try testing.expectEqual(1, backend_storage.size());
+    try testing.expectEqual(1, backend_storage.getExpirableCount());
+}
+
+test "expired entries are removed when read and no longer counted" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    _ = try backend_storage.put("expired", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) - 1,
+    });
+
+    try testing.expect(try backend_storage.get("expired") == null);
+    try testing.expectEqual(0, backend_storage.size());
+    try testing.expectEqual(0, backend_storage.getExpirableCount());
+}
+
 test "transactions release the storage mutex" {
     const testing = std.testing;
 
