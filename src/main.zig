@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var data_store = mem_store.store();
 
     // Spin up active expiration
-    const handle = try std.Thread.spawn(.{}, handleExpiration, .{ io, data_storage });
+    const handle = try std.Thread.spawn(.{}, handleExpiration, .{ io, allocator, data_storage });
     handle.detach();
 
     // `MemoryStore` owns the storage interface, so `data_store.deinit()` also
@@ -46,7 +46,7 @@ fn listen(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store) !voi
     }
 }
 
-fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
+fn handleExpiration(io: std.Io, allocator: std.mem.Allocator, data_storage: storage.Interface) !void {
     const round_duration = std.Io.Duration.fromMilliseconds(100);
     const timeout_duration = std.Io.Duration.fromMilliseconds(100);
     const budget_ms: i8 = 10;
@@ -66,7 +66,7 @@ fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
             const burst_start_ms = time.nowMs(io);
 
             for (0..batch_size) |_| {
-                const is_removed = try expireRandom(data_storage);
+                const is_removed = try expireRandom(allocator, data_storage);
                 if (is_removed) {
                     expired_count += 1;
                 }
@@ -89,14 +89,19 @@ fn handleExpiration(io: std.Io, data_storage: storage.Interface) !void {
 }
 
 // NOTE: We are releasing lock on when err and when the transaction succeeded so that we dont starve the main threads
-fn expireRandom(data_storage: storage.Interface) !bool {
+fn expireRandom(allocator: std.mem.Allocator, data_storage: storage.Interface) !bool {
     var tx = try data_storage.begin();
     errdefer tx.end();
 
-    const is_removed = try data_storage.tryExpireRandom();
+    const removed_key = try data_storage.tryExpireRandom();
     tx.end();
 
-    return is_removed;
+    if (removed_key) |key| {
+        allocator.free(key);
+        return true;
+    }
+
+    return false;
 }
 
 fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Store) !void {

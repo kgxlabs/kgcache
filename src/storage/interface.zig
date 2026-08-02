@@ -49,7 +49,10 @@ pub const VTable = struct {
     getExp: *const fn (*anyopaque, []const u8) Error!?entry.ObjectExpiration,
     setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
     getExpirableCount: *const fn (*anyopaque) u32,
-    tryExpireRandom: *const fn (*anyopaque) Error!bool,
+    // Returns the key that was expired and removed, or `null` if nothing was
+    // removed. The returned slice is a fresh allocation owned by the caller —
+    // the caller must free it (see `tryExpireRandom` below).
+    tryExpireRandom: *const fn (*anyopaque) Error!?[]const u8,
     clearExp: *const fn (*anyopaque, []const u8) Error!void,
     size: *const fn (*anyopaque) u32,
     begin: *const fn (*anyopaque) Error!Tx,
@@ -88,7 +91,11 @@ pub fn getExpirableCount(self: Storage) u32 {
     return self.vtable.getExpirableCount(self.ptr);
 }
 
-pub fn tryExpireRandom(self: Storage) Error!bool {
+/// Expires and removes one random expirable key, if any exist.
+/// Returns the removed key, or `null` if nothing was removed.
+/// The caller must free the returned key with the same allocator the
+/// storage implementation was created with.
+pub fn tryExpireRandom(self: Storage) Error!?[]const u8 {
     return self.vtable.tryExpireRandom(self.ptr);
 }
 
@@ -103,3 +110,4 @@ pub fn size(self: Storage) u32 {
 pub fn deinit(self: Storage) void {
     self.vtable.deinit(self.ptr);
 }
+

@@ -98,6 +98,14 @@ pub fn deinit(ptr: *anyopaque) void {
     return;
 }
 
+// NOTE: `get` can silently remove `key` as a side effect (lazy expiration,
+// below), but that removal is not observable from this function's return
+// value alone. Any future wrapper that needs to observe every mutation
+// (e.g. a persistence layer notifying RDB/AOF listeners) must not call this
+// `get` directly for that purpose — it should route through the
+// already-observable `removeIfExpired` first, then delegate the plain
+// lookup to this `get`, so the lazy-expiration delete goes through the same
+// notification path a `DEL` would.
 pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
 
@@ -211,10 +219,10 @@ pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry
     };
 }
 
-pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!bool {
+pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     if (self._expirables.items.len == 0) {
-        return false;
+        return null;
     }
 
     const last_index = self._expirables.items.len - 1;
@@ -226,8 +234,21 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!bool {
         return Storage.Error.InvalidIndex;
     }
 
-    const item = self._expirables.items[random_index];
-    return try self.removeByKey(item.key, .expired_only);
+    const key = self._expirables.items[random_index].key;
+
+    // `removeByKey` frees the map's copy of `key` on removal, so we must dupe
+    // it *before* calling `removeByKey`, or the slice we'd return would be
+    // dangling. Caller owns and must free `owned_key`.
+    const owned_key = try self._allocator.dupe(u8, key);
+    errdefer self._allocator.free(owned_key);
+
+    const was_removed = try self.removeByKey(key, .expired_only);
+    if (!was_removed) {
+        self._allocator.free(owned_key);
+        return null;
+    }
+
+    return owned_key;
 }
 
 pub fn getExpirableCount(ptr: *anyopaque) u32 {
@@ -297,7 +318,7 @@ fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) !voi
     entry_object.exp_index = null;
 }
 
-test "tryExpireRandom returns false when no entries have an expiration" {
+test "tryExpireRandom returns null when no entries have an expiration" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
@@ -307,7 +328,28 @@ test "tryExpireRandom returns false when no entries have an expiration" {
     var tx = try backend_storage.begin();
     defer tx.end();
 
-    try testing.expect(!(try backend_storage.tryExpireRandom()));
+    try testing.expect(try backend_storage.tryExpireRandom() == null);
+}
+
+test "tryExpireRandom returns an owned copy of the removed key" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    _ = try backend_storage.put("expiring", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) - 1,
+    });
+
+    const removed_key = try backend_storage.tryExpireRandom() orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(removed_key);
+
+    try testing.expectEqualStrings("expiring", removed_key);
+    try testing.expectEqual(0, backend_storage.size());
 }
 
 test "size counts all stored entries, not just expirable ones" {
@@ -398,7 +440,7 @@ test "active expiration sampling releases the storage mutex" {
     put_tx.end();
 
     var expiration_tx = try backend_storage.begin();
-    _ = try backend_storage.tryExpireRandom();
+    if (try backend_storage.tryExpireRandom()) |key| testing.allocator.free(key);
     expiration_tx.end();
 
     var next_tx = try backend_storage.begin();
