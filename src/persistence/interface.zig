@@ -1,10 +1,10 @@
 const Storage = @import("../storage/interface.zig");
 const object = @import("../object.zig");
 
-const PListener = @This();
+const FsPersistence = @This();
 
 ptr: *anyopaque,
-vtable: *VTable,
+vtable: *const VTable,
 
 pub const Error = error{};
 
@@ -13,10 +13,10 @@ pub const WriteEvent = union(enum) {
     remove: struct { key: []const u8 },
 };
 
-const VTable = struct {
+pub const VTable = struct {
     onWrite: *const fn (*anyopaque, WriteEvent) Error!void,
 };
 
-pub fn onWrite(self: *PListener, event: WriteEvent) Error!void {
+pub fn onWrite(self: FsPersistence, event: WriteEvent) Error!void {
     return self.vtable.onWrite(self.ptr, event);
 }

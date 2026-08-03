@@ -297,6 +297,7 @@ fn removeByKey(self: *DefaultStorage, key: []const u8, mode: Storage.RemovalMode
 
     return false;
 }
+
 // Move the last item to index and overwrite it and then pop the last item hole
 // NOTE: This is not a actual swap but rather make the hole and pop it
 fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) !void {

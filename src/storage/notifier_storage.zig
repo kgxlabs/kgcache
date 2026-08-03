@@ -1,3 +1,7 @@
+// NOTE: This is a wrapper around real storage backend
+// This storage is only responsible for notifying the persistence backends when a operation happens
+// There should be no actual storage logic in this file
+
 const std = @import("std");
 const persistence = @import("../persistence.zig");
 const Storage = @import("interface.zig");
@@ -10,7 +14,9 @@ const NotifierStorage = @This();
 
 _allocator: std.mem.Allocator,
 _inner: Storage,
-_listeners: []persistence.PListener,
+// Currently, we support only one listener (persistence backend) at a time
+// unless there is a specific reason user want to have both RDB and AOF
+_listener: persistence.FsPersistence,
 
 const vtable: Storage.VTable = .{
     .begin = begin,
@@ -31,20 +37,20 @@ pub fn storage(self: *NotifierStorage) Storage {
     return .{
         .ptr = self,
         .vtable = &vtable,
-        ._io = self._io,
-        ._mutex = &self._mutex,
+        ._io = self._inner._io,
+        ._mutex = self._inner._mutex,
     };
 }
 
 pub fn init(
     allocator: std.mem.Allocator,
     inner: Storage,
-    listeners: []persistence.PListener,
+    listener: persistence.FsPersistence,
 ) NotifierStorage {
     return .{
         ._allocator = allocator,
         ._inner = inner,
-        ._listeners = listeners,
+        ._listener = listener,
     };
 }
 
@@ -61,12 +67,32 @@ pub fn deinit(ptr: *anyopaque) void {
 
 pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
+    // NOTE: `get` can silently remove `key` as a side effect (lazy expiration,
+    // below), but that removal is not observable without coupling with the persistence layer
+    // So instead of relying on concrete storage get removal, we are doing that operation in advance
+    // so when concrete `get` checks for removal it will already be removed
+    const is_removed = try self._inner.removeIfExpired(key);
+
+    if (is_removed) {
+        try self._listener.onWrite(.{
+            .remove = .{ .key = key },
+        });
+    }
+
     return self._inner.get(key);
 }
 
 pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    return self._inner.put(key, value, options);
+    const result = self._inner.put(key, value, options);
+
+    try self._listener.onWrite(.{ .put = .{
+        .key = key,
+        .value = value,
+        .options = options,
+    } });
+
+    return result;
 }
 
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
@@ -106,5 +132,5 @@ pub fn clearExp(ptr: *anyopaque, key: []const u8) Storage.Error!void {
 
 pub fn size(ptr: *anyopaque) u32 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    return @intCast(self._entry_map.count());
+    return self._inner.size();
 }
