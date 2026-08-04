@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
 
     var default_storage = storage.DefaultStorage.init(io, allocator);
-    var rdb_backend = persistence.RdbPersistence.init();
+    var rdb_backend = persistence.RdbPersistence.init(io);
     const persistence_backend = rdb_backend.persistence();
     var notifier_storage = storage.NotifierStorage.init(
         allocator,

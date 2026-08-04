@@ -1,4 +1,4 @@
-// NOTE: This is a wrapper around real storage backend
+// NOTE: This is a decorator storage which wraps around real storage backend
 // This storage is only responsible for notifying the persistence backends when a operation happens
 // There should be no actual storage logic in this file
 
@@ -84,7 +84,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
 
 pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    const result = self._inner.put(key, value, options);
+    const result = try self._inner.put(key, value, options);
 
     try self._listener.onWrite(.{ .put = .{
         .key = key,
