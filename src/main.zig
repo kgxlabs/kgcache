@@ -4,6 +4,7 @@ const commander = @import("commander.zig");
 const store = @import("store.zig");
 const helpers = @import("helpers.zig");
 const storage = @import("storage.zig");
+const persistence = @import("persistence.zig");
 const time = @import("time.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -23,7 +24,14 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
 
     var default_storage = storage.DefaultStorage.init(io, allocator);
-    const data_storage = default_storage.storage();
+    var rdb_backend = persistence.RdbPersistence.init(io);
+    const persistence_backend = rdb_backend.persistence();
+    var notifier_storage = storage.NotifierStorage.init(
+        allocator,
+        default_storage.storage(),
+        persistence_backend,
+    );
+    const data_storage = notifier_storage.storage();
     var mem_store = store.MemoryStore.init(data_storage);
     var data_store = mem_store.store();
 

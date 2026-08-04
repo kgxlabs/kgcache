@@ -8,6 +8,7 @@ pub const Error = error{
     InvalidIndex,
     UnableToExpire,
     TxCancelled,
+    UnableToRecordWrite,
 };
 
 const Storage = @This();
@@ -76,7 +77,7 @@ pub fn remove(self: Storage, key: []const u8) Error!void {
 }
 
 pub fn removeIfExpired(self: Storage, key: []const u8) Error!bool {
-    return self.vtable.remove(self.ptr, key);
+    return self.vtable.removeIfExpired(self.ptr, key);
 }
 
 pub fn getExp(self: Storage, key: []const u8) Error!?entry.ObjectExpiration {
@@ -110,4 +111,3 @@ pub fn size(self: Storage) u32 {
 pub fn deinit(self: Storage) void {
     self.vtable.deinit(self.ptr);
 }
-
