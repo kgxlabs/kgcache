@@ -38,6 +38,7 @@ const vtable: Storage.VTable = .{
     .tryExpireRandom = tryExpireRandom,
     .deinit = deinit,
     .size = size,
+    .forEach = forEach,
 };
 
 pub fn storage(self: *DefaultStorage) Storage {
@@ -257,6 +258,10 @@ pub fn getExpirableCount(ptr: *anyopaque) u32 {
 }
 
 pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
+    return;
+}
+
+pub fn forEach(_: *anyopaque, _: *anyopaque, _: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
     return;
 }
 

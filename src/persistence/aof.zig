@@ -1,9 +1,9 @@
 const std = @import("std");
-const Persistence = @import("./interface.zig");
+const Journal = @import("./journal_interface.zig");
 
 const AofBackend = @This();
 
-const vtable: Persistence.VTable = .{
+const vtable: Journal.VTable = .{
     .onWrite = onWrite,
 };
 
@@ -11,13 +11,13 @@ pub fn init() AofBackend {
     return .{};
 }
 
-pub fn persistence(self: *AofBackend) Persistence {
+pub fn journal(self: *AofBackend) Journal {
     return .{
         .ptr = self,
         .vtable = &vtable,
     };
 }
 
-pub fn onWrite(_: *anyopaque, _: persistence.WriteEvent) persistence.Error!void {
+pub fn onWrite(_: *anyopaque, _: Journal.WriteEvent) Journal.Error!void {
     return;
 }

@@ -1,32 +1,35 @@
 const std = @import("std");
+const Snapshot = @import("./snapshot_interface.zig");
+const object = @import("../object.zig");
 const time = @import("../time.zig");
-const Persistence = @import("./interface.zig");
 
 const RdbBackend = @This();
 
-_io: std.Io,
-_dirty: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-_last_save_at: time.UnixMs,
-
-const vtable: Persistence.VTable = .{
-    .onWrite = onWrite,
+const vtable: Snapshot.VTable = .{
+    .beginDump = beginDump,
+    .dumpEntry = dumpEntry,
+    .endDump = endDump,
 };
 
-pub fn init(io: std.Io) RdbBackend {
-    return .{
-        ._io = io,
-        ._last_save_at = time.nowMs(io),
-    };
+pub fn init() RdbBackend {
+    return .{};
 }
 
-pub fn persistence(self: *RdbBackend) Persistence {
+pub fn snapshot(self: *RdbBackend) Snapshot {
     return .{
         .ptr = self,
         .vtable = &vtable,
     };
 }
 
-// This is just a stub method since rdb does not really need to track everytime write operation happens
-pub fn onWrite(_: *anyopaque, _: Persistence.WriteEvent) Persistence.Error!void {
+pub fn beginDump(_: *anyopaque) Snapshot.Error!void {
+    return;
+}
+
+pub fn dumpEntry(_: *anyopaque, _: []const u8, _: object.Object, _: ?time.UnixMs) Snapshot.Error!void {
+    return;
+}
+
+pub fn endDump(_: *anyopaque) Snapshot.Error!void {
     return;
 }

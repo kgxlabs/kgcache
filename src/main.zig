@@ -24,12 +24,13 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
 
     var default_storage = storage.DefaultStorage.init(io, allocator);
-    var rdb_backend = persistence.RdbPersistence.init(io);
-    const persistence_backend = rdb_backend.persistence();
+    var rdb_backend = persistence.RdbPersistence.init();
+    var aof_backend = persistence.AofPersistence.init();
     var notifier_storage = storage.NotifierStorage.init(
         allocator,
         default_storage.storage(),
-        persistence_backend,
+        rdb_backend.snapshot(),
+        aof_backend.journal(),
     );
     const data_storage = notifier_storage.storage();
     var mem_store = store.MemoryStore.init(data_storage);
