@@ -14,9 +14,9 @@ const NotifierStorage = @This();
 
 _allocator: std.mem.Allocator,
 _inner: Storage,
-// RDB always runs: a snapshot backend is not optional.
-_rdb: persistence.SnapshotPersistence,
 // AOF is optional: write-log notifications are only sent if a journal backend is configured.
+// RDB snapshotting is not routed through here: it needs a `Storage` handle to enumerate
+// every key, not a per-write hook, so it lives at the `Store` level instead (see MemoryStore).
 _aof: ?persistence.JournalPersistence,
 
 const vtable: Storage.VTable = .{
@@ -47,13 +47,11 @@ pub fn storage(self: *NotifierStorage) Storage {
 pub fn init(
     allocator: std.mem.Allocator,
     inner: Storage,
-    rdb: persistence.SnapshotPersistence,
     aof: ?persistence.JournalPersistence,
 ) NotifierStorage {
     return .{
         ._allocator = allocator,
         ._inner = inner,
-        ._rdb = rdb,
         ._aof = aof,
     };
 }

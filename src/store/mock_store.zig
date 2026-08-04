@@ -10,6 +10,7 @@ dbsize_result: u32 = 0,
 get_calls: usize = 0,
 set_calls: usize = 0,
 dbsize_calls: usize = 0,
+save_calls: usize = 0,
 last_get_key: ?[]const u8 = null,
 last_set_key: ?[]const u8 = null,
 last_set_value: ?[]const u8 = null,
@@ -29,6 +30,7 @@ const vtable = Store.VTable{
     .get = get,
     .set = set,
     .dbsize = dbsize,
+    .save = save,
     .deinit = deinit,
 };
 
@@ -51,6 +53,11 @@ fn dbsize(ptr: *anyopaque) u32 {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.dbsize_calls += 1;
     return self.dbsize_result;
+}
+
+fn save(ptr: *anyopaque) Store.Error!void {
+    const self: *MockStore = @ptrCast(@alignCast(ptr));
+    self.save_calls += 1;
 }
 
 fn deinit(_: *anyopaque) void {}

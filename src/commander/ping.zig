@@ -4,6 +4,7 @@ const store = @import("../store.zig");
 const Commander = @import("interface.zig");
 const TestHelpers = @import("../tests/helpers.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
+const persistence = @import("../persistence.zig");
 
 const Ping = @This();
 
@@ -32,7 +33,8 @@ test "execute ping command" {
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = store.MemoryStore.init(default_storage.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = store.MemoryStore.init(default_storage.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 

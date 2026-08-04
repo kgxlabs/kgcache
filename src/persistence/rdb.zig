@@ -1,14 +1,13 @@
 const std = @import("std");
 const Snapshot = @import("./snapshot_interface.zig");
+const Storage = @import("../storage/interface.zig");
 const object = @import("../object.zig");
 const time = @import("../time.zig");
 
 const RdbBackend = @This();
 
 const vtable: Snapshot.VTable = .{
-    .beginDump = beginDump,
-    .dumpEntry = dumpEntry,
-    .endDump = endDump,
+    .save = save,
 };
 
 pub fn init() RdbBackend {
@@ -22,14 +21,27 @@ pub fn snapshot(self: *RdbBackend) Snapshot {
     };
 }
 
-pub fn beginDump(_: *anyopaque) Snapshot.Error!void {
+pub fn save(ptr: *anyopaque, storage: Storage) Snapshot.Error!void {
+    const self: *RdbBackend = @ptrCast(@alignCast(ptr));
+
+    try self.beginDump();
+    storage.forEach(self, visitEntry) catch return Snapshot.Error.UnableToSave;
+    try self.endDump();
+}
+
+fn visitEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void {
+    const self: *RdbBackend = @ptrCast(@alignCast(ctx));
+    try self.dumpEntry(key, value, exp);
+}
+
+fn beginDump(_: *RdbBackend) Snapshot.Error!void {
     return;
 }
 
-pub fn dumpEntry(_: *anyopaque, _: []const u8, _: object.Object, _: ?time.UnixMs) Snapshot.Error!void {
+fn dumpEntry(_: *RdbBackend, _: []const u8, _: object.Object, _: ?time.UnixMs) Snapshot.Error!void {
     return;
 }
 
-pub fn endDump(_: *anyopaque) Snapshot.Error!void {
+fn endDump(_: *RdbBackend) Snapshot.Error!void {
     return;
 }
