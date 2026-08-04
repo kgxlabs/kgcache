@@ -1,7 +1,7 @@
 const Storage = @import("../storage/interface.zig");
 const object = @import("../object.zig");
 
-const FsPersistence = @This();
+const JournalPersistence = @This();
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -17,6 +17,6 @@ pub const VTable = struct {
     onWrite: *const fn (*anyopaque, WriteEvent) Error!void,
 };
 
-pub fn onWrite(self: FsPersistence, event: WriteEvent) Error!void {
+pub fn onWrite(self: JournalPersistence, event: WriteEvent) Error!void {
     return self.vtable.onWrite(self.ptr, event);
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const Store = @import("interface.zig");
 const Storage = @import("../storage/interface.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
+const persistence = @import("../persistence.zig");
 const object = @import("../object.zig");
 const Request = @import("../commander/request.zig");
 const testing = std.testing;
@@ -9,10 +10,13 @@ const testing = std.testing;
 const MemoryStore = @This();
 
 _storage: Storage,
+_rdb: persistence.SnapshotPersistence,
+
 /// Takes ownership of `storage`: `deinit` calls `Storage.deinit` on it.
-pub fn init(storage: Storage) MemoryStore {
+pub fn init(storage: Storage, rdb: persistence.SnapshotPersistence) MemoryStore {
     return .{
         ._storage = storage,
+        ._rdb = rdb,
     };
 }
 
@@ -32,6 +36,7 @@ const vtable = Store.VTable{
     .get = get,
     .set = set,
     .dbsize = dbsize,
+    .save = save,
     .deinit = deinit,
 };
 
@@ -85,6 +90,11 @@ pub fn dbsize(ptr: *anyopaque) u32 {
     return self._storage.size();
 }
 
+pub fn save(ptr: *anyopaque) Store.Error!void {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    self._rdb.save(self._storage) catch return Store.Error.SomethingWentWrong;
+}
+
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
     if (maybe_condition) |condition| {
         return switch (condition) {
@@ -124,7 +134,8 @@ fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Objec
 
 test "set stores a value and returns null" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = MemoryStore.init(backend.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
 
     defer data_store.deinit();
@@ -147,7 +158,8 @@ test "set stores a value and returns null" {
 
 test "set stores a value and returns value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = MemoryStore.init(backend.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -170,7 +182,8 @@ test "set stores a value and returns value" {
 
 test "get returns null for a missing key" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = MemoryStore.init(backend.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -181,7 +194,8 @@ test "get returns null for a missing key" {
 
 test "set replaces an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = MemoryStore.init(backend.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -214,7 +228,8 @@ test "set replaces an existing value" {
 
 test "set with NX does not replace an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = MemoryStore.init(backend.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -241,7 +256,8 @@ test "set with NX does not replace an existing value" {
 
 test "set with XX does not create a missing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = MemoryStore.init(backend.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -259,7 +275,8 @@ test "set with XX does not create a missing value" {
 
 test "set owns the key and value bytes" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = MemoryStore.init(backend.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 

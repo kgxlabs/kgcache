@@ -1,4 +1,4 @@
-// NOTE: This is a decorator storage which wraps around real storage backend
+// NOTE: This is a wrapper around real storage backend
 // This storage is only responsible for notifying the persistence backends when a operation happens
 // There should be no actual storage logic in this file
 
@@ -14,9 +14,10 @@ const NotifierStorage = @This();
 
 _allocator: std.mem.Allocator,
 _inner: Storage,
-// Currently, we support only one listener (persistence backend) at a time
-// unless there is a specific reason user want to have both RDB and AOF
-_listener: persistence.FsPersistence,
+// AOF is optional: write-log notifications are only sent if a journal backend is configured.
+// RDB snapshotting is not routed through here: it needs a `Storage` handle to enumerate
+// every key, not a per-write hook, so it lives at the `Store` level instead (see MemoryStore).
+_aof: ?persistence.JournalPersistence,
 
 const vtable: Storage.VTable = .{
     .begin = begin,
@@ -31,6 +32,7 @@ const vtable: Storage.VTable = .{
     .tryExpireRandom = tryExpireRandom,
     .deinit = deinit,
     .size = size,
+    .forEach = forEach,
 };
 
 pub fn storage(self: *NotifierStorage) Storage {
@@ -45,12 +47,12 @@ pub fn storage(self: *NotifierStorage) Storage {
 pub fn init(
     allocator: std.mem.Allocator,
     inner: Storage,
-    listener: persistence.FsPersistence,
+    aof: ?persistence.JournalPersistence,
 ) NotifierStorage {
     return .{
         ._allocator = allocator,
         ._inner = inner,
-        ._listener = listener,
+        ._aof = aof,
     };
 }
 
@@ -74,9 +76,11 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const is_removed = try self._inner.removeIfExpired(key);
 
     if (is_removed) {
-        try self._listener.onWrite(.{
-            .remove = .{ .key = key },
-        });
+        if (self._aof) |aof| {
+            try aof.onWrite(.{
+                .remove = .{ .key = key },
+            });
+        }
     }
 
     return self._inner.get(key);
@@ -86,11 +90,13 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     const result = try self._inner.put(key, value, options);
 
-    try self._listener.onWrite(.{ .put = .{
-        .key = key,
-        .value = value,
-        .options = options,
-    } });
+    if (self._aof) |aof| {
+        try aof.onWrite(.{ .put = .{
+            .key = key,
+            .value = value,
+            .options = options,
+        } });
+    }
 
     return result;
 }
@@ -133,4 +139,9 @@ pub fn clearExp(ptr: *anyopaque, key: []const u8) Storage.Error!void {
 pub fn size(ptr: *anyopaque) u32 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.size();
+}
+
+pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
+    const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
+    return self._inner.forEach(ctx, visit);
 }

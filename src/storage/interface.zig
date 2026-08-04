@@ -57,6 +57,11 @@ pub const VTable = struct {
     clearExp: *const fn (*anyopaque, []const u8) Error!void,
     size: *const fn (*anyopaque) u32,
     begin: *const fn (*anyopaque) Error!Tx,
+    forEach: *const fn (
+        *anyopaque,
+        *anyopaque,
+        *const fn (*anyopaque, []const u8, object.Object, ?time.UnixMs) anyerror!void,
+    ) Error!void,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -102,6 +107,10 @@ pub fn tryExpireRandom(self: Storage) Error!?[]const u8 {
 
 pub fn clearExp(self: Storage, key: []const u8) Error!void {
     return self.vtable.clearExp(self.ptr, key);
+}
+
+pub fn forEach(self: Storage, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Error!void {
+    return self.vtable.forEach(self.ptr, ctx, visit);
 }
 
 pub fn size(self: Storage) u32 {

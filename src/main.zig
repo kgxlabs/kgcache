@@ -24,15 +24,23 @@ pub fn main(init: std.process.Init) !void {
     const allocator = gpa.allocator();
 
     var default_storage = storage.DefaultStorage.init(io, allocator);
-    var rdb_backend = persistence.RdbPersistence.init(io);
-    const persistence_backend = rdb_backend.persistence();
+    var rdb_backend = persistence.RdbPersistence.init();
+    var aof_backend = persistence.AofPersistence.init();
+
+    // See `persistence.Persistence` for why `rdb`/`aof` are consumed by two
+    // different layers below instead of both being handed to the same one.
+    const backend_persistence = persistence.Persistence{
+        .rdb = rdb_backend.snapshot(),
+        .aof = aof_backend.journal(),
+    };
+
     var notifier_storage = storage.NotifierStorage.init(
         allocator,
         default_storage.storage(),
-        persistence_backend,
+        backend_persistence.aof,
     );
     const data_storage = notifier_storage.storage();
-    var mem_store = store.MemoryStore.init(data_storage);
+    var mem_store = store.MemoryStore.init(data_storage, backend_persistence.rdb);
     var data_store = mem_store.store();
 
     // Spin up active expiration

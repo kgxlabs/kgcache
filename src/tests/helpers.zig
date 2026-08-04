@@ -5,13 +5,15 @@ const commander = @import("../commander.zig");
 const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
+const persistence = @import("../persistence.zig");
 
 pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp.RESPValue {
     const testing = std.testing;
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
-    var memory_store = store.MemoryStore.init(default_storage.storage());
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = store.MemoryStore.init(default_storage.storage(), rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
