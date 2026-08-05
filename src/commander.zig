@@ -8,6 +8,8 @@ pub const Echo = @import("commander/echo.zig");
 pub const Get = @import("commander/get.zig");
 pub const Ping = @import("commander/ping.zig");
 pub const Set = @import("commander/set.zig");
+pub const Save = @import("commander/save.zig");
+
 pub const Error = Commander.Error;
 
 const CommandKind = enum {
@@ -16,6 +18,7 @@ const CommandKind = enum {
     echo,
     get,
     ping,
+    save,
     set,
 
     fn parse(keyword: []const u8) Error!CommandKind {
@@ -24,6 +27,7 @@ const CommandKind = enum {
         if (std.ascii.eqlIgnoreCase(keyword, "echo")) return .echo;
         if (std.ascii.eqlIgnoreCase(keyword, "get")) return .get;
         if (std.ascii.eqlIgnoreCase(keyword, "ping")) return .ping;
+        if (std.ascii.eqlIgnoreCase(keyword, "save")) return .save;
         if (std.ascii.eqlIgnoreCase(keyword, "set")) return .set;
 
         return error.UnknownCommand;
@@ -40,6 +44,7 @@ pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander
         .echo => try create(Echo, allocator, arguments),
         .get => try create(Get, allocator, arguments),
         .ping => try create(Ping, allocator, arguments),
+        .save => try create(Save, allocator, arguments),
         .set => try create(Set, allocator, arguments),
     };
 }

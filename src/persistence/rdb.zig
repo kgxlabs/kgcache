@@ -31,7 +31,7 @@ pub fn save(ptr: *anyopaque, storage: Storage) Snapshot.Error!void {
 
 fn visitEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void {
     const self: *RdbBackend = @ptrCast(@alignCast(ctx));
-    try self.dumpEntry(key, value, exp);
+    try dumpEntry(key, value, exp);
 }
 
 fn beginDump(_: *RdbBackend) Snapshot.Error!void {
