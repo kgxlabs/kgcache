@@ -18,6 +18,7 @@ _inner: Storage,
 // RDB snapshotting is not routed through here: it needs a `Storage` handle to enumerate
 // every key, not a per-write hook, so it lives at the `Store` level instead (see MemoryStore).
 _aof: ?persistence.JournalPersistence,
+_db_index: u32,
 
 const vtable: Storage.VTable = .{
     .begin = begin,
@@ -48,11 +49,13 @@ pub fn init(
     allocator: std.mem.Allocator,
     inner: Storage,
     aof: ?persistence.JournalPersistence,
+    db_index: u32,
 ) NotifierStorage {
     return .{
         ._allocator = allocator,
         ._inner = inner,
         ._aof = aof,
+        ._db_index = db_index,
     };
 }
 
@@ -78,7 +81,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     if (is_removed) {
         if (self._aof) |aof| {
             try aof.onWrite(.{
-                .remove = .{ .key = key },
+                .remove = .{ .db_index = self._db_index, .key = key },
             });
         }
     }
@@ -92,6 +95,7 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 
     if (self._aof) |aof| {
         try aof.onWrite(.{ .put = .{
+            .db_index = self._db_index,
             .key = key,
             .value = value,
             .options = options,

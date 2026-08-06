@@ -1,3 +1,4 @@
+const std = @import("std");
 const resp = @import("../resp.zig");
 const Commander = @import("interface.zig");
 
@@ -6,6 +7,11 @@ pub fn bulkString(argument: resp.RESPValue) Commander.Error![]const u8 {
         .bulk_string => |maybe_string| maybe_string orelse Commander.Error.MalformedCommandRequest,
         else => Commander.Error.UnsupportedArgumentType,
     };
+}
+
+pub fn bulkStringInt(comptime T: type, argument: resp.RESPValue) Commander.Error!T {
+    const value = try bulkString(argument);
+    return std.fmt.parseInt(T, value, 10) catch return Commander.Error.MalformedCommandRequest;
 }
 
 pub fn integer(argument: resp.RESPValue) Commander.Error!u32 {

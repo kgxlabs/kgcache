@@ -16,13 +16,13 @@ pub fn commander(self: *DBSize) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!resp.RESPValue {
     const self: *DBSize = @ptrCast(@alignCast(ptr));
     if (self.arguments.len != 0) {
         return .{ .simple_error = "Wrong number of arguments" };
     }
 
-    return .{ .integer = @intCast(data_store.dbsize()) };
+    return .{ .integer = @intCast(data_store.dbsize(client_state.db_index)) };
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -50,8 +50,9 @@ test "execute delegates to the store dbsize operation" {
     var mock_store = MockStore.init();
     mock_store.dbsize_result = 42;
     var data_store = mock_store.store();
+    var client_state: Commander.ClientState = .{};
 
-    const result = try command.execute(testing.io, &data_store);
+    const result = try command.execute(testing.io, &data_store, &client_state);
     try testing.expectEqual(@as(i64, 42), result.integer);
     try testing.expectEqual(1, mock_store.dbsize_calls);
 }

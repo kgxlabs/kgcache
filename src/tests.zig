@@ -8,4 +8,5 @@ test {
     _ = @import("entry.zig");
     _ = @import("storage/default_storage.zig");
     _ = @import("object.zig");
+    _ = @import("main.zig");
 }

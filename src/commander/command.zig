@@ -14,7 +14,7 @@ pub fn commander(self: *Command) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
     const self: *Command = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 0) {
