@@ -9,8 +9,8 @@ vtable: *const VTable,
 pub const Error = error{};
 
 pub const WriteEvent = union(enum) {
-    put: struct { key: []const u8, value: object.Object, options: Storage.PutOptions },
-    remove: struct { key: []const u8 },
+    put: struct { db_index: u32, key: []const u8, value: object.Object, options: Storage.PutOptions },
+    remove: struct { db_index: u32, key: []const u8 },
 };
 
 pub const VTable = struct {

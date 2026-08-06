@@ -13,11 +13,12 @@ pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = store.MemoryStore.init(default_storage.storage(), rdb_backend.snapshot());
+    var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
+    var client_state: commander.ClientState = .{};
 
-    return command.execute(testing.io, &data_store);
+    return command.execute(testing.io, &data_store, &client_state);
 }
 
 pub fn initCommand(allocator: std.mem.Allocator, value: resp.RESPValue) commander.Error!commander.Commander {

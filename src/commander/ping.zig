@@ -17,7 +17,7 @@ pub fn commander(self: *Ping) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(_: *anyopaque, _: std.Io, _: *store.Store) Commander.Error!resp.RESPValue {
+fn execute(_: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
     return .{ .simple_string = "PONG" };
 }
 
@@ -34,11 +34,12 @@ test "execute ping command" {
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = store.MemoryStore.init(default_storage.storage(), rdb_backend.snapshot());
+    var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
+    var client_state: Commander.ClientState = .{};
 
-    const result = try command.execute(testing.io, &data_store);
+    const result = try command.execute(testing.io, &data_store, &client_state);
     switch (result) {
         .simple_string => |actual| try testing.expectEqualStrings("PONG", actual),
         else => return error.TestUnexpectedResult,

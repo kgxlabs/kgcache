@@ -7,6 +7,7 @@ const MockStore = @This();
 get_result: Store.Error!?object.Object = null,
 set_result: Store.Error!?object.Object = null,
 dbsize_result: u32 = 0,
+num_databases_result: u32 = 1,
 get_calls: usize = 0,
 set_calls: usize = 0,
 dbsize_calls: usize = 0,
@@ -30,18 +31,19 @@ const vtable = Store.VTable{
     .get = get,
     .set = set,
     .dbsize = dbsize,
+    .numDatabases = numDatabases,
     .save = save,
     .deinit = deinit,
 };
 
-fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
+fn get(ptr: *anyopaque, key: []const u8, _: u32) Store.Error!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.get_calls += 1;
     self.last_get_key = key;
     return self.get_result;
 }
 
-fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
+fn set(ptr: *anyopaque, req: Request.SetRequest, _: u32) Store.Error!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.set_calls += 1;
     self.last_set_key = req.key;
@@ -49,10 +51,15 @@ fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
     return self.set_result;
 }
 
-fn dbsize(ptr: *anyopaque) u32 {
+fn dbsize(ptr: *anyopaque, _: u32) u32 {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.dbsize_calls += 1;
     return self.dbsize_result;
+}
+
+fn numDatabases(ptr: *anyopaque) u32 {
+    const self: *MockStore = @ptrCast(@alignCast(ptr));
+    return self.num_databases_result;
 }
 
 fn save(ptr: *anyopaque) Store.Error!void {

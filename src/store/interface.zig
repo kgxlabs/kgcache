@@ -1,5 +1,6 @@
 const std = @import("std");
 const object = @import("../object.zig");
+const Storage = @import("../storage/interface.zig");
 const Request = @import("../commander/request.zig");
 
 pub const Error = std.mem.Allocator.Error || error{
@@ -14,23 +15,28 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    get: *const fn (*anyopaque, []const u8) Error!?object.Object,
-    set: *const fn (*anyopaque, Request.SetRequest) Error!?object.Object,
-    dbsize: *const fn (*anyopaque) u32,
+    get: *const fn (*anyopaque, []const u8, u32) Error!?object.Object,
+    set: *const fn (*anyopaque, Request.SetRequest, u32) Error!?object.Object,
+    dbsize: *const fn (*anyopaque, u32) u32,
+    numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque) Error!void,
     deinit: *const fn (*anyopaque) void,
 };
 
-pub fn get(self: Store, key: []const u8) Error!?object.Object {
-    return self.vtable.get(self.ptr, key);
+pub fn get(self: Store, key: []const u8, db_index: u32) Error!?object.Object {
+    return self.vtable.get(self.ptr, key, db_index);
 }
 
-pub fn set(self: Store, req: Request.SetRequest) Error!?object.Object {
-    return self.vtable.set(self.ptr, req);
+pub fn set(self: Store, req: Request.SetRequest, db_index: u32) Error!?object.Object {
+    return self.vtable.set(self.ptr, req, db_index);
 }
 
-pub fn dbsize(self: Store) u32 {
-    return self.vtable.dbsize(self.ptr);
+pub fn dbsize(self: Store, db_index: u32) u32 {
+    return self.vtable.dbsize(self.ptr, db_index);
+}
+
+pub fn numDatabases(self: Store) u32 {
+    return self.vtable.numDatabases(self.ptr);
 }
 
 pub fn save(self: Store) Error!void {

@@ -9,20 +9,20 @@ const testing = std.testing;
 
 const MemoryStore = @This();
 
-_storage: Storage,
+_storages: []const Storage,
 _rdb: persistence.SnapshotPersistence,
 
-/// Takes ownership of `storage`: `deinit` calls `Storage.deinit` on it.
-pub fn init(storage: Storage, rdb: persistence.SnapshotPersistence) MemoryStore {
+/// Takes ownership of `storages`: `deinit` calls `Storage.deinit` on each.
+pub fn init(storages: []const Storage, rdb: persistence.SnapshotPersistence) MemoryStore {
     return .{
-        ._storage = storage,
+        ._storages = storages,
         ._rdb = rdb,
     };
 }
 
 pub fn deinit(ptr: *anyopaque) void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._storage.deinit();
+    for (self._storages) |s| s.deinit();
 }
 
 pub fn store(self: *MemoryStore) Store {
@@ -36,17 +36,19 @@ const vtable = Store.VTable{
     .get = get,
     .set = set,
     .dbsize = dbsize,
+    .numDatabases = numDatabases,
     .save = save,
     .deinit = deinit,
 };
 
-pub fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
+pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    var tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    const storage = self._storages[db_index];
+    var tx = storage.begin() catch return Store.Error.CancelledCommand;
     defer tx.end();
 
     // TODO: Refactor with robust error propagation design
-    const maybe_value = self._storage.get(key) catch return Store.Error.SomethingWentWrong;
+    const maybe_value = storage.get(key) catch return Store.Error.SomethingWentWrong;
     const value = maybe_value orelse return null;
     return value.value;
 }
@@ -56,16 +58,17 @@ pub fn get(ptr: *anyopaque, key: []const u8) Store.Error!?object.Object {
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-pub fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object {
+pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const storage = self._storages[db_index];
 
     try validateCondition(req.condition);
 
-    var tx = self._storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = storage.begin() catch return Store.Error.CancelledCommand;
     defer tx.end();
 
     // TODO: Refactor with robust error propagation design
-    const existing_entry = self._storage.get(req.key) catch return Store.Error.SomethingWentWrong;
+    const existing_entry = storage.get(req.key) catch return Store.Error.SomethingWentWrong;
     if (existing_entry != null and shouldSkipIfExist(req.condition)) {
         return makeSetResponse(req, existing_entry.?.value);
     }
@@ -75,7 +78,7 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object 
     }
 
     // TODO: Refactor with robust error propagation design
-    const stored_entry = self._storage.put(req.key, .{
+    const stored_entry = storage.put(req.key, .{
         .string = req.value,
     }, .{
         .expires_at = req.expires_at,
@@ -85,14 +88,19 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest) Store.Error!?object.Object 
     return makeSetResponse(req, stored_entry.value);
 }
 
-pub fn dbsize(ptr: *anyopaque) u32 {
+pub fn dbsize(ptr: *anyopaque, db_index: u32) u32 {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    return self._storage.size();
+    return self._storages[db_index].size();
+}
+
+pub fn numDatabases(ptr: *anyopaque) u32 {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    return @intCast(self._storages.len);
 }
 
 pub fn save(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._rdb.save(self._storage) catch return Store.Error.SomethingWentWrong;
+    self._rdb.save(self._storages[0]) catch return Store.Error.SomethingWentWrong;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
@@ -135,7 +143,7 @@ fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Objec
 test "set stores a value and returns null" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
+    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
 
     defer data_store.deinit();
@@ -148,18 +156,18 @@ test "set stores a value and returns null" {
         .keepttl = false,
         .response = null,
     };
-    const set_value = try data_store.set(req);
+    const set_value = try data_store.set(req, 0);
 
     try testing.expect(set_value == null);
 
-    const get_value = try data_store.get(req.key) orelse return error.TestUnexpectedResult;
+    const get_value = try data_store.get(req.key, 0) orelse return error.TestUnexpectedResult;
     try expectObjectString(get_value, req.value);
 }
 
 test "set stores a value and returns value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
+    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -172,22 +180,22 @@ test "set stores a value and returns value" {
         .response = .{ .get = true },
     };
 
-    const set_value = try data_store.set(req);
+    const set_value = try data_store.set(req, 0);
 
     try expectObjectString(set_value, req.value);
 
-    const get_value = try data_store.get(req.key) orelse return error.TestUnexpectedResult;
+    const get_value = try data_store.get(req.key, 0) orelse return error.TestUnexpectedResult;
     try expectObjectString(get_value, req.value);
 }
 
 test "get returns null for a missing key" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
+    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    const value = try data_store.get("missing");
+    const value = try data_store.get("missing", 0);
 
     try testing.expect(value == null);
 }
@@ -195,7 +203,7 @@ test "get returns null for a missing key" {
 test "set replaces an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
+    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -207,7 +215,7 @@ test "set replaces an existing value" {
         .keepttl = false,
         .response = null,
     };
-    _ = try data_store.set(first_req);
+    _ = try data_store.set(first_req, 0);
 
     const second_req: Request.SetRequest = .{
         .key = "key",
@@ -218,18 +226,18 @@ test "set replaces an existing value" {
         .response = null,
     };
 
-    const result = try data_store.set(second_req);
+    const result = try data_store.set(second_req, 0);
 
     try testing.expect(result == null);
 
-    const value = try data_store.get("key") orelse return error.TestUnexpectedResult;
+    const value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
     try expectObjectString(value, "second");
 }
 
 test "set with NX does not replace an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
+    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -240,7 +248,7 @@ test "set with NX does not replace an existing value" {
         .expires_at = null,
         .keepttl = false,
         .response = null,
-    });
+    }, 0);
     _ = try data_store.set(.{
         .key = "key",
         .value = "second",
@@ -248,16 +256,16 @@ test "set with NX does not replace an existing value" {
         .expires_at = null,
         .keepttl = false,
         .response = null,
-    });
+    }, 0);
 
-    const value = try data_store.get("key") orelse return error.TestUnexpectedResult;
+    const value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
     try expectObjectString(value, "first");
 }
 
 test "set with XX does not create a missing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
+    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -268,15 +276,15 @@ test "set with XX does not create a missing value" {
         .expires_at = null,
         .keepttl = false,
         .response = null,
-    });
+    }, 0);
 
-    try testing.expect(try data_store.get("missing") == null);
+    try testing.expect(try data_store.get("missing", 0) == null);
 }
 
 test "set owns the key and value bytes" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = MemoryStore.init(backend.storage(), rdb_backend.snapshot());
+    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -291,13 +299,36 @@ test "set owns the key and value bytes" {
         .keepttl = false,
         .response = null,
     };
-    _ = try data_store.set(req);
+    _ = try data_store.set(req, 0);
 
     @memset(&key, 'x');
     @memset(&value, 'x');
 
-    const stored_value = try data_store.get("key") orelse return error.TestUnexpectedResult;
+    const stored_value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
     try expectObjectString(stored_value, "one");
+}
+
+test "databases are isolated from each other" {
+    var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_one = DefaultStorage.init(testing.io, testing.allocator);
+    var rdb_backend = persistence.RdbPersistence.init();
+    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, rdb_backend.snapshot());
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    _ = try data_store.set(.{
+        .key = "key",
+        .value = "value",
+        .condition = null,
+        .expires_at = null,
+        .keepttl = false,
+        .response = null,
+    }, 0);
+
+    try testing.expect(try data_store.get("key", 1) == null);
+
+    const value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
+    try expectObjectString(value, "value");
 }
 
 fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {
