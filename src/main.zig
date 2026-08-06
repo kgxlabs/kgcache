@@ -157,7 +157,7 @@ fn expireRandom(allocator: std.mem.Allocator, data_storage: storage.Interface) !
 fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Store) !void {
     defer connection.close(io);
 
-    var client_state: ClientState = .{};
+    var client_state = ClientState.init();
 
     while (true) {
         // TODO: use buffered writer
