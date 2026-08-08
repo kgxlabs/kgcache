@@ -261,8 +261,28 @@ pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
     return;
 }
 
-pub fn forEach(_: *anyopaque, _: *anyopaque, _: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
-    return;
+pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+
+    var iterator = self._entry_map.iterator();
+    while (iterator.next()) |item| {
+        const entry_object = item.value_ptr.*;
+
+        var exp: ?time.UnixMs = null;
+        if (entry_object.exp_index) |exp_index| {
+            const expires_at = self._expirables.items[exp_index].expires_at;
+
+            // A key past its TTL is logically already gone even if lazy
+            // expiration hasn't physically evicted it yet -- `get` would
+            // return `null` for it, so a snapshot shouldn't write it either.
+            // Eviction itself stays the job of the normal expire paths; we
+            // just skip it here rather than remove it.
+            if (time.isPastTime(self._io, expires_at)) continue;
+            exp = expires_at;
+        }
+
+        visit(ctx, item.key_ptr.*, entry_object.value, exp) catch return Storage.Error.UnableToRecordWrite;
+    }
 }
 
 pub fn size(ptr: *anyopaque) u32 {
@@ -430,6 +450,60 @@ test "transactions release the storage mutex" {
 
     var second = try backend_storage.begin();
     second.end();
+}
+
+test "forEach visits every stored entry with its value and expiration" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    const expires_at = time.nowMs(testing.io) + 60_000;
+    _ = try backend_storage.put("persistent", .{ .string = "one" }, .{ .expires_at = null });
+    _ = try backend_storage.put("expiring", .{ .string = "two" }, .{ .expires_at = expires_at });
+
+    var seen = std.StringHashMap(?time.UnixMs).init(testing.allocator);
+    defer seen.deinit();
+
+    try backend_storage.forEach(&seen, visitCollectExp);
+
+    try testing.expectEqual(2, seen.count());
+    try testing.expectEqual(null, seen.get("persistent").?);
+    try testing.expectEqual(expires_at, seen.get("expiring").?);
+}
+
+test "forEach skips entries that are past their expiration" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    _ = try backend_storage.put("expired", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) - 1,
+    });
+    _ = try backend_storage.put("fresh", .{ .string = "value" }, .{ .expires_at = null });
+
+    var seen = std.StringHashMap(?time.UnixMs).init(testing.allocator);
+    defer seen.deinit();
+
+    try backend_storage.forEach(&seen, visitCollectExp);
+
+    try testing.expectEqual(1, seen.count());
+    try testing.expect(seen.contains("fresh"));
+    try testing.expect(!seen.contains("expired"));
+}
+
+fn visitCollectExp(ctx: *anyopaque, key: []const u8, _: object.Object, exp: ?time.UnixMs) anyerror!void {
+    const seen: *std.StringHashMap(?time.UnixMs) = @ptrCast(@alignCast(ctx));
+    try seen.put(key, exp);
 }
 
 test "active expiration sampling releases the storage mutex" {
