@@ -35,8 +35,8 @@ pub fn main(init: std.process.Init) !void {
     var default_storages: [num_databases]storage.DefaultStorage = undefined;
     for (&default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
 
-    var rdb_backend = persistence.RdbPersistence.init();
-    var aof_backend = persistence.AofPersistence.init();
+    var rdb_backend = persistence.RdbPersistence.init(io, allocator, "dump.rdb");
+    var aof_backend = persistence.AofPersistence.init(allocator);
 
     // See `persistence.Persistence` for why `rdb`/`aof` are consumed by two
     // different layers below instead of both being handed to the same one.

@@ -13,7 +13,7 @@ pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init();
+    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
     var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, rdb_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
