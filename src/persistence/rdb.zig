@@ -33,11 +33,18 @@ pub fn snapshot(self: *RdbBackend) Snapshot {
     };
 }
 
-pub fn save(ptr: *anyopaque, storage: Storage) Snapshot.Error!void {
+pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *RdbBackend = @ptrCast(@alignCast(ptr));
 
     try self.beginDump();
-    storage.forEach(self, visitEntry) catch return Snapshot.Error.UnableToSave;
+    for (storages, 0..) |storage, db_index| {
+        // a database with nothing in it gets no `SELECTDB`
+        // section at all, rather than an empty one.
+        if (storage.size() == 0) continue;
+
+        try self.selectDb(@intCast(db_index));
+        storage.forEach(self, visitEntry) catch return Snapshot.Error.UnableToSave;
+    }
     try self.endDump();
 }
 
@@ -50,6 +57,10 @@ fn beginDump(self: *RdbBackend) Snapshot.Error!void {
     var encoder = RdbEncoder.init(self._allocator);
     encoder.writeHeader() catch return Snapshot.Error.UnableToSave;
     self._encoder = encoder;
+}
+
+fn selectDb(self: *RdbBackend, db_index: u32) Snapshot.Error!void {
+    self._encoder.?.writeSelectDb(db_index) catch return Snapshot.Error.UnableToSave;
 }
 
 fn dumpEntry(self: *RdbBackend, key: []const u8, value: object.Object, exp: ?time.UnixMs) Snapshot.Error!void {

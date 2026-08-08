@@ -100,7 +100,7 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
 
 pub fn save(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._rdb.save(self._storages[0]) catch return Store.Error.SomethingWentWrong;
+    self._rdb.save(self._storages) catch return Store.Error.SomethingWentWrong;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {

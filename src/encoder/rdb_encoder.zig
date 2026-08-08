@@ -6,7 +6,15 @@ const RdbEncoder = @This();
 
 /// "KGCACHE" magic + "0000" version. Written once, at the very start of a dump.
 const header = "KGCACHE0000";
-const eof_marker: u8 = 0xFF;
+
+// Opcodes live in the high end of the byte range (0xFA-0xFF, mirroring
+// Redis's own reserved range) so a reader can always tell an opcode from a
+// type tag: type tags stay low (see `TypeTag`) and will never grow into this
+// range given how few object types there are ever going to be.
+const Opcode = enum(u8) {
+    select_db = 0xFE,
+    eof = 0xFF,
+};
 
 // Every entry is tagged with its type, even though `object.Object` only has
 // `.string` today: this lets future types (list/set/hash/...) join the
@@ -42,6 +50,14 @@ pub fn writeHeader(self: *RdbEncoder) !void {
     try self.writeRaw(header);
 }
 
+/// Marks the start of a database's keys, exactly like Redis's own `SELECTDB`
+/// opcode: every entry written after this belongs to `db_index`, until the
+/// next `writeSelectDb` call or the footer.
+pub fn writeSelectDb(self: *RdbEncoder, db_index: u32) !void {
+    try self.writeRaw(&[_]u8{@intFromEnum(Opcode.select_db)});
+    try self.writeRaw(std.mem.asBytes(&db_index));
+}
+
 pub fn writeEntry(self: *RdbEncoder, key: []const u8, value: object.Object, exp: ?time.UnixMs) !void {
     try self.writeTypeTag(value);
     try self.writeExpiry(exp);
@@ -50,7 +66,7 @@ pub fn writeEntry(self: *RdbEncoder, key: []const u8, value: object.Object, exp:
 }
 
 pub fn writeFooter(self: *RdbEncoder) !void {
-    try self.writeRaw(&[_]u8{eof_marker});
+    try self.writeRaw(&[_]u8{@intFromEnum(Opcode.eof)});
 
     // The checksum digests everything up to and including the EOF marker,
     // so it can't digest itself — these final bytes go straight to the

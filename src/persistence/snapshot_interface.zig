@@ -10,9 +10,9 @@ pub const Error = error{
 };
 
 pub const VTable = struct {
-    save: *const fn (*anyopaque, storage: Storage) Error!void,
+    save: *const fn (*anyopaque, storages: []const Storage) Error!void,
 };
 
-pub fn save(self: SnapshotPersistence, storage: Storage) Error!void {
-    return self.vtable.save(self.ptr, storage);
+pub fn save(self: SnapshotPersistence, storages: []const Storage) Error!void {
+    return self.vtable.save(self.ptr, storages);
 }

@@ -17,8 +17,9 @@ pub fn commander(self: *Save) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(_: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
-    return .{ .simple_string = "OK" };
+fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
+    data_store.save() catch return Commander.Error.UnableToSaveRDB;
+    return resp.RESPValue{ .simple_string = "OK" };
 }
 
 fn deinit(ptr: *anyopaque) void {
