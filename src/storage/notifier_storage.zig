@@ -15,7 +15,7 @@ const NotifierStorage = @This();
 _allocator: std.mem.Allocator,
 _inner: Storage,
 // AOF is optional: write-log notifications are only sent if a journal backend is configured.
-// RDB snapshotting is not routed through here: it needs a `Storage` handle to enumerate
+// KGC snapshotting is not routed through here: it needs a `Storage` handle to enumerate
 // every key, not a per-write hook, so it lives at the `Store` level instead (see MemoryStore).
 _aof: ?persistence.JournalPersistence,
 _db_index: u32,

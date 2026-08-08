@@ -16,7 +16,7 @@ pub const Error = std.mem.Allocator.Error || error{
     UnsupportedOption,
     Syntax,
     SomethingWentWrong,
-    UnableToSaveRDB,
+    UnableToSaveKgc,
 };
 
 ptr: *anyopaque,

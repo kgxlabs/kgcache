@@ -13,8 +13,12 @@ pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, rdb_backend.snapshot());
+    // `catch unreachable`: the path is a literal known to end in `.kgc`, so
+    // `InitError.InvalidExtension` can't actually happen here -- and this
+    // function's return type is `commander.Error`, which that error isn't
+    // part of.
+    var kgc_backend = persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc") catch unreachable;
+    var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
     var client_state: ClientState = .{};

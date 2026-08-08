@@ -10,13 +10,13 @@ const testing = std.testing;
 const MemoryStore = @This();
 
 _storages: []const Storage,
-_rdb: persistence.SnapshotPersistence,
+_kgc: persistence.SnapshotPersistence,
 
 /// Takes ownership of `storages`: `deinit` calls `Storage.deinit` on each.
-pub fn init(storages: []const Storage, rdb: persistence.SnapshotPersistence) MemoryStore {
+pub fn init(storages: []const Storage, kgc: persistence.SnapshotPersistence) MemoryStore {
     return .{
         ._storages = storages,
-        ._rdb = rdb,
+        ._kgc = kgc,
     };
 }
 
@@ -100,7 +100,7 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
 
 pub fn save(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._rdb.save(self._storages) catch return Store.Error.SomethingWentWrong;
+    self._kgc.save(self._storages) catch return Store.Error.SomethingWentWrong;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
@@ -142,8 +142,8 @@ fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Objec
 
 test "set stores a value and returns null" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
 
     defer data_store.deinit();
@@ -166,8 +166,8 @@ test "set stores a value and returns null" {
 
 test "set stores a value and returns value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -190,8 +190,8 @@ test "set stores a value and returns value" {
 
 test "get returns null for a missing key" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -202,8 +202,8 @@ test "get returns null for a missing key" {
 
 test "set replaces an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -236,8 +236,8 @@ test "set replaces an existing value" {
 
 test "set with NX does not replace an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -264,8 +264,8 @@ test "set with NX does not replace an existing value" {
 
 test "set with XX does not create a missing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -283,8 +283,8 @@ test "set with XX does not create a missing value" {
 
 test "set owns the key and value bytes" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{backend.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -311,8 +311,8 @@ test "set owns the key and value bytes" {
 test "databases are isolated from each other" {
     var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
     var backend_one = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init(testing.io, testing.allocator, "test.rdb");
-    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
 
