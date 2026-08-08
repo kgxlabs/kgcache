@@ -1,6 +1,6 @@
 const std = @import("std");
 const Journal = @import("./journal_interface.zig");
-const AofEncoder = @import("../encoder/aof_encoder.zig");
+const AofEncoder = @import("../codec/aof_encoder.zig");
 
 const AofBackend = @This();
 

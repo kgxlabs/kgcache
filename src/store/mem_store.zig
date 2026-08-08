@@ -331,6 +331,39 @@ test "databases are isolated from each other" {
     try expectObjectString(value, "value");
 }
 
+test "save then load round-trips across databases" {
+    const time = @import("../time.zig");
+
+    var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_one = DefaultStorage.init(testing.io, testing.allocator);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "scratch-roundtrip.kgc");
+    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot());
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    const expires_at = time.nowMs(testing.io) + 60_000;
+    _ = try data_store.set(.{ .key = "foo", .value = "bar", .condition = null, .expires_at = null, .keepttl = false, .response = null }, 0);
+    _ = try data_store.set(.{ .key = "baz", .value = "qux", .condition = null, .expires_at = expires_at, .keepttl = false, .response = null }, 1);
+
+    try data_store.save();
+
+    var fresh_zero = DefaultStorage.init(testing.io, testing.allocator);
+    var fresh_one = DefaultStorage.init(testing.io, testing.allocator);
+    var fresh_zero_storage = fresh_zero.storage();
+    var fresh_one_storage = fresh_one.storage();
+    defer fresh_zero_storage.deinit();
+    defer fresh_one_storage.deinit();
+
+    try kgc_backend.snapshot().load(&.{ fresh_zero_storage, fresh_one_storage });
+
+    const loaded_foo = try fresh_zero_storage.get("foo") orelse return error.TestUnexpectedResult;
+    try expectObjectString(loaded_foo.value, "bar");
+
+    const loaded_baz = try fresh_one_storage.get("baz") orelse return error.TestUnexpectedResult;
+    try expectObjectString(loaded_baz.value, "qux");
+    try testing.expectEqual(1, fresh_one_storage.getExpirableCount());
+}
+
 fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {
     const value = maybe_value orelse return error.Null;
 
