@@ -7,16 +7,19 @@ const helpers = @import("helpers.zig");
 const storage = @import("storage.zig");
 const persistence = @import("persistence.zig");
 const time = @import("time.zig");
+const Config = @import("config.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     try std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, "Logs from your program will appear here!\n");
 
-    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 6379);
+    const config = comptime Config.default();
+
+    const address = try std.Io.net.IpAddress.parseIp4(config.bind_address, config.port);
 
     var server = try address.listen(io, .{
-        .reuse_address = true,
+        .reuse_address = config.reuse_address,
     });
     defer server.deinit(io);
     var gpa: std.heap.DebugAllocator(.{}) = .init;
@@ -24,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = gpa.allocator();
 
-    const num_databases: usize = 16;
+    const num_databases: usize = config.num_databases;
 
     // These arrays must stay declared here, flat in `main`'s stack frame
     // (which lives for the whole process): `.storage()`/`.init()` below
@@ -35,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     var default_storages: [num_databases]storage.DefaultStorage = undefined;
     for (&default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
 
-    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, "dump.kgc");
+    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, config.snapshot_path);
     var aof_backend = persistence.AofPersistence.init(allocator);
 
     // See `persistence.Persistence` for why `kgc`/`aof` are consumed by two
@@ -69,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
     var data_store = mem_store.store();
 
     // Spin up active expiration
-    const handle = try std.Thread.spawn(.{}, handleExpiration, .{ io, allocator, &data_storages });
+    const handle = try std.Thread.spawn(.{}, handleExpiration, .{ io, allocator, &data_storages, config });
     handle.detach();
 
     // `MemoryStore` owns the storage interfaces, so `data_store.deinit()` also
@@ -87,13 +90,13 @@ fn listen(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store) !voi
     }
 }
 
-fn handleExpiration(io: std.Io, allocator: std.mem.Allocator, data_storages: []const storage.Interface) !void {
-    const round_duration = std.Io.Duration.fromMilliseconds(100);
+fn handleExpiration(io: std.Io, allocator: std.mem.Allocator, data_storages: []const storage.Interface, config: Config) !void {
+    const round_duration = std.Io.Duration.fromMilliseconds(config.active_expire_interval_ms);
     var start: usize = 0;
 
     while (true) {
         try io.sleep(round_duration, .awake);
-        start = try runExpirationRound(io, allocator, data_storages, start);
+        start = try runExpirationRound(io, allocator, data_storages, start, config);
     }
 }
 
@@ -103,10 +106,10 @@ fn handleExpiration(io: std.Io, allocator: std.mem.Allocator, data_storages: []c
 // per db. Once the round's budget is spent, the round bails out immediately
 // wherever it is; whatever wasn't reached gets first priority next round via
 // rotation. Returns the `start` to use for the next round.
-fn runExpirationRound(io: std.Io, allocator: std.mem.Allocator, data_storages: []const storage.Interface, start: usize) !usize {
-    const budget_ms: i8 = 10;
-    const batch_size: i8 = 20;
-    const threshold: i8 = 25;
+fn runExpirationRound(io: std.Io, allocator: std.mem.Allocator, data_storages: []const storage.Interface, start: usize, config: Config) !usize {
+    const budget_ms = config.active_expire_budget_ms;
+    const batch_size = config.active_expire_batch_size;
+    const threshold = config.active_expire_threshold_percent;
 
     const round_start_ms = time.nowMs(io);
 
@@ -121,7 +124,7 @@ fn runExpirationRound(io: std.Io, allocator: std.mem.Allocator, data_storages: [
         batch: while (true) {
             var expired_count: i8 = 0;
 
-            for (0..batch_size) |_| {
+            for (0..@intCast(batch_size)) |_| {
                 const is_removed = try expireRandom(allocator, db_storage);
                 if (is_removed) {
                     expired_count += 1;
@@ -170,7 +173,7 @@ fn handleConnection(io: std.Io, connection: std.Io.net.Stream, data_store: *stor
     while (true) {
         // TODO: use buffered writer
         var connection_writer = connection.writer(io, &.{});
-        var buf: [1024]u8 = undefined;
+        var buf: [Config.default().connection_buffer_size]u8 = undefined;
         var data = [_][]u8{&buf};
 
         // TODO: We are directly doing syscall to OS which is expensive. Refactor this to use buffered reader
@@ -251,7 +254,7 @@ test "runExpirationRound visits every db in a round, not just the first" {
         .expires_at = time.nowMs(testing.io) - 1,
     });
 
-    const next_start = try runExpirationRound(testing.io, testing.allocator, &data_storages, 0);
+    const next_start = try runExpirationRound(testing.io, testing.allocator, &data_storages, 0, Config.default());
 
     try testing.expectEqual(0, data_storages[0].getExpirableCount());
     try testing.expectEqual(0, data_storages[1].getExpirableCount());
