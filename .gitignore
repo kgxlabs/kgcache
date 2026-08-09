@@ -16,3 +16,6 @@ bin/
 **/.DS_Store
 *.swp
 *~
+
+# Ignore rdb and aof files
+*.kgc

@@ -69,7 +69,7 @@ pub fn decode(data: []const u8, ctx: *anyopaque, visit: *const fn (ctx: *anyopaq
             continue;
         }
 
-        if (tag != @intFromEnum(TypeTag.string)) return Error.UnknownTypeTag;
+        const type_tag = std.enums.fromInt(TypeTag, tag) orelse return Error.UnknownTypeTag;
 
         const has_expiry = try cursor.readByte();
         const exp: ?time.UnixMs = switch (has_expiry) {
@@ -79,12 +79,14 @@ pub fn decode(data: []const u8, ctx: *anyopaque, visit: *const fn (ctx: *anyopaq
         };
 
         const key = try cursor.readLengthPrefixed();
-        const value_bytes = try cursor.readLengthPrefixed();
+        const value: object.Object = switch (type_tag) {
+            .string => .{ .string = try cursor.readLengthPrefixed() },
+        };
 
         visit(ctx, .{
             .db_index = db_index,
             .key = key,
-            .value = .{ .string = value_bytes },
+            .value = value,
             .exp = exp,
         }) catch return Error.InvalidEntry;
     }
@@ -123,3 +125,22 @@ const Cursor = struct {
         return bytes;
     }
 };
+
+test "decode rejects an entry with an unrecognized type tag" {
+    const testing = std.testing;
+
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(testing.allocator);
+    try body.appendSlice(testing.allocator, header);
+    try body.appendSlice(testing.allocator, 0x7F); // not a recognized TypeTag
+    try body.appendSlice(testing.allocator, @intFromEnum(Opcode.eof));
+
+    var checksum: std.hash.crc.Crc64Redis = .init();
+    checksum.update(body.items);
+    const checksum_value = checksum.final();
+    try body.appendSlice(testing.allocator, std.mem.asBytes(&checksum_value));
+
+    try testing.expectError(Error.UnknownTypeTag, decode(body.items, undefined, noopVisit));
+}
+
+fn noopVisit(_: *anyopaque, _: Record) anyerror!void {}
