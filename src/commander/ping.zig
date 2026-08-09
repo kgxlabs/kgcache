@@ -33,8 +33,8 @@ test "execute ping command" {
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
-    var rdb_backend = persistence.RdbPersistence.init();
-    var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, rdb_backend.snapshot());
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
     var client_state: Commander.ClientState = .{};

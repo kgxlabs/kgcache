@@ -35,15 +35,23 @@ pub fn main(init: std.process.Init) !void {
     var default_storages: [num_databases]storage.DefaultStorage = undefined;
     for (&default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
 
-    var rdb_backend = persistence.RdbPersistence.init();
-    var aof_backend = persistence.AofPersistence.init();
+    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, "dump.kgc");
+    var aof_backend = persistence.AofPersistence.init(allocator);
 
-    // See `persistence.Persistence` for why `rdb`/`aof` are consumed by two
+    // See `persistence.Persistence` for why `kgc`/`aof` are consumed by two
     // different layers below instead of both being handed to the same one.
     const backend_persistence = persistence.Persistence{
-        .rdb = rdb_backend.snapshot(),
+        .kgc = kgc_backend.snapshot(),
         .aof = aof_backend.journal(),
     };
+
+    // Load against the raw storages, before they're wrapped for AOF
+    // notification below -- replaying an existing snapshot is not itself a
+    // write worth journaling, and going through the notifying wrapper here
+    // would re-append every loaded key to the AOF log.
+    var raw_storages: [num_databases]storage.Interface = undefined;
+    for (0..num_databases) |i| raw_storages[i] = default_storages[i].storage();
+    try backend_persistence.kgc.load(&raw_storages);
 
     var notifier_storages: [num_databases]storage.NotifierStorage = undefined;
     var data_storages: [num_databases]storage.Interface = undefined;
@@ -57,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
         data_storages[i] = notifier_storages[i].storage();
     }
 
-    var mem_store = store.MemoryStore.init(&data_storages, backend_persistence.rdb);
+    var mem_store = store.MemoryStore.init(&data_storages, backend_persistence.kgc);
     var data_store = mem_store.store();
 
     // Spin up active expiration
