@@ -24,9 +24,10 @@ pub const Error = error{
     InvalidValue,
 };
 
-/// blank lines and lines starting with `#` are skipped,
-/// everything else must be `directive value`. Returns
+/// Parses redis.conf-style contents: blank lines and lines starting with `#`
+/// are skipped, everything else must be `directive value`. Returns
 /// `Config.default()` overlaid with whatever directives were present.
+///
 /// The returned `Config`'s string fields (`bind_address`, `snapshot_path`)
 /// borrow directly from `contents`, so `contents` must outlive the `Config`.
 pub fn parse(contents: []const u8) Error!Config {
