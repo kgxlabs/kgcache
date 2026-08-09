@@ -163,5 +163,4 @@ zig build test
 - The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`.
 
 ## License
-
 No license file is currently included.
