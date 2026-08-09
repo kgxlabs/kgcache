@@ -132,8 +132,8 @@ test "decode rejects an entry with an unrecognized type tag" {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(testing.allocator);
     try body.appendSlice(testing.allocator, header);
-    try body.appendSlice(testing.allocator, 0x7F); // not a recognized TypeTag
-    try body.appendSlice(testing.allocator, @intFromEnum(Opcode.eof));
+    try body.append(testing.allocator, 0x7F); // not a recognized TypeTag
+    try body.append(testing.allocator, @intFromEnum(Opcode.eof));
 
     var checksum: std.hash.crc.Crc64Redis = .init();
     checksum.update(body.items);
