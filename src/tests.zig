@@ -9,4 +9,5 @@ test {
     _ = @import("storage/default_storage.zig");
     _ = @import("object.zig");
     _ = @import("main.zig");
+    _ = @import("config_parser.zig");
 }
