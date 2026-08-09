@@ -1,0 +1,57 @@
+# kgcache.conf.example
+#
+# Every directive below is commented out and set to its built-in default
+# (see Config.default() in src/config.zig). Uncomment a line and change its
+# value to override that default; anything left commented out (or left out
+# of your own config file entirely) keeps the default.
+#
+# Format: one directive per line, `directive value`. Blank lines and lines
+# starting with `#` are ignored. Anything else must be a recognized
+# directive with a value -- an unknown directive, a missing value, or a
+# value that doesn't fit the directive's type all fail the server at
+# startup with a message on stderr, rather than being silently ignored.
+#
+# Run with: ./zig-out/bin/main path/to/kgcache.conf
+
+# Address the TCP server binds to.
+# bind 127.0.0.1
+
+# TCP port the server listens on.
+# port 6379
+
+# Whether to set SO_REUSEADDR on the listening socket, which lets the
+# server rebind quickly on restart instead of waiting for the OS to
+# release the previous socket. yes or no.
+# reuse-address yes
+
+# Size, in bytes, of the per-connection read buffer. A request (or a
+# pipelined batch of requests) larger than this is not yet supported.
+# connection-buffer-size 1024
+
+# Number of selectable databases: SELECT 0 through num-databases - 1.
+# num-databases 16
+
+# Path to the on-disk snapshot file: loaded on startup if it exists, and
+# written out by the SAVE command. Must end in `.kgc`. A relative path is
+# resolved against the server's current working directory, not this
+# config file's location. The parent directory must already exist -- it
+# is not created automatically. `~` is not expanded; use an absolute path
+# instead of a home-directory shorthand.
+# snapshot-path dump.kgc
+
+# How often, in milliseconds, the active-expiration worker sweeps for
+# expired keys across all databases.
+# active-expire-interval-ms 100
+
+# Time budget, in milliseconds, the active-expiration worker spends per
+# sweep before yielding, regardless of how many databases still have
+# expirable keys left unchecked.
+# active-expire-budget-ms 10
+
+# Number of keys sampled per expiration batch, per database, before
+# deciding whether to keep going or move to the next database.
+# active-expire-batch-size 20
+
+# If at least this percentage of a batch came back expired, immediately
+# run another batch on the same database instead of moving on.
+# active-expire-threshold-percent 25
