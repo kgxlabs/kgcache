@@ -5,6 +5,7 @@ const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 const TestHelpers = @import("../tests/helpers.zig");
 const MockStore = @import("../store/mock_store.zig");
+const Config = @import("../config.zig");
 
 const Select = @This();
 
@@ -51,7 +52,7 @@ test "execute selects a valid database" {
     defer command.deinit();
 
     var mock_store = MockStore.init();
-    mock_store.num_databases_result = 16;
+    mock_store.num_databases_result = @intCast(Config.default().num_databases);
     var data_store = mock_store.store();
     var client_state: Commander.ClientState = .{};
 
@@ -73,7 +74,7 @@ test "rejects an out-of-range database index" {
     defer command.deinit();
 
     var mock_store = MockStore.init();
-    mock_store.num_databases_result = 16;
+    mock_store.num_databases_result = @intCast(Config.default().num_databases);
     var data_store = mock_store.store();
     var client_state: Commander.ClientState = .{};
 
