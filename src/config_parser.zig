@@ -86,7 +86,7 @@ test "parse overlays every directive onto the defaults" {
         \\connection-buffer-size 2048
         \\num-databases 4
         \\snapshot-path /var/lib/kgcache/dump.kgc
-        \\active-expire-interval-ms 250
+        \\cron-interval-ms 250
         \\active-expire-budget-ms 20
         \\active-expire-batch-size 40
         \\active-expire-threshold-percent 50
@@ -100,7 +100,7 @@ test "parse overlays every directive onto the defaults" {
     try testing.expectEqual(2048, config.connection_buffer_size);
     try testing.expectEqual(4, config.num_databases);
     try testing.expectEqualStrings("/var/lib/kgcache/dump.kgc", config.snapshot_path);
-    try testing.expectEqual(250, config.active_expire_interval_ms);
+    try testing.expectEqual(250, config.cron_interval_ms);
     try testing.expectEqual(20, config.active_expire_budget_ms);
     try testing.expectEqual(40, config.active_expire_batch_size);
     try testing.expectEqual(50, config.active_expire_threshold_percent);
@@ -122,7 +122,7 @@ test "parse leaves directives absent from a partial file at their defaults" {
     try testing.expectEqual(defaults.connection_buffer_size, config.connection_buffer_size);
     try testing.expectEqual(defaults.num_databases, config.num_databases);
     try testing.expectEqualStrings(defaults.snapshot_path, config.snapshot_path);
-    try testing.expectEqual(defaults.active_expire_interval_ms, config.active_expire_interval_ms);
+    try testing.expectEqual(defaults.cron_interval_ms, config.cron_interval_ms);
     try testing.expectEqual(defaults.active_expire_budget_ms, config.active_expire_budget_ms);
     try testing.expectEqual(defaults.active_expire_batch_size, config.active_expire_batch_size);
     try testing.expectEqual(defaults.active_expire_threshold_percent, config.active_expire_threshold_percent);

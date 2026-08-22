@@ -7,6 +7,7 @@ const store = @import("../store.zig");
 const ClientState = @import("../client_state.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
+const PersistenceState = @import("../persistence_state.zig");
 
 pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp.RESPValue {
     const testing = std.testing;
@@ -17,7 +18,8 @@ pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp
     // `InitError.InvalidExtension` can't actually happen here -- and this
     // function's return type is `commander.Error`, which that error isn't
     // part of.
-    var kgc_backend = persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc") catch unreachable;
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc") catch unreachable;
     var memory_store = store.MemoryStore.init(&.{default_storage.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();

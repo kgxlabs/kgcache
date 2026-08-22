@@ -167,16 +167,18 @@ fn readFromDisk(self: *KgcBackend) ![]u8 {
 
 test "init rejects a path without the .kgc extension" {
     const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
 
-    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, "dump.rdb"));
-    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, "dump"));
-    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, "dump.kgcx"));
+    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump.rdb"));
+    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump"));
+    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump.kgcx"));
 }
 
 test "init accepts a path with the .kgc extension" {
     const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
 
-    _ = try init(testing.io, testing.allocator, "dump.kgc");
+    _ = try init(testing.io, testing.allocator, &persistence_state, "dump.kgc");
 }
 
 test "load does nothing when no .kgc file exists yet" {
@@ -187,7 +189,8 @@ test "load does nothing when no .kgc file exists yet" {
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var backend_instance = try init(testing.io, testing.allocator, "missing-on-purpose.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "missing-on-purpose.kgc");
     try backend_instance.snapshot().load(&.{backend_storage});
 
     try testing.expectEqual(0, backend_storage.size());
@@ -211,6 +214,7 @@ test "load rejects a file that isn't a valid .kgc dump" {
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var backend_instance = try init(testing.io, testing.allocator, "corrupted-on-purpose.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "corrupted-on-purpose.kgc");
     try testing.expectError(Snapshot.Error.UnableToLoad, backend_instance.snapshot().load(&.{backend_storage}));
 }
