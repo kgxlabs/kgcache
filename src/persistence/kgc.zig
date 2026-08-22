@@ -5,11 +5,13 @@ const object = @import("../object.zig");
 const time = @import("../time.zig");
 const KgcEncoder = @import("../codec/kgc_encoder.zig");
 const KgcDecoder = @import("../codec/kgc_decoder.zig");
+const PersistenceState = @import("../persistence_state.zig");
 
 const KgcBackend = @This();
 
 const vtable: Snapshot.VTable = .{
     .save = save,
+    .bgsave = bgsave,
     .load = load,
 };
 
@@ -23,14 +25,16 @@ _path: []const u8,
 // Set for the duration of a single `save()` call: created in `beginDump`,
 // appended to in `dumpEntry`, consumed and cleared in `endDump`.
 _encoder: ?KgcEncoder = null,
+_persistence_state: *PersistenceState,
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, path: []const u8) InitError!KgcBackend {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, path: []const u8) InitError!KgcBackend {
     if (!std.mem.endsWith(u8, path, required_extension)) return InitError.InvalidExtension;
 
     return .{
         ._io = io,
         ._allocator = allocator,
         ._path = path,
+        ._persistence_state = state,
     };
 }
 
@@ -44,6 +48,59 @@ pub fn snapshot(self: *KgcBackend) Snapshot {
 pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
+    if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+    defer self._persistence_state.finishKgc();
+
+    try self.dump(storages);
+}
+
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
+    const self: *KgcBackend = @ptrCast(@alignCast(ptr));
+
+    if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+
+    const rc = std.posix.system.fork();
+    const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AGAIN, .NOMEM => {
+            self._persistence_state.finishKgc();
+            return Snapshot.Error.UnableToSave;
+        },
+        else => |err| {
+            self._persistence_state.finishKgc();
+            return std.posix.unexpectedErrno(err) catch Snapshot.Error.UnableToSave;
+        },
+    };
+
+    if (pid == 0) {
+        // A background child has no business holding the parent's stdin/stdout
+        // open -- besides not needing them, keeping a duplicate fd around
+        // delays the OS from ever delivering EOF on them to whatever the
+        // parent's other end is (a terminal, a log pipe, or -- as seen under
+        // `zig build test` -- the build system's own IPC channel), even
+        // after the parent itself has moved on. stderr stays open since the
+        // failure path below deliberately writes to it.
+        _ = std.c.close(std.posix.STDIN_FILENO);
+        _ = std.c.close(std.posix.STDOUT_FILENO);
+
+        self.dump(storages) catch |err| {
+            const message = std.fmt.allocPrint(
+                self._allocator,
+                "kgcache: background save failed: {s}\n",
+                .{@errorName(err)},
+            ) catch "kgcache: background save failed\n";
+            std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
+            std.c._exit(1);
+        };
+        // never reutrn . do not fall back into caller's connection loop since this is a child process now
+        // using _exit to sidestep clearing the buffered data (at the time of fork) completely
+        std.c._exit(0);
+    }
+
+    self._persistence_state.setKgcPid(pid);
+}
+
+fn dump(self: *KgcBackend, storages: []const Storage) Snapshot.Error!void {
     try self.beginDump();
     for (storages, 0..) |storage, db_index| {
         // a database with nothing in it gets no `SELECTDB`
@@ -129,16 +186,18 @@ fn readFromDisk(self: *KgcBackend) ![]u8 {
 
 test "init rejects a path without the .kgc extension" {
     const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
 
-    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, "dump.rdb"));
-    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, "dump"));
-    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, "dump.kgcx"));
+    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump.rdb"));
+    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump"));
+    try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump.kgcx"));
 }
 
 test "init accepts a path with the .kgc extension" {
     const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
 
-    _ = try init(testing.io, testing.allocator, "dump.kgc");
+    _ = try init(testing.io, testing.allocator, &persistence_state, "dump.kgc");
 }
 
 test "load does nothing when no .kgc file exists yet" {
@@ -149,7 +208,8 @@ test "load does nothing when no .kgc file exists yet" {
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var backend_instance = try init(testing.io, testing.allocator, "missing-on-purpose.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "missing-on-purpose.kgc");
     try backend_instance.snapshot().load(&.{backend_storage});
 
     try testing.expectEqual(0, backend_storage.size());
@@ -173,6 +233,75 @@ test "load rejects a file that isn't a valid .kgc dump" {
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var backend_instance = try init(testing.io, testing.allocator, "corrupted-on-purpose.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "corrupted-on-purpose.kgc");
     try testing.expectError(Snapshot.Error.UnableToLoad, backend_instance.snapshot().load(&.{backend_storage}));
+}
+
+test "save returns SaveAlreadyInProgress when a save is already claimed" {
+    const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-save.kgc");
+
+    try testing.expect(persistence_state.tryStartKgc());
+    defer persistence_state.finishKgc();
+
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().save(&.{}));
+}
+
+test "bgsave returns SaveAlreadyInProgress when a save is already claimed, without forking" {
+    const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-bgsave.kgc");
+
+    try testing.expect(persistence_state.tryStartKgc());
+    defer persistence_state.finishKgc();
+
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}));
+
+    // no fork should have happened -- no pid was ever recorded
+    try testing.expect(persistence_state._kgc_pid == null);
+}
+
+test "bgsave forks without blocking and the child writes a loadable snapshot" {
+    const testing = std.testing;
+    const DefaultStorage = @import("../storage/default_storage.zig");
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    {
+        var tx = try backend_storage.begin();
+        defer tx.end();
+        _ = try backend_storage.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    }
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "scratch-bgsave.kgc");
+
+    try backend_instance.snapshot().bgsave(&.{backend_storage});
+
+    // the parent returns immediately -- the flag is still set and a child
+    // pid is recorded, proving the caller was never blocked on the dump.
+    try testing.expect(persistence_state._kgc_in_progress);
+    try testing.expect(persistence_state._kgc_pid != null);
+
+    var tries: usize = 0;
+    while (persistence_state._kgc_in_progress) {
+        persistence_state.reapKgc();
+        tries += 1;
+        if (tries > 100_000) return error.ChildNeverReaped;
+    }
+
+    var fresh = DefaultStorage.init(testing.io, testing.allocator);
+    var fresh_storage = fresh.storage();
+    defer fresh_storage.deinit();
+
+    try backend_instance.snapshot().load(&.{fresh_storage});
+
+    const loaded = try fresh_storage.get("foo") orelse return error.TestUnexpectedResult;
+    switch (loaded.value) {
+        .string => |str| try testing.expectEqualStrings("bar", str),
+    }
 }

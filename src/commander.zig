@@ -1,6 +1,6 @@
 const std = @import("std");
 const resp = @import("resp.zig");
-
+pub const BgSave = @import("commander/bgsave.zig");
 pub const Commander = @import("commander/interface.zig");
 pub const Command = @import("commander/command.zig");
 pub const DBSize = @import("commander/dbsize.zig");
@@ -13,6 +13,7 @@ pub const Set = @import("commander/set.zig");
 pub const Error = Commander.Error;
 
 const CommandKind = enum {
+    bgsave,
     command,
     dbsize,
     echo,
@@ -23,6 +24,7 @@ const CommandKind = enum {
     set,
 
     fn parse(keyword: []const u8) Error!CommandKind {
+        if (std.ascii.eqlIgnoreCase(keyword, "bgsave")) return .bgsave;
         if (std.ascii.eqlIgnoreCase(keyword, "command")) return .command;
         if (std.ascii.eqlIgnoreCase(keyword, "dbsize")) return .dbsize;
         if (std.ascii.eqlIgnoreCase(keyword, "echo")) return .echo;
@@ -41,6 +43,7 @@ pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander
     const arguments = try parseArguments(value);
 
     return switch (command_kind) {
+        .bgsave => try create(BgSave, allocator, arguments),
         .command => try create(Command, allocator, arguments),
         .dbsize => try create(DBSize, allocator, arguments),
         .echo => try create(Echo, allocator, arguments),
@@ -73,6 +76,7 @@ pub fn errorToRESPValue(err: Error) resp.RESPValue {
         error.UnsupportedOption => .{ .simple_error = "ERR unsupported option" },
         error.Syntax => .{ .simple_error = "ERR syntax error" },
         error.UnableToSaveKgc => .{ .simple_error = "ERR unable to save kgc" },
+        error.UnableToDoBackgroundSaveKgc => .{ .simple_error = "ERR unable to do kgc background save" },
         error.SomethingWentWrong => .{ .simple_error = "ERR something went wrong" },
     };
 }

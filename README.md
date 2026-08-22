@@ -13,7 +13,7 @@
 | Runtime | Zig 0.16.0+ |
 | Data model | Process-local string keys and values |
 | Commands | See [Commands](docs/COMMANDS.md) |
-| Persistence | Snapshot to a `.kgc` file via `SAVE`; AOF journal is in-memory only, not yet durable to disk |
+| Persistence | Snapshot to a `.kgc` file via `SAVE` (blocking) or `BGSAVE` (forks, non-blocking); AOF journal is in-memory only, not yet durable to disk |
 
 ## Quick start
 

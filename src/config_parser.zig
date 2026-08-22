@@ -9,10 +9,11 @@ const Directive = enum {
     @"connection-buffer-size",
     @"num-databases",
     @"snapshot-path",
-    @"active-expire-interval-ms",
+    @"cron-interval-ms",
     @"active-expire-budget-ms",
     @"active-expire-batch-size",
     @"active-expire-threshold-percent",
+    @"exclusive-bg-persistence",
 };
 
 pub const Error = error{
@@ -52,10 +53,11 @@ pub fn parse(contents: []const u8) Error!Config {
             .@"connection-buffer-size" => config.connection_buffer_size = try parseInt(usize, value),
             .@"num-databases" => config.num_databases = try parseInt(usize, value),
             .@"snapshot-path" => config.snapshot_path = value,
-            .@"active-expire-interval-ms" => config.active_expire_interval_ms = try parseInt(i64, value),
+            .@"cron-interval-ms" => config.cron_interval_ms = try parseInt(i64, value),
             .@"active-expire-budget-ms" => config.active_expire_budget_ms = try parseInt(i8, value),
             .@"active-expire-batch-size" => config.active_expire_batch_size = try parseInt(i8, value),
             .@"active-expire-threshold-percent" => config.active_expire_threshold_percent = try parseInt(i8, value),
+            .@"exclusive-bg-persistence" => config.exclusive_bg_persistence = try parseBool(value),
         }
     }
 
@@ -84,7 +86,7 @@ test "parse overlays every directive onto the defaults" {
         \\connection-buffer-size 2048
         \\num-databases 4
         \\snapshot-path /var/lib/kgcache/dump.kgc
-        \\active-expire-interval-ms 250
+        \\cron-interval-ms 250
         \\active-expire-budget-ms 20
         \\active-expire-batch-size 40
         \\active-expire-threshold-percent 50
@@ -98,7 +100,7 @@ test "parse overlays every directive onto the defaults" {
     try testing.expectEqual(2048, config.connection_buffer_size);
     try testing.expectEqual(4, config.num_databases);
     try testing.expectEqualStrings("/var/lib/kgcache/dump.kgc", config.snapshot_path);
-    try testing.expectEqual(250, config.active_expire_interval_ms);
+    try testing.expectEqual(250, config.cron_interval_ms);
     try testing.expectEqual(20, config.active_expire_budget_ms);
     try testing.expectEqual(40, config.active_expire_batch_size);
     try testing.expectEqual(50, config.active_expire_threshold_percent);
@@ -120,7 +122,7 @@ test "parse leaves directives absent from a partial file at their defaults" {
     try testing.expectEqual(defaults.connection_buffer_size, config.connection_buffer_size);
     try testing.expectEqual(defaults.num_databases, config.num_databases);
     try testing.expectEqualStrings(defaults.snapshot_path, config.snapshot_path);
-    try testing.expectEqual(defaults.active_expire_interval_ms, config.active_expire_interval_ms);
+    try testing.expectEqual(defaults.cron_interval_ms, config.cron_interval_ms);
     try testing.expectEqual(defaults.active_expire_budget_ms, config.active_expire_budget_ms);
     try testing.expectEqual(defaults.active_expire_batch_size, config.active_expire_batch_size);
     try testing.expectEqual(defaults.active_expire_threshold_percent, config.active_expire_threshold_percent);

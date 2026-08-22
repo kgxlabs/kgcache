@@ -1,20 +1,23 @@
 const std = @import("std");
 const Journal = @import("./journal_interface.zig");
 const AofEncoder = @import("../codec/aof_encoder.zig");
+const PersistenceState = @import("../persistence_state.zig");
 
 const AofBackend = @This();
 
 _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
+_persistence_state: *PersistenceState,
 
 const vtable: Journal.VTable = .{
     .onWrite = onWrite,
 };
 
-pub fn init(allocator: std.mem.Allocator) AofBackend {
+pub fn init(allocator: std.mem.Allocator, state: *PersistenceState) AofBackend {
     return .{
         ._allocator = allocator,
         ._encoder = AofEncoder.init(),
+        ._persistence_state = state,
     };
 }
 

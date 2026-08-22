@@ -3,6 +3,7 @@ const Store = @import("interface.zig");
 const Storage = @import("../storage/interface.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
+const PersistenceState = @import("../persistence_state.zig");
 const object = @import("../object.zig");
 const Request = @import("../commander/request.zig");
 const testing = std.testing;
@@ -38,6 +39,7 @@ const vtable = Store.VTable{
     .dbsize = dbsize,
     .numDatabases = numDatabases,
     .save = save,
+    .bgsave = bgsave,
     .deinit = deinit,
 };
 
@@ -100,7 +102,12 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
 
 pub fn save(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._kgc.save(self._storages) catch return Store.Error.SomethingWentWrong;
+    self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
+}
+
+pub fn bgsave(ptr: *anyopaque) Store.Error!void {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    self._kgc.bgsave(self._storages) catch return Store.Error.UnableToDoBackgroundSave;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
@@ -142,7 +149,8 @@ fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Objec
 
 test "set stores a value and returns null" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
 
@@ -166,7 +174,8 @@ test "set stores a value and returns null" {
 
 test "set stores a value and returns value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -190,7 +199,8 @@ test "set stores a value and returns value" {
 
 test "get returns null for a missing key" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -202,7 +212,8 @@ test "get returns null for a missing key" {
 
 test "set replaces an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -236,7 +247,8 @@ test "set replaces an existing value" {
 
 test "set with NX does not replace an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -264,7 +276,8 @@ test "set with NX does not replace an existing value" {
 
 test "set with XX does not create a missing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -283,7 +296,8 @@ test "set with XX does not create a missing value" {
 
 test "set owns the key and value bytes" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -311,7 +325,8 @@ test "set owns the key and value bytes" {
 test "databases are isolated from each other" {
     var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
     var backend_one = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "test.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -336,7 +351,8 @@ test "save then load round-trips across databases" {
 
     var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
     var backend_one = DefaultStorage.init(testing.io, testing.allocator);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, "scratch-roundtrip.kgc");
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-roundtrip.kgc");
     var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot());
     var data_store = memory_store.store();
     defer data_store.deinit();
