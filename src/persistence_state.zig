@@ -65,14 +65,14 @@ pub fn finishAof(self: *PersistenceState) void {
 }
 
 pub fn reapKgc(self: *PersistenceState) void {
-    self.reapPid(&self._kgc_pid, &self._kgc_in_progress);
+    self.reapPid("kgc", &self._kgc_pid, &self._kgc_in_progress);
 }
 
 pub fn reapAof(self: *PersistenceState) void {
-    self.reapPid(&self._aof_pid, &self._aof_in_progress);
+    self.reapPid("aof", &self._aof_pid, &self._aof_in_progress);
 }
 
-fn reapPid(self: *PersistenceState, maybe_pid: *?std.posix.pid_t, in_progress: *bool) void {
+fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) void {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
     const pid = maybe_pid.* orelse return;
@@ -82,4 +82,16 @@ fn reapPid(self: *PersistenceState, maybe_pid: *?std.posix.pid_t, in_progress: *
     if (r == 0) return;
     maybe_pid.* = null;
     in_progress.* = false;
+
+    const status_bits: u32 = @bitCast(status);
+    // If child process exited normally with non-zero exit code, std err
+    if (std.c.W.IFEXITED(status_bits) and std.c.W.EXITSTATUS(status_bits) != 0) {
+        var buf: [128]u8 = undefined;
+        const message = std.fmt.bufPrint(
+            &buf,
+            "kgcache: {s} background save child exited with status {d}\n",
+            .{ name, std.c.W.EXITSTATUS(status_bits) },
+        ) catch "kgcache: background save child exited with a failure status\n";
+        std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
+    }
 }

@@ -73,7 +73,15 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     };
 
     if (pid == 0) {
-        self.dump(storages) catch {};
+        self.dump(storages) catch |err| {
+            const message = std.fmt.allocPrint(
+                self._allocator,
+                "kgcache: background save failed: {s}\n",
+                .{@errorName(err)},
+            ) catch "kgcache: background save failed\n";
+            std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
+            std.c._exit(1);
+        };
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
         // using _exit to sidestep clearing the buffered data (at the time of fork) completely
         std.c._exit(0);
