@@ -95,3 +95,127 @@ fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
     }
 }
+
+test "tryStartKgc blocks a second start until finishKgc releases it" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    try testing.expect(state.tryStartKgc());
+    try testing.expect(!state.tryStartKgc());
+
+    state.finishKgc();
+
+    try testing.expect(state.tryStartKgc());
+}
+
+test "tryStartAof blocks a second start until finishAof releases it" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    try testing.expect(state.tryStartAof());
+    try testing.expect(!state.tryStartAof());
+
+    state.finishAof();
+
+    try testing.expect(state.tryStartAof());
+}
+
+test "mutual exclusion blocks kgc while aof is in progress" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, true);
+
+    try testing.expect(state.tryStartAof());
+    try testing.expect(!state.tryStartKgc());
+
+    state.finishAof();
+
+    try testing.expect(state.tryStartKgc());
+}
+
+test "mutual exclusion blocks aof while kgc is in progress" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, true);
+
+    try testing.expect(state.tryStartKgc());
+    try testing.expect(!state.tryStartAof());
+
+    state.finishKgc();
+
+    try testing.expect(state.tryStartAof());
+}
+
+test "without mutual exclusion kgc and aof can be in progress at the same time" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    try testing.expect(state.tryStartKgc());
+    try testing.expect(state.tryStartAof());
+}
+
+test "reapKgc leaves state untouched while the child is still running" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+    try testing.expect(state.tryStartKgc());
+
+    // A pipe lets the parent control exactly when the forked child exits,
+    // instead of racing a real timing window.
+    var fds: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.PipeFailed;
+
+    const rc = std.posix.system.fork();
+    const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+
+    if (pid == 0) {
+        _ = std.c.close(fds[1]);
+        var byte: [1]u8 = undefined;
+        _ = std.c.read(fds[0], &byte, 1);
+        _ = std.c.close(fds[0]);
+        std.c._exit(0);
+    }
+    _ = std.c.close(fds[0]);
+    state.setKgcPid(pid);
+
+    state.reapKgc();
+    try testing.expect(state._kgc_in_progress);
+    try testing.expect(state._kgc_pid != null);
+
+    var byte: [1]u8 = .{1};
+    _ = std.c.write(fds[1], &byte, 1);
+    _ = std.c.close(fds[1]);
+
+    var tries: usize = 0;
+    while (state._kgc_pid != null) {
+        state.reapKgc();
+        tries += 1;
+        if (tries > 100_000) return error.ChildNeverReaped;
+    }
+
+    try testing.expect(!state._kgc_in_progress);
+}
+
+test "reapKgc clears state after the child exits with a failure status" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+    try testing.expect(state.tryStartKgc());
+
+    const rc = std.posix.system.fork();
+    const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => |err| return std.posix.unexpectedErrno(err),
+    };
+
+    if (pid == 0) std.c._exit(7);
+    state.setKgcPid(pid);
+
+    var tries: usize = 0;
+    while (state._kgc_pid != null) {
+        state.reapKgc();
+        tries += 1;
+        if (tries > 100_000) return error.ChildNeverReaped;
+    }
+
+    try testing.expect(!state._kgc_in_progress);
+}

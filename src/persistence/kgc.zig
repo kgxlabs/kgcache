@@ -227,3 +227,71 @@ test "load rejects a file that isn't a valid .kgc dump" {
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "corrupted-on-purpose.kgc");
     try testing.expectError(Snapshot.Error.UnableToLoad, backend_instance.snapshot().load(&.{backend_storage}));
 }
+
+test "save returns SaveAlreadyInProgress when a save is already claimed" {
+    const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-save.kgc");
+
+    try testing.expect(persistence_state.tryStartKgc());
+    defer persistence_state.finishKgc();
+
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().save(&.{}));
+}
+
+test "bgsave returns SaveAlreadyInProgress when a save is already claimed, without forking" {
+    const testing = std.testing;
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-bgsave.kgc");
+
+    try testing.expect(persistence_state.tryStartKgc());
+    defer persistence_state.finishKgc();
+
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}));
+
+    // no fork should have happened -- no pid was ever recorded
+    try testing.expect(persistence_state._kgc_pid == null);
+}
+
+test "bgsave forks without blocking and the child writes a loadable snapshot" {
+    const testing = std.testing;
+    const DefaultStorage = @import("../storage/default_storage.zig");
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    {
+        var tx = try backend_storage.begin();
+        defer tx.end();
+        _ = try backend_storage.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    }
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "scratch-bgsave.kgc");
+
+    try backend_instance.snapshot().bgsave(&.{backend_storage});
+
+    // the parent returns immediately -- the flag is still set and a child
+    // pid is recorded, proving the caller was never blocked on the dump.
+    try testing.expect(persistence_state._kgc_in_progress);
+    try testing.expect(persistence_state._kgc_pid != null);
+
+    var tries: usize = 0;
+    while (persistence_state._kgc_in_progress) {
+        persistence_state.reapKgc();
+        tries += 1;
+        if (tries > 100_000) return error.ChildNeverReaped;
+    }
+
+    var fresh = DefaultStorage.init(testing.io, testing.allocator);
+    var fresh_storage = fresh.storage();
+    defer fresh_storage.deinit();
+
+    try backend_instance.snapshot().load(&.{fresh_storage});
+
+    const loaded = try fresh_storage.get("foo") orelse return error.TestUnexpectedResult;
+    switch (loaded.value) {
+        .string => |str| try testing.expectEqualStrings("bar", str),
+    }
+}
