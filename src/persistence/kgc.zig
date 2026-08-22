@@ -73,6 +73,16 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     };
 
     if (pid == 0) {
+        // A background child has no business holding the parent's stdin/stdout
+        // open -- besides not needing them, keeping a duplicate fd around
+        // delays the OS from ever delivering EOF on them to whatever the
+        // parent's other end is (a terminal, a log pipe, or -- as seen under
+        // `zig build test` -- the build system's own IPC channel), even
+        // after the parent itself has moved on. stderr stays open since the
+        // failure path below deliberately writes to it.
+        _ = std.c.close(std.posix.STDIN_FILENO);
+        _ = std.c.close(std.posix.STDOUT_FILENO);
+
         self.dump(storages) catch |err| {
             const message = std.fmt.allocPrint(
                 self._allocator,

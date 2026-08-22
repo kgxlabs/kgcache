@@ -169,6 +169,11 @@ test "reapKgc leaves state untouched while the child is still running" {
     };
 
     if (pid == 0) {
+        // Close inherited stdin/stdout so this test child doesn't keep a
+        // duplicate of the build system's IPC channel open under `zig build test`.
+        _ = std.c.close(std.posix.STDIN_FILENO);
+        _ = std.c.close(std.posix.STDOUT_FILENO);
+
         _ = std.c.close(fds[1]);
         var byte: [1]u8 = undefined;
         _ = std.c.read(fds[0], &byte, 1);
@@ -207,8 +212,30 @@ test "reapKgc clears state after the child exits with a failure status" {
         else => |err| return std.posix.unexpectedErrno(err),
     };
 
-    if (pid == 0) std.c._exit(7);
+    if (pid == 0) {
+        _ = std.c.close(std.posix.STDIN_FILENO);
+        _ = std.c.close(std.posix.STDOUT_FILENO);
+        std.c._exit(7);
+    }
     state.setKgcPid(pid);
+
+    // reapKgc logs to the real stderr when it observes a non-zero exit --
+    // exactly what this test exercises. Left alone, that write lands in the
+    // test binary's own stderr, and `zig build test` flags an otherwise
+    // fully-passing run as a "failed command" because of it. Redirect
+    // stderr to /dev/null only for the reap loop, then restore it, so the
+    // logging code still runs for real without polluting captured output.
+    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+    if (devnull < 0) return error.OpenDevNullFailed;
+    defer _ = std.c.close(devnull);
+
+    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+    if (saved_stderr < 0) return error.DupFailed;
+    defer {
+        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+        _ = std.c.close(saved_stderr);
+    }
+    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
     var tries: usize = 0;
     while (state._kgc_pid != null) {
