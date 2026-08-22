@@ -75,7 +75,8 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     if (pid == 0) {
         self.dump(storages) catch {};
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
-        std.c.exit(0);
+        // using _exit to sidestep clearing the buffered data (at the time of fork) completely
+        std.c._exit(0);
     }
 
     self._persistence_state.setKgcPid(pid);
