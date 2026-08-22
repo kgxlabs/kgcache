@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(default_storages);
     for (default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
 
-    const persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
+    var persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
 
     var kgc_backend = try persistence.KgcPersistence.init(io, allocator, persistence_state, config.snapshot_path);
     var aof_backend = persistence.AofPersistence.init(allocator, persistence_state);
@@ -54,9 +54,9 @@ pub fn main(init: std.process.Init) !void {
     };
 
     // Load against the raw storages, before they're wrapped for AOF
-    // notification below -- replaying an existing snapshot is not itself a
-    // write worth journaling, and going through the notifying wrapper here
-    // would re-append every loaded key to the AOF log.
+    // notification below
+    // replaying an existing snapshot is not itself a write worth journaling,
+    // and going through the notifying wrapper here would re-append every loaded key to the AOF log.
     const raw_storages = try allocator.alloc(storage.Interface, num_databases);
     defer allocator.free(raw_storages);
     for (0..num_databases) |i| raw_storages[i] = default_storages[i].storage();
@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     var data_store = mem_store.store();
 
     // Spin up active expiration
-    const handle = try std.Thread.spawn(.{}, handleExpiration, .{ io, allocator, data_storages, config });
+    const handle = try std.Thread.spawn(.{}, handleServerCron, .{ io, allocator, data_storages, &persistence_state, config });
     handle.detach();
 
     // `MemoryStore` owns the storage interfaces, so `data_store.deinit()` also
@@ -132,13 +132,17 @@ fn listen(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store, con_
     }
 }
 
-fn handleExpiration(io: std.Io, allocator: std.mem.Allocator, data_storages: []const storage.Interface, config: Config) !void {
-    const round_duration = std.Io.Duration.fromMilliseconds(config.active_expire_interval_ms);
+fn handleServerCron(io: std.Io, allocator: std.mem.Allocator, data_storages: []const storage.Interface, persistence_state: *PersistenceState, config: Config) !void {
+    const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
     var start: usize = 0;
 
     while (true) {
         try io.sleep(round_duration, .awake);
         start = try runExpirationRound(io, allocator, data_storages, start, config);
+
+        // clean up forked child processes if any
+        persistence_state.reapKgc();
+        persistence_state.reapAof();
     }
 }
 

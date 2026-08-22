@@ -48,15 +48,34 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
     if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+    defer self._persistence_state.finishKgc();
 
-    try self.dump(self, storages);
-    self._persistence_state.finishKgc();
+    try self.dump(storages);
 }
 
 pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
     if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+
+    const rc = std.posix.system.fork();
+    const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AGAIN, .NOMEM => {
+            self._persistence_state.finishKgc();
+            return Snapshot.Error.UnableToSave;
+        },
+        else => |err| {
+            self._persistence_state.finishKgc();
+            return std.posix.unexpectedErrno(err) catch Snapshot.Error.UnableToSave;
+        },
+    };
+
+    if (pid == 0) {
+        self.dump(storages) catch {};
+        // never reutrn . do not fall back into caller's connection loop since this is a child process now
+        std.c.exit(0);
+    }
 }
 
 fn dump(self: *KgcBackend, storages: []const Storage) Snapshot.Error!void {
