@@ -43,8 +43,8 @@ pub fn main(init: std.process.Init) !void {
 
     var persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
 
-    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, persistence_state, config.snapshot_path);
-    var aof_backend = persistence.AofPersistence.init(allocator, persistence_state);
+    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, &persistence_state, config.snapshot_path);
+    var aof_backend = persistence.AofPersistence.init(allocator, &persistence_state);
 
     // See `persistence.Persistence` for why `kgc`/`aof` are consumed by two
     // different layers below instead of both being handed to the same one.

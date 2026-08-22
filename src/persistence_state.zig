@@ -30,7 +30,6 @@ pub fn tryStartKgc(self: *PersistanceState) bool {
 pub fn setKgcPid(self: *PersistanceState, pid: std.posix.pid_t) void {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
-    std.debug.print("SET PID: {any}\n", .{pid});
     self._kgc_pid = pid;
 }
 

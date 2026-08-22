@@ -25,9 +25,9 @@ _path: []const u8,
 // Set for the duration of a single `save()` call: created in `beginDump`,
 // appended to in `dumpEntry`, consumed and cleared in `endDump`.
 _encoder: ?KgcEncoder = null,
-_persistence_state: PersistenceState,
+_persistence_state: *PersistenceState,
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, state: PersistenceState, path: []const u8) InitError!KgcBackend {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, path: []const u8) InitError!KgcBackend {
     if (!std.mem.endsWith(u8, path, required_extension)) return InitError.InvalidExtension;
 
     return .{

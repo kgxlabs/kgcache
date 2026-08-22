@@ -7,13 +7,13 @@ const AofBackend = @This();
 
 _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
-_persistence_state: PersistenceState,
+_persistence_state: *PersistenceState,
 
 const vtable: Journal.VTable = .{
     .onWrite = onWrite,
 };
 
-pub fn init(allocator: std.mem.Allocator, state: PersistenceState) AofBackend {
+pub fn init(allocator: std.mem.Allocator, state: *PersistenceState) AofBackend {
     return .{
         ._allocator = allocator,
         ._encoder = AofEncoder.init(),
