@@ -2,6 +2,7 @@ const std = @import("std");
 const resp = @import("resp.zig");
 const commander = @import("commander.zig");
 const ClientState = @import("client_state.zig");
+const PersistenceState = @import("persistence_state.zig");
 const store = @import("store.zig");
 const helpers = @import("helpers.zig");
 const storage = @import("storage.zig");
@@ -40,8 +41,10 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(default_storages);
     for (default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
 
-    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, config.snapshot_path);
-    var aof_backend = persistence.AofPersistence.init(allocator);
+    const persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
+
+    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, persistence_state, config.snapshot_path);
+    var aof_backend = persistence.AofPersistence.init(allocator, persistence_state);
 
     // See `persistence.Persistence` for why `kgc`/`aof` are consumed by two
     // different layers below instead of both being handed to the same one.

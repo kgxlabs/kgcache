@@ -5,6 +5,7 @@ const object = @import("../object.zig");
 const time = @import("../time.zig");
 const KgcEncoder = @import("../codec/kgc_encoder.zig");
 const KgcDecoder = @import("../codec/kgc_decoder.zig");
+const PersistenceState = @import("../persistence_state.zig");
 
 const KgcBackend = @This();
 
@@ -23,14 +24,16 @@ _path: []const u8,
 // Set for the duration of a single `save()` call: created in `beginDump`,
 // appended to in `dumpEntry`, consumed and cleared in `endDump`.
 _encoder: ?KgcEncoder = null,
+_persistence_state: PersistenceState,
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, path: []const u8) InitError!KgcBackend {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, state: PersistenceState, path: []const u8) InitError!KgcBackend {
     if (!std.mem.endsWith(u8, path, required_extension)) return InitError.InvalidExtension;
 
     return .{
         ._io = io,
         ._allocator = allocator,
         ._path = path,
+        ._persistence_state = state,
     };
 }
 
@@ -44,6 +47,19 @@ pub fn snapshot(self: *KgcBackend) Snapshot {
 pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
+    if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+
+    try self.dump(self, storages);
+    self._persistence_state.finishKgc();
+}
+
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
+    const self: *KgcBackend = @ptrCast(@alignCast(ptr));
+
+    if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+}
+
+fn dump(self: *KgcBackend, storages: []const Storage) Snapshot.Error!void {
     try self.beginDump();
     for (storages, 0..) |storage, db_index| {
         // a database with nothing in it gets no `SELECTDB`

@@ -8,6 +8,7 @@ vtable: *const VTable,
 pub const Error = error{
     UnableToSave,
     UnableToLoad,
+    SaveAlreadyInProgress,
 };
 
 pub const VTable = struct {
