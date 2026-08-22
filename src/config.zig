@@ -10,6 +10,7 @@ active_expire_interval_ms: i64 = 100,
 active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
+exclusive_bg_persistence: bool = false,
 
 pub fn default() Config {
     return .{};

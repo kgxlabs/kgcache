@@ -13,6 +13,7 @@ const Directive = enum {
     @"active-expire-budget-ms",
     @"active-expire-batch-size",
     @"active-expire-threshold-percent",
+    @"exclusive-bg-persistence",
 };
 
 pub const Error = error{
@@ -56,6 +57,7 @@ pub fn parse(contents: []const u8) Error!Config {
             .@"active-expire-budget-ms" => config.active_expire_budget_ms = try parseInt(i8, value),
             .@"active-expire-batch-size" => config.active_expire_batch_size = try parseInt(i8, value),
             .@"active-expire-threshold-percent" => config.active_expire_threshold_percent = try parseInt(i8, value),
+            .@"exclusive-bg-persistence" => config.exclusive_bg_persistence = try parseBool(value),
         }
     }
 
