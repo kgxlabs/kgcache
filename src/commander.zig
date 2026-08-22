@@ -76,6 +76,7 @@ pub fn errorToRESPValue(err: Error) resp.RESPValue {
         error.UnsupportedOption => .{ .simple_error = "ERR unsupported option" },
         error.Syntax => .{ .simple_error = "ERR syntax error" },
         error.UnableToSaveKgc => .{ .simple_error = "ERR unable to save kgc" },
+        error.UnableToDoBackgroundSaveKgc => .{ .simple_error = "ERR unable to do kgc background save" },
         error.SomethingWentWrong => .{ .simple_error = "ERR something went wrong" },
     };
 }

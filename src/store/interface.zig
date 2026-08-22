@@ -7,6 +7,8 @@ pub const Error = std.mem.Allocator.Error || error{
     UnsupportedCondition,
     SomethingWentWrong,
     CancelledCommand,
+    UnableToSave,
+    UnableToDoBackgroundSave,
 };
 
 const Store = @This();
@@ -20,6 +22,7 @@ pub const VTable = struct {
     dbsize: *const fn (*anyopaque, u32) u32,
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque) Error!void,
+    bgsave: *const fn (*anyopaque) Error!void,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -41,6 +44,10 @@ pub fn numDatabases(self: Store) u32 {
 
 pub fn save(self: Store) Error!void {
     return self.vtable.save(self.ptr);
+}
+
+pub fn bgsave(self: Store) Error!void {
+    return self.vtable.bgsave(self.ptr);
 }
 
 pub fn deinit(self: Store) void {

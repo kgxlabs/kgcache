@@ -11,6 +11,7 @@ const KgcBackend = @This();
 
 const vtable: Snapshot.VTable = .{
     .save = save,
+    .bgsave = bgsave,
     .load = load,
 };
 

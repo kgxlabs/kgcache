@@ -38,6 +38,7 @@ const vtable = Store.VTable{
     .dbsize = dbsize,
     .numDatabases = numDatabases,
     .save = save,
+    .bgsave = bgsave,
     .deinit = deinit,
 };
 
@@ -100,7 +101,12 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
 
 pub fn save(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._kgc.save(self._storages) catch return Store.Error.SomethingWentWrong;
+    self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
+}
+
+pub fn bgsave(ptr: *anyopaque) Store.Error!void {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    self._kgc.bgsave(self._storages) catch return Store.Error.UnableToDoBackgroundSave;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
