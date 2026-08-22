@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const PersistanceState = @This();
+const PersistenceState = @This();
 
 _io: std.Io,
 _mutex: std.Io.Mutex = .init,
@@ -10,14 +10,14 @@ _mutual_exclusive: bool = false,
 _kgc_pid: ?std.posix.pid_t = null,
 _aof_pid: ?std.posix.pid_t = null,
 
-pub fn init(io: std.Io, mutual_exclusive: bool) PersistanceState {
+pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
         ._io = io,
         ._mutual_exclusive = mutual_exclusive,
     };
 }
 
-pub fn tryStartKgc(self: *PersistanceState) bool {
+pub fn tryStartKgc(self: *PersistenceState) bool {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
@@ -27,20 +27,20 @@ pub fn tryStartKgc(self: *PersistanceState) bool {
     return true;
 }
 
-pub fn setKgcPid(self: *PersistanceState, pid: std.posix.pid_t) void {
+pub fn setKgcPid(self: *PersistenceState, pid: std.posix.pid_t) void {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
     self._kgc_pid = pid;
 }
 
-pub fn finishKgc(self: *PersistanceState) void {
+pub fn finishKgc(self: *PersistenceState) void {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
     self._kgc_in_progress = false;
 }
 
-pub fn tryStartAof(self: *PersistanceState) bool {
+pub fn tryStartAof(self: *PersistenceState) bool {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
@@ -50,29 +50,29 @@ pub fn tryStartAof(self: *PersistanceState) bool {
     return true;
 }
 
-pub fn setAofPid(self: *PersistanceState, pid: std.posix.pid_t) void {
+pub fn setAofPid(self: *PersistenceState, pid: std.posix.pid_t) void {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
     self._aof_pid = pid;
 }
 
-pub fn finishAof(self: *PersistanceState) void {
+pub fn finishAof(self: *PersistenceState) void {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
     self._aof_in_progress = false;
 }
 
-pub fn reapKgc(self: *PersistanceState) void {
+pub fn reapKgc(self: *PersistenceState) void {
     self.reapPid(&self._kgc_pid, &self._kgc_in_progress);
 }
 
-pub fn reapAof(self: *PersistanceState) void {
+pub fn reapAof(self: *PersistenceState) void {
     self.reapPid(&self._aof_pid, &self._aof_in_progress);
 }
 
-fn reapPid(self: *PersistanceState, maybe_pid: *?std.posix.pid_t, in_progress: *bool) void {
+fn reapPid(self: *PersistenceState, maybe_pid: *?std.posix.pid_t, in_progress: *bool) void {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
     const pid = maybe_pid.* orelse return;
