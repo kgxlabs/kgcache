@@ -8,6 +8,10 @@ test {
     _ = @import("entry.zig");
     _ = @import("storage/default_storage.zig");
     _ = @import("object.zig");
-    _ = @import("main.zig");
+    _ = @import("expiration.zig");
+    _ = @import("cron.zig");
+    _ = @import("connection.zig");
+    _ = @import("config.zig");
     _ = @import("config_parser.zig");
+    _ = @import("server.zig");
 }

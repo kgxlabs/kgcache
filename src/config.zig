@@ -1,3 +1,6 @@
+const std = @import("std");
+const ConfigParser = @import("config_parser.zig");
+
 const Config = @This();
 
 bind_address: []const u8 = "127.0.0.1",
@@ -14,4 +17,38 @@ exclusive_bg_persistence: bool = true,
 
 pub fn default() Config {
     return .{};
+}
+
+/// Reads the config file path from the first positional CLI argument, if
+/// any (`kgcache [path/to/kgcache.conf]`); with no argument, returns
+/// `Config.default()`.
+/// A path that can't be read or doesn't parse fails the process fast, with a message on stderr,
+/// rather than silently falling back to defaults.
+pub fn loadFromArgs(init: std.process.Init) !Config {
+    // NOTE: Using arena allocator instead of gap
+    // We are not copying the parsed bytes. Instead, we are pointing to the raw file bytes we read
+    // And we need those as long as the server lives , meaning we do not need to free them one by one
+    // with gap, this will be flagged as a memory leak bug.
+    // with arena allocator, we can free when server dies.
+    const allocator = init.arena.allocator();
+
+    var args = init.minimal.args.iterate();
+    _ = args.skip(); // program name
+
+    const conf_path = args.next() orelse return Config.default();
+
+    const contents = std.Io.Dir.cwd().readFileAlloc(init.io, conf_path, allocator, .unlimited) catch |err| {
+        try reportConfigError(init.io, allocator, "failed to read config file '{s}': {s}", .{ conf_path, @errorName(err) });
+        return err;
+    };
+
+    return ConfigParser.parse(contents) catch |err| {
+        try reportConfigError(init.io, allocator, "invalid config file '{s}': {s}", .{ conf_path, @errorName(err) });
+        return err;
+    };
+}
+
+fn reportConfigError(io: std.Io, allocator: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
+    const message = try std.fmt.allocPrint(allocator, "kgcache: " ++ fmt ++ "\n", args);
+    try std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message);
 }

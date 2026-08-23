@@ -89,7 +89,7 @@ Since kgcache handles each connection on its own OS thread, this state is genuin
 
 When a child process exits, the kernel doesn't let it fully disappear until its parent calls `waitpid()` on it — until then it's a "zombie", just sitting in the process table. `bgsave()` itself can't be the one to reap its child: `waitpid()` without `WNOHANG` blocks until the child exits, which would make the parent wait anyway and defeat the entire point of `BGSAVE` being non-blocking.
 
-So reaping happens on its own timeline instead: the background housekeeping loop in `main.zig` (`cron-interval-ms`, shared with active expiration — see [Configuration](CONFIGURATION.md)) polls with `waitpid(pid, &status, WNOHANG)` on every tick. If the child hasn't exited yet, it's a no-op; once it has, the loop clears `PersistenceState`'s flag and pid, and checks the exit status — a non-zero exit (the child hit a write failure) gets logged to stderr, since there's no other channel left to report it through by that point.
+So reaping happens on its own timeline instead: the background housekeeping loop in `cron.zig` (`cron-interval-ms`, shared with active expiration — see [Configuration](CONFIGURATION.md)) polls with `waitpid(pid, &status, WNOHANG)` on every tick. If the child hasn't exited yet, it's a no-op; once it has, the loop clears `PersistenceState`'s flag and pid, and checks the exit status — a non-zero exit (the child hit a write failure) gets logged to stderr, since there's no other channel left to report it through by that point.
 
 ### `exclusive-bg-persistence`
 
@@ -102,8 +102,12 @@ By default, a `BGSAVE` and an AOF background rewrite are mutually exclusive — 
 ├── build.zig
 ├── kgcache.conf.example         # Every config directive, documented, at its default
 ├── src/
-│   ├── main.zig                 # TCP server, connection loop, background cron loop
-│   ├── config.zig               # Config struct and defaults
+│   ├── main.zig                 # Entry point: load config, create/destroy Server
+│   ├── server.zig               # Owns the object graph; create/destroy/run
+│   ├── connection.zig           # Accept loop and per-connection request loop
+│   ├── cron.zig                 # Background housekeeping loop (tick schedule)
+│   ├── expiration.zig           # Active expiration round/batch policy
+│   ├── config.zig               # Config struct, defaults, and CLI/file loading
 │   ├── config_parser.zig        # kgcache.conf parser
 │   ├── resp.zig                 # RESP2 parser and serializer
 │   ├── commander.zig            # Command parsing and dispatch
