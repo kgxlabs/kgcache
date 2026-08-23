@@ -3,6 +3,15 @@ const ConfigParser = @import("config_parser.zig");
 
 const Config = @This();
 
+/// One `save <seconds> <changes>` rule. The directive may repeat;
+/// ANY rule whose condition is met (>= `changes` writes in the last `seconds`
+/// seconds since the last save) triggers an automatic BGSAVE
+/// rules are OR'd together.
+pub const SaveRule = struct {
+    seconds: i64,
+    changes: u32,
+};
+
 bind_address: []const u8 = "127.0.0.1",
 port: u16 = 6379,
 reuse_address: bool = true,
@@ -14,6 +23,8 @@ active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
+/// No `save` line means no automatic BGSAVE triggering at all
+save_rules: []const SaveRule = &.{},
 
 pub fn default() Config {
     return .{};
@@ -42,7 +53,7 @@ pub fn loadFromArgs(init: std.process.Init) !Config {
         return err;
     };
 
-    return ConfigParser.parse(contents) catch |err| {
+    return ConfigParser.parse(allocator, contents) catch |err| {
         try reportConfigError(init.io, allocator, "invalid config file '{s}': {s}", .{ conf_path, @errorName(err) });
         return err;
     };
