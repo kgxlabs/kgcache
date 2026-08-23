@@ -53,8 +53,7 @@ pub fn main(init: std.process.Init) !void {
         .aof = aof_backend.journal(),
     };
 
-    // Load against the raw storages, before they're wrapped for AOF
-    // notification below
+    // Load against the raw storages, before they're wrapped for AOF notification below
     // replaying an existing snapshot is not itself a write worth journaling,
     // and going through the notifying wrapper here would re-append every loaded key to the AOF log.
     const raw_storages = try allocator.alloc(storage.Interface, num_databases);
