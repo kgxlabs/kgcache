@@ -82,6 +82,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
             allocator,
             self._default_storages[i].storage(),
             aof_journal,
+            &self._change_tracker,
             @intCast(i),
         );
         self._data_storages[i] = self._notifier_storages[i].storage();
