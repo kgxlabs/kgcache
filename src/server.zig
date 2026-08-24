@@ -123,6 +123,7 @@ pub fn run(self: *Server) !void {
         self._data_storages,
         &self._persistence_state,
         &self._change_tracker,
+        &self._store,
         self._config,
     });
     cron_thread.detach();
