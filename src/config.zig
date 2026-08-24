@@ -3,10 +3,10 @@ const ConfigParser = @import("config_parser.zig");
 
 const Config = @This();
 
-/// One `save <seconds> <changes>` rule. The directive may repeat;
-/// ANY rule whose condition is met (>= `changes` writes in the last `seconds`
-/// seconds since the last save) triggers an automatic BGSAVE
-/// rules are OR'd together.
+/// One `save <seconds> <changes>` rule. The directive may repeat; ANY rule
+/// whose condition is met (>= `changes` writes in the last `seconds`
+/// seconds since the last save) triggers an automatic BGSAVE -- rules are
+/// OR'd together, same as Redis.
 pub const SaveRule = struct {
     seconds: i64,
     changes: u32,
@@ -23,7 +23,8 @@ active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
-/// No `save` line means no automatic BGSAVE triggering at all
+/// No `save` line means no automatic BGSAVE triggering at all (matches
+/// Redis's `save ""` meaning "disable automatic saving").
 save_rules: []const SaveRule = &.{},
 
 pub fn default() Config {
