@@ -3,6 +3,7 @@ const storage = @import("storage.zig");
 const store = @import("store.zig");
 const persistence = @import("persistence.zig");
 const PersistenceState = @import("persistence_state.zig");
+const ChangeTracker = @import("change_tracker.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
 const connection = @import("connection.zig");
@@ -14,6 +15,7 @@ _allocator: std.mem.Allocator,
 _config: Config,
 
 _persistence_state: PersistenceState,
+_change_tracker: ChangeTracker,
 _kgc: persistence.KgcPersistence,
 _aof: persistence.AofPersistence,
 
@@ -67,6 +69,8 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
         try kgc_snapshot.load(raw_storages);
     }
 
+    self._change_tracker = ChangeTracker.init(io);
+
     self._notifier_storages = try allocator.alloc(storage.NotifierStorage, num_databases);
     errdefer allocator.free(self._notifier_storages);
 
@@ -117,6 +121,7 @@ pub fn run(self: *Server) !void {
         self._allocator,
         self._data_storages,
         &self._persistence_state,
+        &self._change_tracker,
         self._config,
     });
     cron_thread.detach();
