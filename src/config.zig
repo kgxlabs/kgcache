@@ -36,10 +36,10 @@ pub fn default() Config {
 /// A path that can't be read or doesn't parse fails the process fast, with a message on stderr,
 /// rather than silently falling back to defaults.
 pub fn loadFromArgs(init: std.process.Init) !Config {
-    // NOTE: Using arena allocator instead of gap
+    // NOTE: Using arena allocator instead of gpa
     // We are not copying the parsed bytes. Instead, we are pointing to the raw file bytes we read
     // And we need those as long as the server lives , meaning we do not need to free them one by one
-    // with gap, this will be flagged as a memory leak bug.
+    // with gpa, this will be flagged as a memory leak bug.
     // with arena allocator, we can free when server dies.
     const allocator = init.arena.allocator();
 
