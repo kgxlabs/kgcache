@@ -64,7 +64,7 @@ fn numDatabases(ptr: *anyopaque) u32 {
     return self.num_databases_result;
 }
 
-fn save(ptr: *anyopaque) Store.Error!void {
+fn save(ptr: *anyopaque, _: i64) Store.Error!void {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.save_calls += 1;
 }

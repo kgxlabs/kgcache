@@ -191,7 +191,7 @@ test "reapKgc leaves state untouched while the child is still running" {
     _ = std.c.close(fds[0]);
     state.setKgcPid(pid);
 
-    state.reapKgc();
+    try testing.expect(!state.reapKgc());
     try testing.expect(state._kgc_in_progress);
     try testing.expect(state._kgc_pid != null);
 
@@ -201,7 +201,7 @@ test "reapKgc leaves state untouched while the child is still running" {
 
     var tries: usize = 0;
     while (state._kgc_pid != null) {
-        state.reapKgc();
+        _ = state.reapKgc();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
@@ -247,7 +247,7 @@ test "reapKgc clears state after the child exits with a failure status" {
 
     var tries: usize = 0;
     while (state._kgc_pid != null) {
-        state.reapKgc();
+        _ = state.reapKgc();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }

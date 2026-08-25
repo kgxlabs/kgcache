@@ -45,22 +45,39 @@ fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *sto
     };
 }
 
-test "triggerSaveIfDue starts a background save once the configured rule is met" {
+// One write through the real Store: DefaultStorage wrapped by NotifierStorage
+// (same wiring as Server.create), so `data_store.set()` reaches
+// `change_tracker.recordChange()` exactly the way a real client write would,
+// rather than the test poking the tracker directly.
+fn writeOneKey(data_store: *store.Store) !void {
+    _ = try data_store.set(.{
+        .key = "foo",
+        .value = "bar",
+        .condition = null,
+        .expires_at = null,
+        .keepttl = false,
+        .response = null,
+    }, 0);
+}
+
+test "triggerSaveIfDue starts a background save once writes through the real store meet the configured rule" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
+    const NotifierStorage = @import("storage/notifier_storage.zig");
     const persistence = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    const backend_storage = backend.storage();
+    var change_tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &change_tracker, 0);
+    const notified_storage = notifier.storage();
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-trigger.kgc");
-    var memory_store = store.MemoryStore.init(&.{backend_storage}, kgc_backend.snapshot());
+    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    var change_tracker = ChangeTracker.init(testing.io);
-    change_tracker.recordChange();
+    try writeOneKey(&data_store);
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 0, .changes = 1 }} };
 
@@ -72,29 +89,31 @@ test "triggerSaveIfDue starts a background save once the configured rule is met"
 
     var tries: usize = 0;
     while (persistence_state._kgc_in_progress) {
-        persistence_state.reapKgc();
+        _ = persistence_state.reapKgc();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
 }
 
-test "triggerSaveIfDue does nothing when no configured rule is due" {
+test "triggerSaveIfDue does nothing when writes through the real store don't meet the configured rule" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
+    const NotifierStorage = @import("storage/notifier_storage.zig");
     const persistence = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    const backend_storage = backend.storage();
+    var change_tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &change_tracker, 0);
+    const notified_storage = notifier.storage();
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-trigger.kgc");
-    var memory_store = store.MemoryStore.init(&.{backend_storage}, kgc_backend.snapshot());
+    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    // one change recorded, but the rule needs a lot more than that.
-    var change_tracker = ChangeTracker.init(testing.io);
-    change_tracker.recordChange();
+    // one write recorded, but the rule needs a lot more than that.
+    try writeOneKey(&data_store);
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 300, .changes = 100 }} };
 
@@ -106,19 +125,21 @@ test "triggerSaveIfDue does nothing when no configured rule is due" {
 test "triggerSaveIfDue does nothing when no save rules are configured" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
+    const NotifierStorage = @import("storage/notifier_storage.zig");
     const persistence = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    const backend_storage = backend.storage();
+    var change_tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &change_tracker, 0);
+    const notified_storage = notifier.storage();
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-rules.kgc");
-    var memory_store = store.MemoryStore.init(&.{backend_storage}, kgc_backend.snapshot());
+    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    var change_tracker = ChangeTracker.init(testing.io);
-    change_tracker.recordChange();
+    try writeOneKey(&data_store);
 
     triggerSaveIfDue(testing.io, &change_tracker, &data_store, Config.default());
 
