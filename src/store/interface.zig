@@ -21,7 +21,7 @@ pub const VTable = struct {
     set: *const fn (*anyopaque, Request.SetRequest, u32) Error!?object.Object,
     dbsize: *const fn (*anyopaque, u32) u32,
     numDatabases: *const fn (*anyopaque) u32,
-    save: *const fn (*anyopaque) Error!void,
+    save: *const fn (*anyopaque, i64) Error!void,
     bgsave: *const fn (*anyopaque) Error!void,
     deinit: *const fn (*anyopaque) void,
 };
@@ -42,8 +42,8 @@ pub fn numDatabases(self: Store) u32 {
     return self.vtable.numDatabases(self.ptr);
 }
 
-pub fn save(self: Store) Error!void {
-    return self.vtable.save(self.ptr);
+pub fn save(self: Store, now_ms: i64) Error!void {
+    return self.vtable.save(self.ptr, now_ms);
 }
 
 pub fn bgsave(self: Store) Error!void {

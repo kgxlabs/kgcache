@@ -4,6 +4,7 @@ const Storage = @import("../storage/interface.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
 const PersistenceState = @import("../persistence_state.zig");
+const ChangeTracker = @import("../change_tracker.zig");
 const object = @import("../object.zig");
 const Request = @import("../commander/request.zig");
 const testing = std.testing;
@@ -12,12 +13,14 @@ const MemoryStore = @This();
 
 _storages: []const Storage,
 _kgc: persistence.SnapshotPersistence,
+_change_tracker: *ChangeTracker,
 
 /// Takes ownership of `storages`: `deinit` calls `Storage.deinit` on each.
-pub fn init(storages: []const Storage, kgc: persistence.SnapshotPersistence) MemoryStore {
+pub fn init(storages: []const Storage, kgc: persistence.SnapshotPersistence, tracker: *ChangeTracker) MemoryStore {
     return .{
         ._storages = storages,
         ._kgc = kgc,
+        ._change_tracker = tracker,
     };
 }
 
@@ -100,9 +103,10 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
     return @intCast(self._storages.len);
 }
 
-pub fn save(ptr: *anyopaque) Store.Error!void {
+pub fn save(ptr: *anyopaque, now_ms: i64) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
+    self._change_tracker.markSaved(now_ms);
 }
 
 pub fn bgsave(ptr: *anyopaque) Store.Error!void {
