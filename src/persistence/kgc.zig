@@ -54,6 +54,8 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     try self.dump(storages);
 }
 
+// Finishing this does not mean, saving succeeded.
+// It just means forking completed
 pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
@@ -289,7 +291,7 @@ test "bgsave forks without blocking and the child writes a loadable snapshot" {
 
     var tries: usize = 0;
     while (persistence_state._kgc_in_progress) {
-        persistence_state.reapKgc();
+        _ = persistence_state.reapKgc();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }

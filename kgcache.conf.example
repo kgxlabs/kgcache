@@ -55,3 +55,15 @@
 # If at least this percentage of a batch came back expired, immediately
 # run another batch on the same database instead of moving on.
 # active-expire-threshold-percent 25
+
+# One or more rules for automatically triggering a background save
+# (equivalent to BGSAVE) when enough writes have happened recently.
+# Format: save <seconds> <changes> -- trigger if at least <changes>
+# writes happened in the last <seconds> seconds since the last save.
+# This directive may be repeated; if ANY rule's condition is met, a
+# background save is triggered. With no `save` line at all (the
+# default), automatic saving is disabled -- SAVE/BGSAVE still work
+# on demand.
+# save 3600 1
+# save 300 100
+# save 60 10000

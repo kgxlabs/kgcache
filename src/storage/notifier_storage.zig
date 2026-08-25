@@ -9,6 +9,8 @@ const entry = @import("../entry.zig");
 const object = @import("../object.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
+const ChangeTracker = @import("../change_tracker.zig");
+const DefaultStorage = @import("default_storage.zig");
 
 const NotifierStorage = @This();
 
@@ -18,6 +20,8 @@ _inner: Storage,
 // KGC snapshotting is not routed through here: it needs a `Storage` handle to enumerate
 // every key, not a per-write hook, so it lives at the `Store` level instead (see MemoryStore).
 _aof: ?persistence.JournalPersistence,
+// Shared across every db's NotifierStorage: the dirty count is process-wide, not per-database.
+_change_tracker: *ChangeTracker,
 _db_index: u32,
 
 const vtable: Storage.VTable = .{
@@ -49,12 +53,14 @@ pub fn init(
     allocator: std.mem.Allocator,
     inner: Storage,
     aof: ?persistence.JournalPersistence,
+    change_tracker: *ChangeTracker,
     db_index: u32,
 ) NotifierStorage {
     return .{
         ._allocator = allocator,
         ._inner = inner,
         ._aof = aof,
+        ._change_tracker = change_tracker,
         ._db_index = db_index,
     };
 }
@@ -79,6 +85,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const is_removed = try self._inner.removeIfExpired(key);
 
     if (is_removed) {
+        self._change_tracker.recordChange();
         if (self._aof) |aof| {
             try aof.onWrite(.{
                 .remove = .{ .db_index = self._db_index, .key = key },
@@ -92,6 +99,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
 pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     const result = try self._inner.put(key, value, options);
+    self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
         try aof.onWrite(.{ .put = .{
@@ -107,7 +115,8 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    return self._inner.remove(key);
+    try self._inner.remove(key);
+    self._change_tracker.recordChange();
 }
 
 pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
@@ -148,4 +157,81 @@ pub fn size(ptr: *anyopaque) u32 {
 pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.forEach(ctx, visit);
+}
+
+test "put increments the change tracker's dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+}
+
+test "remove increments the change tracker's dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    try wrapped.remove("foo");
+
+    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+}
+
+test "a lazy-expiration removal during get increments the change tracker's dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("expired", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) - 1,
+    });
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+
+    try testing.expect(try wrapped.get("expired") == null);
+
+    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+}
+
+test "a read that finds no expired key does not increment the dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+
+    _ = try wrapped.get("foo");
+
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
 }

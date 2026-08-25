@@ -14,6 +14,7 @@ const Directive = enum {
     @"active-expire-batch-size",
     @"active-expire-threshold-percent",
     @"exclusive-bg-persistence",
+    save,
 };
 
 pub const Error = error{
@@ -23,16 +24,21 @@ pub const Error = error{
     UnknownDirective,
     /// The value couldn't be parsed into the type the directive expects.
     InvalidValue,
+    /// Allocating storage for a repeated directive's collected values failed.
+    OutOfMemory,
 };
 
-/// Parses redis.conf-style contents: blank lines and lines starting with `#`
-/// are skipped, everything else must be `directive value`. Returns
-/// `Config.default()` overlaid with whatever directives were present.
+/// blank lines and lines starting with `#` are skipped, everything else must be `directive value`.
+/// Returns `Config.default()` overlaid with whatever directives were present.
 ///
-/// The returned `Config`'s string fields (`bind_address`, `snapshot_path`)
-/// borrow directly from `contents`, so `contents` must outlive the `Config`.
-pub fn parse(contents: []const u8) Error!Config {
+/// The returned `Config`'s string fields (`bind_address`, `snapshot_path`) borrow directly from `contents`, so `contents` must outlive the `Config`.
+/// `allocator` backs `Config.save_rules`, since a repeated `save` directive is
+/// assembled line-by-line rather than borrowed as one contiguous slice of
+/// `contents` -- pass the same arena used for the rest of `Config` so it's
+/// freed the same way (server lifetime).
+pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
     var config = Config.default();
+    var save_rules: std.ArrayList(Config.SaveRule) = .empty;
 
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw_line| {
@@ -58,9 +64,21 @@ pub fn parse(contents: []const u8) Error!Config {
             .@"active-expire-batch-size" => config.active_expire_batch_size = try parseInt(i8, value),
             .@"active-expire-threshold-percent" => config.active_expire_threshold_percent = try parseInt(i8, value),
             .@"exclusive-bg-persistence" => config.exclusive_bg_persistence = try parseBool(value),
+            .save => {
+                var tokens = std.mem.tokenizeAny(u8, value, " \t");
+                const seconds_str = tokens.next() orelse return Error.MalformedLine;
+                const changes_str = tokens.next() orelse return Error.MalformedLine;
+                if (tokens.next() != null) return Error.MalformedLine;
+
+                save_rules.append(allocator, .{
+                    .seconds = try parseInt(i64, seconds_str),
+                    .changes = try parseInt(u32, changes_str),
+                }) catch return Error.OutOfMemory;
+            },
         }
     }
 
+    config.save_rules = save_rules.toOwnedSlice(allocator) catch return Error.OutOfMemory;
     return config;
 }
 
@@ -92,7 +110,7 @@ test "parse overlays every directive onto the defaults" {
         \\active-expire-threshold-percent 50
     ;
 
-    const config = try parse(contents);
+    const config = try parse(testing.allocator, contents);
 
     try testing.expectEqualStrings("0.0.0.0", config.bind_address);
     try testing.expectEqual(7000, config.port);
@@ -113,7 +131,7 @@ test "parse leaves directives absent from a partial file at their defaults" {
         \\port 7000
     ;
 
-    const config = try parse(contents);
+    const config = try parse(testing.allocator, contents);
     const defaults = Config.default();
 
     try testing.expectEqual(7000, config.port);
@@ -130,20 +148,75 @@ test "parse leaves directives absent from a partial file at their defaults" {
 
 test "parse rejects a line with a directive but no value" {
     const testing = std.testing;
-    try testing.expectError(Error.MalformedLine, parse("port"));
+    try testing.expectError(Error.MalformedLine, parse(testing.allocator, "port"));
 }
 
 test "parse rejects a directive name that isn't recognized" {
     const testing = std.testing;
-    try testing.expectError(Error.UnknownDirective, parse("maxmemory 100mb"));
+    try testing.expectError(Error.UnknownDirective, parse(testing.allocator, "maxmemory 100mb"));
 }
 
 test "parse rejects a value that doesn't fit the directive's type" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse("port not-a-number"));
+    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "port not-a-number"));
 }
 
 test "parse rejects a reuse-address value that isn't yes or no" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse("reuse-address maybe"));
+    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "reuse-address maybe"));
+}
+
+test "parse accepts a single save rule" {
+    const testing = std.testing;
+
+    const config = try parse(testing.allocator, "save 300 100");
+    defer testing.allocator.free(config.save_rules);
+
+    try testing.expectEqual(1, config.save_rules.len);
+    try testing.expectEqual(300, config.save_rules[0].seconds);
+    try testing.expectEqual(100, config.save_rules[0].changes);
+}
+
+test "parse accepts multiple save lines and keeps all of them" {
+    const testing = std.testing;
+
+    const contents =
+        \\save 900 1
+        \\save 300 10
+        \\save 60 10000
+    ;
+    const config = try parse(testing.allocator, contents);
+    defer testing.allocator.free(config.save_rules);
+
+    try testing.expectEqual(3, config.save_rules.len);
+    try testing.expectEqual(900, config.save_rules[0].seconds);
+    try testing.expectEqual(1, config.save_rules[0].changes);
+    try testing.expectEqual(300, config.save_rules[1].seconds);
+    try testing.expectEqual(10, config.save_rules[1].changes);
+    try testing.expectEqual(60, config.save_rules[2].seconds);
+    try testing.expectEqual(10000, config.save_rules[2].changes);
+}
+
+test "parse defaults to no save rules when the directive is absent" {
+    const testing = std.testing;
+
+    const config = try parse(testing.allocator, "port 7000");
+    defer testing.allocator.free(config.save_rules);
+
+    try testing.expectEqual(0, config.save_rules.len);
+}
+
+test "parse rejects a save line with only one value" {
+    const testing = std.testing;
+    try testing.expectError(Error.MalformedLine, parse(testing.allocator, "save 300"));
+}
+
+test "parse rejects a save line with more than two values" {
+    const testing = std.testing;
+    try testing.expectError(Error.MalformedLine, parse(testing.allocator, "save 300 100 200"));
+}
+
+test "parse rejects a save line with a non-numeric value" {
+    const testing = std.testing;
+    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "save 300 many"));
 }

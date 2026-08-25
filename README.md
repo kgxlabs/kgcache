@@ -13,7 +13,7 @@
 | Runtime | Zig 0.16.0+ |
 | Data model | Process-local string keys and values |
 | Commands | See [Commands](docs/COMMANDS.md) |
-| Persistence | Snapshot to a `.kgc` file via `SAVE` (blocking) or `BGSAVE` (forks, non-blocking); AOF journal is in-memory only, not yet durable to disk |
+| Persistence | Snapshot to a `.kgc` file via `SAVE` (blocking) or `BGSAVE` (forks, non-blocking), automatically or on demand — see `save` in [Configuration](docs/CONFIGURATION.md); AOF journal is in-memory only, not yet durable to disk |
 
 ## Quick start
 
@@ -48,7 +48,9 @@ The default build installs the executable at `zig-out/bin/main`. To run with a c
 | --- | --- |
 | [Commands](docs/COMMANDS.md) | Supported commands and `SET` option families |
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
-| [Architecture](docs/ARCHITECTURE.md) | Request flow, storage internals, expiration bookkeeping, concurrency trade-offs, repository layout |
+| [Architecture](docs/ARCHITECTURE.md) | Request flow, design direction, concurrency trade-offs, repository layout |
+| [Persistence](docs/PERSISTENCE.md) | `SAVE`/`BGSAVE` fork mechanics, reaping, and automatic condition-based saving |
+| [Expiration](docs/EXPIRATION.md) | TTL bookkeeping layout, memory cost, and the planned redesign |
 
 ## Development
 

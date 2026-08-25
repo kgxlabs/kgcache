@@ -3,6 +3,15 @@ const ConfigParser = @import("config_parser.zig");
 
 const Config = @This();
 
+/// One `save <seconds> <changes>` rule. The directive may repeat; ANY rule
+/// whose condition is met (>= `changes` writes in the last `seconds`
+/// seconds since the last save) triggers an automatic BGSAVE -- rules are
+/// OR'd together, same as Redis.
+pub const SaveRule = struct {
+    seconds: i64,
+    changes: u32,
+};
+
 bind_address: []const u8 = "127.0.0.1",
 port: u16 = 6379,
 reuse_address: bool = true,
@@ -14,6 +23,9 @@ active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
+/// No `save` line means no automatic BGSAVE triggering at all (matches
+/// Redis's `save ""` meaning "disable automatic saving").
+save_rules: []const SaveRule = &.{},
 
 pub fn default() Config {
     return .{};
@@ -25,10 +37,10 @@ pub fn default() Config {
 /// A path that can't be read or doesn't parse fails the process fast, with a message on stderr,
 /// rather than silently falling back to defaults.
 pub fn loadFromArgs(init: std.process.Init) !Config {
-    // NOTE: Using arena allocator instead of gap
+    // NOTE: Using arena allocator instead of gpa
     // We are not copying the parsed bytes. Instead, we are pointing to the raw file bytes we read
     // And we need those as long as the server lives , meaning we do not need to free them one by one
-    // with gap, this will be flagged as a memory leak bug.
+    // with gpa, this will be flagged as a memory leak bug.
     // with arena allocator, we can free when server dies.
     const allocator = init.arena.allocator();
 
@@ -42,7 +54,7 @@ pub fn loadFromArgs(init: std.process.Init) !Config {
         return err;
     };
 
-    return ConfigParser.parse(contents) catch |err| {
+    return ConfigParser.parse(allocator, contents) catch |err| {
         try reportConfigError(init.io, allocator, "invalid config file '{s}': {s}", .{ conf_path, @errorName(err) });
         return err;
     };
