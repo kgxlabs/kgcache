@@ -393,6 +393,28 @@ test "save then load round-trips across databases" {
     try testing.expectEqual(1, fresh_one_storage.getExpirableCount());
 }
 
+test "save resets the change tracker's dirty count" {
+    const time = @import("../time.zig");
+    const NotifierStorage = @import("../storage/notifier_storage.zig");
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-save-reset.kgc");
+    var change_tracker = ChangeTracker.init(testing.io);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &change_tracker, 0);
+    var memory_store = MemoryStore.init(&.{notifier.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    // a real write through the store, not the test poking the tracker directly.
+    _ = try data_store.set(.{ .key = "foo", .value = "bar", .condition = null, .expires_at = null, .keepttl = false, .response = null }, 0);
+    try testing.expect(change_tracker._dirty.load(.monotonic) > 0);
+
+    try data_store.save(time.nowMs(testing.io));
+
+    try testing.expectEqual(0, change_tracker._dirty.load(.monotonic));
+}
+
 fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {
     const value = maybe_value orelse return error.Null;
 
