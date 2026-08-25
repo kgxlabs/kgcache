@@ -64,22 +64,26 @@ pub fn finishAof(self: *PersistenceState) void {
     self._aof_in_progress = false;
 }
 
-pub fn reapKgc(self: *PersistenceState) void {
-    self.reapPid("kgc", &self._kgc_pid, &self._kgc_in_progress);
+pub fn reapKgc(self: *PersistenceState) bool {
+    return self.reapPid("kgc", &self._kgc_pid, &self._kgc_in_progress);
 }
 
 pub fn reapAof(self: *PersistenceState) void {
-    self.reapPid("aof", &self._aof_pid, &self._aof_in_progress);
+    _ = self.reapPid("aof", &self._aof_pid, &self._aof_in_progress);
 }
 
-fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) void {
+// returns bool flag to indicate if a child finished (succeeded or failed) save or still running
+// True => finished saving (failed or succeeded)
+// False => still saving
+// This is will retry only on NEXT RULE MATCH instead of failed save being retried on every tick of cron job
+fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) bool {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
-    const pid = maybe_pid.* orelse return;
+    const pid = maybe_pid.* orelse return false;
     var status: c_int = undefined;
     const r = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
     // Child porcess is still running
-    if (r == 0) return;
+    if (r == 0) return false;
     maybe_pid.* = null;
     in_progress.* = false;
 
@@ -93,7 +97,11 @@ fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid
             .{ name, std.c.W.EXITSTATUS(status_bits) },
         ) catch "kgcache: background save child exited with a failure status\n";
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
+        // even though this is triggered but failed scenario, we will reset the tracker
+        return true;
     }
+
+    return true;
 }
 
 test "tryStartKgc blocks a second start until finishKgc releases it" {

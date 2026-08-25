@@ -54,6 +54,8 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     try self.dump(storages);
 }
 
+// Finishing this does not mean, saving succeeded.
+// It just means forking completed
 pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 

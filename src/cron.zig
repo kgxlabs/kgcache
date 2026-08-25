@@ -24,7 +24,10 @@ pub fn run(
         start = try expiration.runRound(io, allocator, data_storages, start, config);
 
         // clean up forked child processes if any
-        persistence_state.reapKgc();
+        const finished_kgc_save = persistence_state.reapKgc();
+        if (finished_kgc_save) {
+            change_tracker.markSaved(time.nowMs(io));
+        }
         persistence_state.reapAof();
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
