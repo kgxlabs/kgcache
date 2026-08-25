@@ -31,7 +31,8 @@ Blank lines and lines starting with `#` are ignored. Anything else is validated 
 | `active-expire-budget-ms` | `10` | Time budget per expiration sweep before the worker yields |
 | `active-expire-batch-size` | `20` | Keys sampled per expiration batch, per database |
 | `active-expire-threshold-percent` | `25` | Batch expiry rate that triggers an immediate next batch on the same database |
-| `exclusive-bg-persistence` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Architecture](ARCHITECTURE.md#background-saving-bgsave). |
+| `exclusive-bg-persistence` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Persistence](PERSISTENCE.md#background-saving-bgsave). |
+| `save` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
 
 See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every directive documented inline.
 
@@ -47,6 +48,20 @@ See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every dire
 Leave this at its default, `yes`. Setting it to `no` lets a `BGSAVE` and an AOF background rewrite fork at the same time, which means the server can end up with three processes — the parent plus both children — all sharing the same copy-on-write memory. Every write the parent does afterward risks a page copy being charged against *both* children at once instead of just one, so memory pressure during that window can be noticeably worse than one background job at a time. This is the same reason real Redis operators are advised to avoid triggering `BGSAVE` and `BGREWRITEAOF` close together, even though Redis technically allows it. `no` only makes sense if you specifically need both to run concurrently and have memory headroom to spare.
 
 Note that today this guard only ever has something to guard on the `BGSAVE` side — the AOF backend doesn't have a background rewrite operation implemented yet (see below), so `exclusive-bg-persistence` currently just reserves the behavior for when one exists.
+
+## Automatic background saving (`save`)
+
+By default, kgcache never saves on its own — `SAVE`/`BGSAVE` only happen when a client asks. Adding one or more `save <seconds> <changes>` lines turns on automatic `BGSAVE` triggering, the same directive and semantics as `redis-server`'s `save`:
+
+```
+save 3600 1
+save 300 100
+save 60 10000
+```
+
+Each line is its own rule: trigger a background save if at least `<changes>` writes have happened in the last `<seconds>` seconds since the last save. Rules are OR'd together — if *any* rule's condition is met, a save is triggered. The example above (Redis's own classic defaults) triggers if there's been at least 1 change in the last hour, OR at least 100 changes in the last 5 minutes, OR at least 10,000 changes in the last minute.
+
+With no `save` line at all, automatic saving is disabled entirely; on-demand `SAVE`/`BGSAVE` are unaffected either way. A background housekeeping tick checks the configured rules — see [Persistence](PERSISTENCE.md#automatic-background-saving-condition-based-snapshots) for how the write counter and trigger check work.
 
 ## Not yet configurable
 
