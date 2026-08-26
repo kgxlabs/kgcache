@@ -15,6 +15,13 @@ const Directive = enum {
     @"active-expire-threshold-percent",
     @"exclusive-bg-persistence",
     save,
+    appendonly,
+    appendfsync,
+    @"append-dirname",
+    @"append-filename",
+    @"auto-aof-rewrite-percentage",
+    @"auto-aof-rewrite-min-size",
+    @"aof-load-truncated",
 };
 
 pub const Error = error{
@@ -75,6 +82,13 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
                     .changes = try parseInt(u32, changes_str),
                 }) catch return Error.OutOfMemory;
             },
+            .appendonly => config.append_only = try parseBool(value),
+            .appendfsync => config.append_fsync = try parseEnum(Config.AppendFsync, value),
+            .@"append-dirname" => config.append_dirname = value,
+            .@"append-filename" => config.append_filename = value,
+            .@"auto-aof-rewrite-percentage" => config.auto_aof_rewrite_percentage = try parseInt(u32, value),
+            .@"auto-aof-rewrite-min-size" => config.auto_aof_rewrite_min_size = try parseInt(usize, value),
+            .@"aof-load-truncated" => config.aof_load_truncated = try parseBool(value),
         }
     }
 
@@ -90,6 +104,10 @@ fn parseBool(value: []const u8) Error!bool {
     if (std.mem.eql(u8, value, "yes")) return true;
     if (std.mem.eql(u8, value, "no")) return false;
     return Error.InvalidValue;
+}
+
+fn parseEnum(comptime T: type, value: []const u8) Error!T {
+    return std.meta.stringToEnum(T, value) orelse Error.InvalidValue;
 }
 
 test "parse overlays every directive onto the defaults" {
@@ -219,4 +237,81 @@ test "parse rejects a save line with more than two values" {
 test "parse rejects a save line with a non-numeric value" {
     const testing = std.testing;
     try testing.expectError(Error.InvalidValue, parse(testing.allocator, "save 300 many"));
+}
+
+test "parse reads every aof directive" {
+    const testing = std.testing;
+
+    const contents =
+        \\appendonly yes
+        \\appendfsync always
+        \\append-dirname /var/lib/kgcache/appendonlydir
+        \\append-filename myappendonly.aof
+        \\auto-aof-rewrite-percentage 50
+        \\auto-aof-rewrite-min-size 1024
+        \\aof-load-truncated no
+    ;
+
+    const config = try parse(testing.allocator, contents);
+    defer testing.allocator.free(config.save_rules);
+
+    try testing.expectEqual(true, config.append_only);
+    try testing.expectEqual(Config.AppendFsync.always, config.append_fsync);
+    try testing.expectEqualStrings("/var/lib/kgcache/appendonlydir", config.append_dirname);
+    try testing.expectEqualStrings("myappendonly.aof", config.append_filename);
+    try testing.expectEqual(50, config.auto_aof_rewrite_percentage);
+    try testing.expectEqual(1024, config.auto_aof_rewrite_min_size);
+    try testing.expectEqual(false, config.aof_load_truncated);
+}
+
+test "parse defaults aof off with everysec fsync when no aof directive is present" {
+    const testing = std.testing;
+
+    const config = try parse(testing.allocator, "port 7000");
+    defer testing.allocator.free(config.save_rules);
+    const defaults = Config.default();
+
+    try testing.expectEqual(defaults.append_only, config.append_only);
+    try testing.expectEqual(false, config.append_only);
+    try testing.expectEqual(Config.AppendFsync.everysec, config.append_fsync);
+    try testing.expectEqualStrings(defaults.append_filename, config.append_filename);
+    try testing.expectEqualStrings(defaults.append_dirname, config.append_dirname);
+    try testing.expectEqual(defaults.auto_aof_rewrite_percentage, config.auto_aof_rewrite_percentage);
+    try testing.expectEqual(defaults.auto_aof_rewrite_min_size, config.auto_aof_rewrite_min_size);
+    try testing.expectEqual(defaults.aof_load_truncated, config.aof_load_truncated);
+}
+
+test "parse accepts each appendfsync value" {
+    const testing = std.testing;
+
+    {
+        const config = try parse(testing.allocator, "appendfsync always");
+        defer testing.allocator.free(config.save_rules);
+        try testing.expectEqual(Config.AppendFsync.always, config.append_fsync);
+    }
+    {
+        const config = try parse(testing.allocator, "appendfsync everysec");
+        defer testing.allocator.free(config.save_rules);
+        try testing.expectEqual(Config.AppendFsync.everysec, config.append_fsync);
+    }
+    {
+        const config = try parse(testing.allocator, "appendfsync no");
+        defer testing.allocator.free(config.save_rules);
+        try testing.expectEqual(Config.AppendFsync.no, config.append_fsync);
+    }
+}
+
+test "parse rejects an appendfsync value that isn't one of the three" {
+    const testing = std.testing;
+    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "appendfsync maybe"));
+}
+
+test "parse rejects a non-numeric auto-aof-rewrite-percentage" {
+    const testing = std.testing;
+    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "auto-aof-rewrite-percentage many"));
+}
+
+test "parse rejects a size suffix in auto-aof-rewrite-min-size" {
+    const testing = std.testing;
+    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "auto-aof-rewrite-min-size 64mb"));
 }
