@@ -87,9 +87,10 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     if (is_removed) {
         self._change_tracker.recordChange();
         if (self._aof) |aof| {
-            try aof.onWrite(.{
+            // TODO: improve error mapping after error map design imp
+            aof.onWrite(.{
                 .remove = .{ .db_index = self._db_index, .key = key },
-            });
+            }) catch return Storage.Error.UnableToRecordWrite;
         }
     }
 
@@ -102,12 +103,13 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
     self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
-        try aof.onWrite(.{ .put = .{
+        // TODO: improve error mapping after error map design imp
+        aof.onWrite(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
             .value = value,
             .options = options,
-        } });
+        } }) catch return Storage.Error.UnableToRecordWrite;
     }
 
     return result;
