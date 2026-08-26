@@ -1,5 +1,6 @@
 const std = @import("std");
 const resp = @import("resp.zig");
+pub const BgRewriteAof = @import("commander/bgrewriteaof.zig");
 pub const BgSave = @import("commander/bgsave.zig");
 pub const Commander = @import("commander/interface.zig");
 pub const Command = @import("commander/command.zig");
@@ -13,6 +14,7 @@ pub const Set = @import("commander/set.zig");
 pub const Error = Commander.Error;
 
 const CommandKind = enum {
+    bgrewriteaof,
     bgsave,
     command,
     dbsize,
@@ -24,6 +26,7 @@ const CommandKind = enum {
     set,
 
     fn parse(keyword: []const u8) Error!CommandKind {
+        if (std.ascii.eqlIgnoreCase(keyword, "bgrewriteaof")) return .bgrewriteaof;
         if (std.ascii.eqlIgnoreCase(keyword, "bgsave")) return .bgsave;
         if (std.ascii.eqlIgnoreCase(keyword, "command")) return .command;
         if (std.ascii.eqlIgnoreCase(keyword, "dbsize")) return .dbsize;
@@ -43,6 +46,7 @@ pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander
     const arguments = try parseArguments(value);
 
     return switch (command_kind) {
+        .bgrewriteaof => try create(BgRewriteAof, allocator, arguments),
         .bgsave => try create(BgSave, allocator, arguments),
         .command => try create(Command, allocator, arguments),
         .dbsize => try create(DBSize, allocator, arguments),
