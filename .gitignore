@@ -19,3 +19,5 @@ bin/
 
 # Ignore rdb and aof files
 *.kgc
+appendonlydir/
+**/appendonlydir/

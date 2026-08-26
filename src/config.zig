@@ -12,6 +12,12 @@ pub const SaveRule = struct {
     changes: u32,
 };
 
+/// How often the AOF is fsync'd to disk.
+/// `always`: before every +OK, safest  and slowest.
+/// `everysec`: (default): fsync at most once a second.
+/// `no`: never fsync explicitly, let the OS decide -- fastest, weakest.
+pub const AppendFsync = enum { always, everysec, no };
+
 bind_address: []const u8 = "127.0.0.1",
 port: u16 = 6379,
 reuse_address: bool = true,
@@ -26,6 +32,21 @@ exclusive_bg_persistence: bool = true,
 /// No `save` line means no automatic BGSAVE triggering at all (matches
 /// Redis's `save ""` meaning "disable automatic saving").
 save_rules: []const SaveRule = &.{},
+append_only: bool = false,
+/// A *base* name, not a real file: the files on disk derive from it
+/// (e.g. `appendonly.aof.1.base`, `appendonly.aof.2.incr`,
+/// `appendonly.aof.manifest`).
+append_filename: []const u8 = "appendonly.aof",
+/// Directory holding all AOF files, resolved against the process's cwd.
+/// kgcache owns this directory entirely: an interrupted rewrite can leave
+/// orphan files behind, and cleaning those up is only safe if nothing else
+/// shares the directory.
+append_dirname: []const u8 = "appendonlydir",
+append_fsync: AppendFsync = .everysec,
+/// `auto-aof-rewrite-percentage 0` means never rewrite automatically; but BGREWRITEAOF by hand still works.
+auto_aof_rewrite_percentage: u32 = 100,
+auto_aof_rewrite_min_size: usize = 67108864,
+aof_load_truncated: bool = true,
 
 pub fn default() Config {
     return .{};
