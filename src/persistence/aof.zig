@@ -43,18 +43,18 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     // for wiring up the encoder itself.
 }
 
-pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
+pub fn bgRewrite(_: *anyopaque) Journal.Error!void {
     return;
 }
 
-pub fn finishRewrite(ptr: *anyopaque, child_succeeded: bool) Journal.Error!void {
+pub fn finishRewrite(_: *anyopaque, _: bool) Journal.Error!void {
     return;
 }
 
-pub fn flush(ptr: *anyopaque, now_ms: i64) Journal.Error!void {
+pub fn flush(_: *anyopaque, _: i64) Journal.Error!void {
     return;
 }
 
-pub fn close(ptr: *anyopaque) Journal.Error!void {
+pub fn close(_: *anyopaque) Journal.Error!void {
     return;
 }

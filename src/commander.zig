@@ -81,6 +81,8 @@ pub fn errorToRESPValue(err: Error) resp.RESPValue {
         error.Syntax => .{ .simple_error = "ERR syntax error" },
         error.UnableToSaveKgc => .{ .simple_error = "ERR unable to save kgc" },
         error.UnableToDoBackgroundSaveKgc => .{ .simple_error = "ERR unable to do kgc background save" },
+        error.UnableRewriteAof => .{ .simple_error = "ERR unable to rewrite aof" },
+        error.AofDisabled => .{ .simple_error = "ERR aof disabled" },
         error.SomethingWentWrong => .{ .simple_error = "ERR something went wrong" },
     };
 }

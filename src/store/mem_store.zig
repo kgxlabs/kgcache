@@ -13,13 +13,15 @@ const MemoryStore = @This();
 
 _storages: []const Storage,
 _kgc: persistence.SnapshotPersistence,
+_aof: ?persistence.JournalPersistence,
 _change_tracker: *ChangeTracker,
 
 /// Takes ownership of `storages`: `deinit` calls `Storage.deinit` on each.
-pub fn init(storages: []const Storage, kgc: persistence.SnapshotPersistence, tracker: *ChangeTracker) MemoryStore {
+pub fn init(storages: []const Storage, kgc: persistence.SnapshotPersistence, aof: persistence.JournalPersistence, tracker: *ChangeTracker) MemoryStore {
     return .{
         ._storages = storages,
         ._kgc = kgc,
+        ._aof = aof,
         ._change_tracker = tracker,
     };
 }
@@ -43,6 +45,7 @@ const vtable = Store.VTable{
     .numDatabases = numDatabases,
     .save = save,
     .bgsave = bgsave,
+    .bgrewriteaof = bgrewriteaof,
     .deinit = deinit,
 };
 
@@ -111,7 +114,13 @@ pub fn save(ptr: *anyopaque, now_ms: i64) Store.Error!void {
 
 pub fn bgsave(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._kgc.bgsave(self._storages) catch return Store.Error.UnableToDoBackgroundSave;
+    self._kgc.bgsave(self._storages) catch return Store.Error.UnableToBackgroundSaveKgc;
+}
+
+pub fn bgrewriteaof(ptr: *anyopaque) Store.Error!void {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const aof = self._aof orelse return Store.Error.AofDisabled;
+    aof.bgRewrite() catch return Store.Error.UnableToRewriteAof;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
