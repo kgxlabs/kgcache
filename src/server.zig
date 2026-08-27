@@ -88,7 +88,12 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
         self._data_storages[i] = self._notifier_storages[i].storage();
     }
 
-    self._mem_store = store.MemoryStore.init(self._data_storages, kgc_snapshot, &self._change_tracker);
+    self._mem_store = store.MemoryStore.init(
+        self._data_storages,
+        kgc_snapshot,
+        aof_journal,
+        &self._change_tracker,
+    );
     self._store = self._mem_store.store();
 
     return self;

@@ -9,6 +9,8 @@ pub fn errorToString(err: Store.Error) []const u8 {
         error.CancelledCommand => "Command cancelled",
         error.SomethingWentWrong => "Something went wrong",
         error.UnableToSave => "Unable to save",
-        error.UnableToDoBackgroundSave => "Unable to do background save",
+        error.UnableToBackgroundSaveKgc => "Unable to do kgc background save",
+        error.UnableToRewriteAof => "Unable to rewrite aof",
+        error.AofDisabled => "AOF is disabled",
     };
 }

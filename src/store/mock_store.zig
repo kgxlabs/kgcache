@@ -13,6 +13,7 @@ set_calls: usize = 0,
 dbsize_calls: usize = 0,
 save_calls: usize = 0,
 bgsave_calls: usize = 0,
+bgrewriteaof_calls: usize = 0,
 last_get_key: ?[]const u8 = null,
 last_set_key: ?[]const u8 = null,
 last_set_value: ?[]const u8 = null,
@@ -35,6 +36,7 @@ const vtable = Store.VTable{
     .numDatabases = numDatabases,
     .save = save,
     .bgsave = bgsave,
+    .bgrewriteaof = bgrewriteaof,
     .deinit = deinit,
 };
 
@@ -72,6 +74,11 @@ fn save(ptr: *anyopaque, _: i64) Store.Error!void {
 fn bgsave(ptr: *anyopaque) Store.Error!void {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgsave_calls += 1;
+}
+
+fn bgrewriteaof(ptr: *anyopaque) Store.Error!void {
+    const self: *MockStore = @ptrCast(@alignCast(ptr));
+    self.bgrewriteaof_calls += 1;
 }
 
 fn deinit(_: *anyopaque) void {}

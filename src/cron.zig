@@ -73,7 +73,7 @@ test "a completed background save resets the change tracker once reaped, not bef
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-reap-reset.kgc");
-    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -166,7 +166,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-trigger.kgc");
-    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -201,7 +201,12 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-trigger.kgc");
-    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = store.MemoryStore.init(
+        &.{notified_storage},
+        kgc_backend.snapshot(),
+        null,
+        &change_tracker,
+    );
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -228,7 +233,12 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-rules.kgc");
-    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = store.MemoryStore.init(
+        &.{notified_storage},
+        kgc_backend.snapshot(),
+        null,
+        &change_tracker,
+    );
     var data_store = memory_store.store();
     defer data_store.deinit();
 

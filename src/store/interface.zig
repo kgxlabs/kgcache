@@ -8,7 +8,9 @@ pub const Error = std.mem.Allocator.Error || error{
     SomethingWentWrong,
     CancelledCommand,
     UnableToSave,
-    UnableToDoBackgroundSave,
+    UnableToBackgroundSaveKgc,
+    UnableToRewriteAof,
+    AofDisabled,
 };
 
 const Store = @This();
@@ -23,6 +25,7 @@ pub const VTable = struct {
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque, i64) Error!void,
     bgsave: *const fn (*anyopaque) Error!void,
+    bgrewriteaof: *const fn (*anyopaque) Error!void,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -48,6 +51,10 @@ pub fn save(self: Store, now_ms: i64) Error!void {
 
 pub fn bgsave(self: Store) Error!void {
     return self.vtable.bgsave(self.ptr);
+}
+
+pub fn bgrewriteaof(self: Store) Error!void {
+    return self.vtable.bgrewriteaof(self.ptr);
 }
 
 pub fn deinit(self: Store) void {

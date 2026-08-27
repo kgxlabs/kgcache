@@ -9,7 +9,8 @@ pub const AofPersistence = @import("persistence/aof.zig");
 ///   since a snapshot needs a whole-dataset handle, not a per-write hook.
 /// - `aof` (optional) is handed to `NotifierStorage`, since journaling needs
 ///   to observe every write as it happens, including silent lazy-expiration
-///   removals that only the storage wrapper can see.
+///   removals that only the storage wrapper can see. And also handed to `MemStore`
+///   since we will need to call the bgrewriteaof commander for user command
 pub const Persistence = struct {
     kgc: SnapshotPersistence,
     aof: ?JournalPersistence,

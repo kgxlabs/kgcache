@@ -13,13 +13,15 @@ const MemoryStore = @This();
 
 _storages: []const Storage,
 _kgc: persistence.SnapshotPersistence,
+_aof: ?persistence.JournalPersistence,
 _change_tracker: *ChangeTracker,
 
 /// Takes ownership of `storages`: `deinit` calls `Storage.deinit` on each.
-pub fn init(storages: []const Storage, kgc: persistence.SnapshotPersistence, tracker: *ChangeTracker) MemoryStore {
+pub fn init(storages: []const Storage, kgc: persistence.SnapshotPersistence, aof: ?persistence.JournalPersistence, tracker: *ChangeTracker) MemoryStore {
     return .{
         ._storages = storages,
         ._kgc = kgc,
+        ._aof = aof,
         ._change_tracker = tracker,
     };
 }
@@ -43,6 +45,7 @@ const vtable = Store.VTable{
     .numDatabases = numDatabases,
     .save = save,
     .bgsave = bgsave,
+    .bgrewriteaof = bgrewriteaof,
     .deinit = deinit,
 };
 
@@ -111,7 +114,13 @@ pub fn save(ptr: *anyopaque, now_ms: i64) Store.Error!void {
 
 pub fn bgsave(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    self._kgc.bgsave(self._storages) catch return Store.Error.UnableToDoBackgroundSave;
+    self._kgc.bgsave(self._storages) catch return Store.Error.UnableToBackgroundSaveKgc;
+}
+
+pub fn bgrewriteaof(ptr: *anyopaque) Store.Error!void {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const aof = self._aof orelse return Store.Error.AofDisabled;
+    aof.bgRewrite() catch return Store.Error.UnableToRewriteAof;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {
@@ -156,7 +165,7 @@ test "set stores a value and returns null" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
 
     defer data_store.deinit();
@@ -182,7 +191,7 @@ test "set stores a value and returns value" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -208,7 +217,7 @@ test "get returns null for a missing key" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -222,7 +231,7 @@ test "set replaces an existing value" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -258,7 +267,7 @@ test "set with NX does not replace an existing value" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -288,7 +297,7 @@ test "set with XX does not create a missing value" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -309,7 +318,7 @@ test "set owns the key and value bytes" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -339,7 +348,7 @@ test "databases are isolated from each other" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -366,7 +375,7 @@ test "save then load round-trips across databases" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-roundtrip.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{ backend_zero.storage(), backend_one.storage() }, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -402,7 +411,7 @@ test "save resets the change tracker's dirty count" {
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-save-reset.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &change_tracker, 0);
-    var memory_store = MemoryStore.init(&.{notifier.storage()}, kgc_backend.snapshot(), &change_tracker);
+    var memory_store = MemoryStore.init(&.{notifier.storage()}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -413,6 +422,18 @@ test "save resets the change tracker's dirty count" {
     try data_store.save(time.nowMs(testing.io));
 
     try testing.expectEqual(0, change_tracker._dirty.load(.monotonic));
+}
+
+test "bgrewriteaof returns AofDisabled when no journal is configured" {
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
+    var change_tracker = ChangeTracker.init(testing.io);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    try testing.expectError(Store.Error.AofDisabled, data_store.bgrewriteaof());
 }
 
 fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {

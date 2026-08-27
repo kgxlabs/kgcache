@@ -10,6 +10,10 @@ _encoder: AofEncoder,
 _persistence_state: *PersistenceState,
 
 const vtable: Journal.VTable = .{
+    .bgRewrite = bgRewrite,
+    .close = close,
+    .finishRewrite = finishRewrite,
+    .flush = flush,
     .onWrite = onWrite,
 };
 
@@ -37,4 +41,20 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     // TODO: append `encoded` to the AOF file on disk. Needs its own design
     // pass (append-mode file handle, buffering/fsync policy) — out of scope
     // for wiring up the encoder itself.
+}
+
+pub fn bgRewrite(_: *anyopaque) Journal.Error!void {
+    return;
+}
+
+pub fn finishRewrite(_: *anyopaque, _: bool) Journal.Error!void {
+    return;
+}
+
+pub fn flush(_: *anyopaque, _: i64) Journal.Error!void {
+    return;
+}
+
+pub fn close(_: *anyopaque) Journal.Error!void {
+    return;
 }

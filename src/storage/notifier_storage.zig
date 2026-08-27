@@ -87,9 +87,10 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     if (is_removed) {
         self._change_tracker.recordChange();
         if (self._aof) |aof| {
-            try aof.onWrite(.{
+            // TODO: improve error mapping after error map design imp
+            aof.onWrite(.{
                 .remove = .{ .db_index = self._db_index, .key = key },
-            });
+            }) catch return Storage.Error.UnableToRecordWrite;
         }
     }
 
@@ -102,12 +103,13 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
     self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
-        try aof.onWrite(.{ .put = .{
+        // TODO: improve error mapping after error map design imp
+        aof.onWrite(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
             .value = value,
             .options = options,
-        } });
+        } }) catch return Storage.Error.UnableToRecordWrite;
     }
 
     return result;
@@ -216,12 +218,63 @@ test "a lazy-expiration removal during get increments the change tracker's dirty
     try testing.expectEqual(2, tracker._dirty.load(.monotonic));
 }
 
+const FailingJournal = struct {
+    const journal_vtable: persistence.JournalPersistence.VTable = .{
+        .onWrite = onWrite,
+        .flush = flush,
+        .bgRewrite = bgRewrite,
+        .finishRewrite = finishRewrite,
+        .close = close,
+    };
+
+    fn journal(self: *FailingJournal) persistence.JournalPersistence {
+        return .{ .ptr = self, .vtable = &journal_vtable };
+    }
+
+    fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
+        return error.UnableToRecordWrite;
+    }
+
+    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
+    fn close(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+};
+
+test "a journal that fails to record a write fails the put" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var failing_journal = FailingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        failing_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null }));
+}
+
 test "a read that finds no expired key does not increment the dirty count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var tracker = ChangeTracker.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        null,
+        &tracker,
+        0,
+    );
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
