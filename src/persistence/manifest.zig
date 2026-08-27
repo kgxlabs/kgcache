@@ -14,8 +14,13 @@ pub const Manifest = struct {
 };
 
 pub const Error = error{
-    // Populated once `parse`'s rejection cases are implemented.
-    };
+    MalformedLine,
+    MultipleBaseRecords,
+    DuplicateSeq,
+    UnknownType,
+    NonAscendingIncrSeq,
+    OutOfMemory,
+};
 
 pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8) !?Manifest {
     _ = io;
@@ -25,10 +30,68 @@ pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename:
     @panic("TODO");
 }
 
+/// `Entry.name` borrows directly from `contents`, so `contents` must
+/// outlive the returned `Manifest`.
 pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Manifest {
-    _ = allocator;
-    _ = contents;
-    @panic("TODO");
+    var base: ?Entry = null;
+    var incrs: std.ArrayList(Entry) = .empty;
+    errdefer incrs.deinit(allocator);
+    var last_incr_seq: ?u32 = null;
+
+    var lines = std.mem.splitScalar(u8, contents, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0) continue;
+
+        var tokens = std.mem.tokenizeAny(u8, line, " \t");
+
+        const file_keyword = tokens.next() orelse return Error.MalformedLine;
+        if (!std.mem.eql(u8, file_keyword, "file")) return Error.MalformedLine;
+
+        const name = tokens.next() orelse return Error.MalformedLine;
+
+        const seq_keyword = tokens.next() orelse return Error.MalformedLine;
+        if (!std.mem.eql(u8, seq_keyword, "seq")) return Error.MalformedLine;
+
+        const seq_str = tokens.next() orelse return Error.MalformedLine;
+        const seq = std.fmt.parseInt(u32, seq_str, 10) catch return Error.MalformedLine;
+
+        const type_keyword = tokens.next() orelse return Error.MalformedLine;
+        if (!std.mem.eql(u8, type_keyword, "type")) return Error.MalformedLine;
+
+        const type_str = tokens.next() orelse return Error.MalformedLine;
+        if (tokens.next() != null) return Error.MalformedLine;
+
+        const kind: Kind = if (std.mem.eql(u8, type_str, "b"))
+            .base
+        else if (std.mem.eql(u8, type_str, "i"))
+            .incr
+        else
+            return Error.UnknownType;
+
+        const entry: Entry = .{ .name = name, .seq = seq, .kind = kind };
+
+        // Since we must only have one base at a time, we dont need to set it's seq as last_incr_seq
+        switch (kind) {
+            .base => {
+                if (base != null) return Error.MultipleBaseRecords;
+                base = entry;
+            },
+            .incr => {
+                if (last_incr_seq != null and seq <= last_incr_seq.?) return Error.NonAscendingIncrSeq;
+                last_incr_seq = seq;
+                incrs.append(allocator, entry) catch return Error.OutOfMemory;
+            },
+        }
+    }
+
+    if (base) |b| {
+        for (incrs.items) |incr| {
+            if (incr.seq == b.seq) return Error.DuplicateSeq;
+        }
+    }
+
+    return .{ .base = base, .incrs = try incrs.toOwnedSlice(allocator) };
 }
 
 /// Atomically replaces `dir/filename` with `manifest`'s serialized form:
@@ -65,4 +128,72 @@ pub fn manifestName(allocator: std.mem.Allocator, append_filename: []const u8) !
     _ = allocator;
     _ = append_filename;
     @panic("TODO");
+}
+
+test "parse reads a manifest with a base and two incrs, in order" {
+    const testing = std.testing;
+
+    const contents =
+        \\file appendonly.aof.1.base seq 1 type b
+        \\file appendonly.aof.2.incr seq 2 type i
+        \\file appendonly.aof.3.incr seq 3 type i
+    ;
+
+    const manifest = try parse(testing.allocator, contents);
+    defer testing.allocator.free(manifest.incrs);
+
+    const base = manifest.base orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("appendonly.aof.1.base", base.name);
+    try testing.expectEqual(1, base.seq);
+    try testing.expectEqual(Kind.base, base.kind);
+
+    try testing.expectEqual(2, manifest.incrs.len);
+    try testing.expectEqualStrings("appendonly.aof.2.incr", manifest.incrs[0].name);
+    try testing.expectEqual(2, manifest.incrs[0].seq);
+    try testing.expectEqual(Kind.incr, manifest.incrs[0].kind);
+    try testing.expectEqualStrings("appendonly.aof.3.incr", manifest.incrs[1].name);
+    try testing.expectEqual(3, manifest.incrs[1].seq);
+}
+
+test "parse reads a manifest with no base yet" {
+    const testing = std.testing;
+
+    const contents = "file appendonly.aof.1.incr seq 1 type i";
+
+    const manifest = try parse(testing.allocator, contents);
+    defer testing.allocator.free(manifest.incrs);
+
+    try testing.expect(manifest.base == null);
+    try testing.expectEqual(1, manifest.incrs.len);
+    try testing.expectEqualStrings("appendonly.aof.1.incr", manifest.incrs[0].name);
+}
+
+test "parse rejects two base records" {
+    const testing = std.testing;
+
+    const contents =
+        \\file appendonly.aof.1.base seq 1 type b
+        \\file appendonly.aof.2.base seq 2 type b
+    ;
+
+    try testing.expectError(Error.MultipleBaseRecords, parse(testing.allocator, contents));
+}
+
+test "parse rejects a duplicate seq" {
+    const testing = std.testing;
+
+    const contents =
+        \\file appendonly.aof.2.base seq 2 type b
+        \\file appendonly.aof.2.incr seq 2 type i
+    ;
+
+    try testing.expectError(Error.DuplicateSeq, parse(testing.allocator, contents));
+}
+
+test "parse rejects an unknown type letter" {
+    const testing = std.testing;
+
+    const contents = "file appendonly.aof.1.base seq 1 type x";
+
+    try testing.expectError(Error.UnknownType, parse(testing.allocator, contents));
 }
