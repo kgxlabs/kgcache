@@ -1,5 +1,4 @@
 const std = @import("std");
-const helpers = @import("../helpers.zig");
 
 pub const Kind = enum { base, incr };
 
@@ -8,12 +7,12 @@ pub const Entry = struct {
     seq: u32,
     kind: Kind,
 
-    pub fn format(self: Entry, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try std.fmt.format(writer, "file {s} seq {d} type {s}\n", .{
-            self.name,
-            self.seq,
-            self.kind,
-        });
+    pub fn format(self: Entry, writer: *std.Io.Writer) !void {
+        const type_letter: []const u8 = switch (self.kind) {
+            .base => "b",
+            .incr => "i",
+        };
+        try writer.print("file {s} seq {d} type {s}\n", .{ self.name, self.seq, type_letter });
     }
 };
 
@@ -21,14 +20,19 @@ pub const Manifest = struct {
     base: ?Entry,
     incrs: []Entry,
 
-    pub fn format(self: Manifest, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        if (self.base) |b| {
-            try b.format(fmt, options, writer);
-        }
+    pub fn format(self: Manifest, writer: *std.Io.Writer) !void {
+        if (self.base) |b| try b.format(writer);
+        for (self.incrs) |incr| try incr.format(writer);
+    }
 
-        for (self.incrs) |incr| {
-            try incr.format(fmt, options, writer);
-        }
+    /// Frees a `Manifest` returned by `read()`, whose `Entry.name`s are
+    /// independently allocator-owned. Do not call this on the result of
+    /// `parse()` directly -- its `Entry.name`s borrow from the `contents`
+    /// passed into it, and freeing those would be undefined behaviour.
+    pub fn deinit(self: Manifest, allocator: std.mem.Allocator) void {
+        if (self.base) |b| allocator.free(b.name);
+        for (self.incrs) |incr| allocator.free(incr.name);
+        allocator.free(self.incrs);
     }
 };
 
@@ -42,12 +46,48 @@ pub const Error = error{
     FailedToReadManifest,
 };
 
+/// Returns `null` when `filename` does not exist. for example, a first boot with
+/// appendonly just switched on, not a failure. The returned `Manifest`
+/// (unlike `parse`'s) fully owns its `Entry.name` strings, since the
+/// backing `contents` buffer is freed before this returns.
 pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8) !?Manifest {
-    const file_exists = try helpers.fileExists(io, dir, filename);
-    if (!file_exists) return null;
+    const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        error.OutOfMemory => return Error.OutOfMemory,
+        else => return Error.FailedToReadManifest,
+    };
+    defer allocator.free(contents);
 
-    const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch return Error.FailedToReadManifest;
-    return parse(allocator, contents);
+    const borrowed = try parse(allocator, contents);
+    defer allocator.free(borrowed.incrs);
+
+    return try dupeManifest(allocator, borrowed);
+}
+
+fn dupeManifest(allocator: std.mem.Allocator, manifest: Manifest) !Manifest {
+    var base: ?Entry = null;
+    if (manifest.base) |b| base = .{
+        .name = try allocator.dupe(u8, b.name),
+        .seq = b.seq,
+        .kind = b.kind,
+    };
+    errdefer if (base) |b| allocator.free(b.name);
+
+    var incrs: std.ArrayList(Entry) = .empty;
+    errdefer {
+        for (incrs.items) |incr| allocator.free(incr.name);
+        incrs.deinit(allocator);
+    }
+
+    for (manifest.incrs) |incr| {
+        try incrs.append(allocator, .{
+            .name = try allocator.dupe(u8, incr.name),
+            .seq = incr.seq,
+            .kind = incr.kind,
+        });
+    }
+
+    return .{ .base = base, .incrs = try incrs.toOwnedSlice(allocator) };
 }
 
 /// `Entry.name` borrows directly from `contents`, so `contents` must
@@ -117,10 +157,10 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Manifest 
 /// Atomically replaces `dir/filename` with `manifest`'s serialized form:
 /// write a `.tmp` file, fsync it, rename it into place.
 pub fn write(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8, manifest: Manifest) !void {
-    const serialized_string = try std.fmt.allocPrint(allocator, "{}", .{manifest});
+    const serialized_string = try std.fmt.allocPrint(allocator, "{f}", .{manifest});
     defer allocator.free(serialized_string);
 
-    const tmp_filename = try std.fmt.allocPrint(allocator, "{s}.manifest.tmp", .{filename});
+    const tmp_filename = try std.fmt.allocPrint(allocator, "{s}.tmp", .{filename});
     defer allocator.free(tmp_filename);
 
     try dir.writeFile(io, .{
@@ -136,9 +176,14 @@ pub fn write(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename
     }
 
     try dir.rename(tmp_filename, dir, filename, io);
-    const file = try dir.openFile(io, tmp_filename, .{ .mode = .read_write });
-    defer file.close(io);
-    try file.sync(io);
+
+    // NOTE: rename(2) is atomic within a directory, but the rename is itself
+    // a change to the *directory's* metadata, which can sit unflushed in the
+    // page cache like anything else -- without fsyncing the directory too, a
+    // power loss right after the rename could still leave `filename`
+    // resolving to the old contents. std.Io.Dir exposes no directory-level
+    // sync in this Zig version (only File.sync), so that gap is real and not
+    // covered here.
 }
 
 pub fn nextSeq(manifest: Manifest) u32 {
@@ -271,4 +316,70 @@ test "manifestName formats the manifest filename" {
     defer testing.allocator.free(name);
 
     try testing.expectEqualStrings("appendonly.aof.manifest", name);
+}
+
+fn withScratchDir(comptime name: []const u8, comptime testFn: fn (std.Io, std.Io.Dir) anyerror!void) !void {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+
+    cwd.createDir(io, name, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    defer cwd.deleteTree(io, name) catch {};
+
+    var dir = try cwd.openDir(io, name, .{});
+    defer dir.close(io);
+
+    try testFn(io, dir);
+}
+
+test "read returns null when the manifest file does not exist" {
+    try withScratchDir("scratch-manifest-read-missing", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const manifest = try read(io, std.testing.allocator, dir, "appendonly.aof.manifest");
+            try std.testing.expect(manifest == null);
+        }
+    }.run);
+}
+
+test "write then read round-trips a manifest" {
+    try withScratchDir("scratch-manifest-roundtrip", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            var incrs = [_]Entry{.{ .name = "appendonly.aof.2.incr", .seq = 2, .kind = .incr }};
+            const original: Manifest = .{
+                .base = .{ .name = "appendonly.aof.1.base", .seq = 1, .kind = .base },
+                .incrs = &incrs,
+            };
+
+            try write(io, testing.allocator, dir, "appendonly.aof.manifest", original);
+
+            const loaded = try read(io, testing.allocator, dir, "appendonly.aof.manifest") orelse return error.TestUnexpectedResult;
+            defer loaded.deinit(testing.allocator);
+
+            const base = loaded.base orelse return error.TestUnexpectedResult;
+            try testing.expectEqualStrings("appendonly.aof.1.base", base.name);
+            try testing.expectEqual(1, base.seq);
+            try testing.expectEqual(Kind.base, base.kind);
+
+            try testing.expectEqual(1, loaded.incrs.len);
+            try testing.expectEqualStrings("appendonly.aof.2.incr", loaded.incrs[0].name);
+            try testing.expectEqual(2, loaded.incrs[0].seq);
+        }
+    }.run);
+}
+
+test "write leaves no .tmp file behind on success" {
+    try withScratchDir("scratch-manifest-no-tmp", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            const manifest: Manifest = .{ .base = null, .incrs = &.{} };
+            try write(io, testing.allocator, dir, "appendonly.aof.manifest", manifest);
+
+            try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.manifest.tmp", .{}));
+        }
+    }.run);
 }
