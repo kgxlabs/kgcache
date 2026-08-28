@@ -106,28 +106,22 @@ pub fn write(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename
 }
 
 pub fn nextSeq(manifest: Manifest) u32 {
-    _ = manifest;
-    @panic("TODO");
+    var max_seq: u32 = 0;
+    if (manifest.base) |b| max_seq = @max(max_seq, b.seq);
+    for (manifest.incrs) |incr| max_seq = @max(max_seq, incr.seq);
+    return max_seq + 1;
 }
 
 pub fn baseName(allocator: std.mem.Allocator, append_filename: []const u8, seq: u32) ![]u8 {
-    _ = allocator;
-    _ = append_filename;
-    _ = seq;
-    @panic("TODO");
+    return std.fmt.allocPrint(allocator, "{s}.{d}.base", .{ append_filename, seq });
 }
 
 pub fn incrName(allocator: std.mem.Allocator, append_filename: []const u8, seq: u32) ![]u8 {
-    _ = allocator;
-    _ = append_filename;
-    _ = seq;
-    @panic("TODO");
+    return std.fmt.allocPrint(allocator, "{s}.{d}.incr", .{ append_filename, seq });
 }
 
 pub fn manifestName(allocator: std.mem.Allocator, append_filename: []const u8) ![]u8 {
-    _ = allocator;
-    _ = append_filename;
-    @panic("TODO");
+    return std.fmt.allocPrint(allocator, "{s}.manifest", .{append_filename});
 }
 
 test "parse reads a manifest with a base and two incrs, in order" {
@@ -196,4 +190,49 @@ test "parse rejects an unknown type letter" {
     const contents = "file appendonly.aof.1.base seq 1 type x";
 
     try testing.expectError(Error.UnknownType, parse(testing.allocator, contents));
+}
+
+test "nextSeq is one past the highest seq of either kind" {
+    const testing = std.testing;
+
+    try testing.expectEqual(1, nextSeq(.{ .base = null, .incrs = &.{} }));
+
+    var incr_below_base = [_]Entry{.{ .name = "i", .seq = 2, .kind = .incr }};
+    try testing.expectEqual(4, nextSeq(.{
+        .base = .{ .name = "b", .seq = 3, .kind = .base },
+        .incrs = &incr_below_base,
+    }));
+
+    var incr_above_base = [_]Entry{.{ .name = "i", .seq = 5, .kind = .incr }};
+    try testing.expectEqual(6, nextSeq(.{
+        .base = .{ .name = "b", .seq = 2, .kind = .base },
+        .incrs = &incr_above_base,
+    }));
+}
+
+test "baseName formats the base filename" {
+    const testing = std.testing;
+
+    const name = try baseName(testing.allocator, "appendonly.aof", 1);
+    defer testing.allocator.free(name);
+
+    try testing.expectEqualStrings("appendonly.aof.1.base", name);
+}
+
+test "incrName formats the incr filename" {
+    const testing = std.testing;
+
+    const name = try incrName(testing.allocator, "appendonly.aof", 2);
+    defer testing.allocator.free(name);
+
+    try testing.expectEqualStrings("appendonly.aof.2.incr", name);
+}
+
+test "manifestName formats the manifest filename" {
+    const testing = std.testing;
+
+    const name = try manifestName(testing.allocator, "appendonly.aof");
+    defer testing.allocator.free(name);
+
+    try testing.expectEqualStrings("appendonly.aof.manifest", name);
 }
