@@ -7,11 +7,29 @@ pub const Entry = struct {
     name: []const u8,
     seq: u32,
     kind: Kind,
+
+    pub fn format(self: Entry, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        try std.fmt.format(writer, "file {s} seq {d} type {s}\n", .{
+            self.name,
+            self.seq,
+            self.kind,
+        });
+    }
 };
 
 pub const Manifest = struct {
     base: ?Entry,
     incrs: []Entry,
+
+    pub fn format(self: Manifest, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        if (self.base) |b| {
+            try b.format(fmt, options, writer);
+        }
+
+        for (self.incrs) |incr| {
+            try incr.format(fmt, options, writer);
+        }
+    }
 };
 
 pub const Error = error{
@@ -99,12 +117,28 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Manifest 
 /// Atomically replaces `dir/filename` with `manifest`'s serialized form:
 /// write a `.tmp` file, fsync it, rename it into place.
 pub fn write(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8, manifest: Manifest) !void {
-    _ = io;
-    _ = allocator;
-    _ = dir;
-    _ = filename;
-    _ = manifest;
-    @panic("TODO");
+    const serialized_string = try std.fmt.allocPrint(allocator, "{}", .{manifest});
+    defer allocator.free(serialized_string);
+
+    const tmp_filename = try std.fmt.allocPrint(allocator, "{s}.manifest.tmp", .{filename});
+    defer allocator.free(tmp_filename);
+
+    try dir.writeFile(io, .{
+        .data = serialized_string,
+        .sub_path = tmp_filename,
+    });
+
+    // NOTE: we need to close the file before rename. we need to do this in isolated block for defer file.close otherwise we have to do double close which is `Undefined Behaviour`
+    {
+        const tmp_file = try dir.openFile(io, tmp_filename, .{ .mode = .read_write });
+        defer tmp_file.close(io);
+        try tmp_file.sync(io);
+    }
+
+    try dir.rename(tmp_filename, dir, filename, io);
+    const file = try dir.openFile(io, tmp_filename, .{ .mode = .read_write });
+    defer file.close(io);
+    try file.sync(io);
 }
 
 pub fn nextSeq(manifest: Manifest) u32 {
