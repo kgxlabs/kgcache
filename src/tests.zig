@@ -13,6 +13,7 @@ test {
     _ = @import("connection.zig");
     _ = @import("config.zig");
     _ = @import("config_parser.zig");
+    _ = @import("persistence/manifest.zig");
     _ = @import("change_tracker.zig");
     _ = @import("server.zig");
 }
