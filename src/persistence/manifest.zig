@@ -1,4 +1,5 @@
 const std = @import("std");
+const helpers = @import("../helpers.zig");
 
 pub const Kind = enum { base, incr };
 
@@ -20,14 +21,15 @@ pub const Error = error{
     UnknownType,
     NonAscendingIncrSeq,
     OutOfMemory,
+    FailedToReadManifest,
 };
 
 pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8) !?Manifest {
-    _ = io;
-    _ = allocator;
-    _ = dir;
-    _ = filename;
-    @panic("TODO");
+    const file_exists = try helpers.fileExists(io, dir, filename);
+    if (!file_exists) return null;
+
+    const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch return Error.FailedToReadManifest;
+    return parse(allocator, contents);
 }
 
 /// `Entry.name` borrows directly from `contents`, so `contents` must

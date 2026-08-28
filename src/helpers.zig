@@ -20,3 +20,15 @@ pub fn random(io: std.Io, min: usize, max: usize) usize {
 
     return rand.intRangeAtMost(usize, min, max);
 }
+
+pub fn fileExists(io: std.Io, dir: std.Io.Dir, path: []const u8) !bool {
+    dir.access(io, path, .{}) catch |err| {
+        switch (err) {
+            // This error explicitly confirms the file is missing
+            error.FileNotFound => return false,
+            // Forward any other critical errors (e.g., AccessDenied)
+            else => return err,
+        }
+    };
+    return true;
+}
