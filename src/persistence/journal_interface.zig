@@ -13,6 +13,10 @@ pub const Error = error{
     UnableToLoad,
     UnableToRewrite,
     RewriteAlreadyInProgress,
+    FailedToOpenDir,
+    FailedToReadManifest,
+    FailedToWriteManifest,
+    FailedToOpenManifest,
 };
 
 pub const WriteEvent = union(enum) {

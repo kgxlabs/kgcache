@@ -1,13 +1,21 @@
 const std = @import("std");
 const Journal = @import("./journal_interface.zig");
 const AofEncoder = @import("../codec/aof_encoder.zig");
+const Manifest = @import("../persistence/manifest.zig");
 const PersistenceState = @import("../persistence_state.zig");
+const Config = @import("../config.zig");
 
 const AofBackend = @This();
 
+_io: std.Io,
 _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
 _persistence_state: *PersistenceState,
+_config: Config,
+// Live incr file handle, will keep the file handle for the lifetime of the process (we can because we open it in append mode)
+_file: ?std.Io.File,
+_incr_bytes: u64,
+_incr_seq: u32,
 
 const vtable: Journal.VTable = .{
     .bgRewrite = bgRewrite,
@@ -17,11 +25,43 @@ const vtable: Journal.VTable = .{
     .onWrite = onWrite,
 };
 
-pub fn init(allocator: std.mem.Allocator, state: *PersistenceState) AofBackend {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) Journal.Error!AofBackend {
+    std.Io.Dir.cwd().createDir(io, config.append_dirname, .{}) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return Journal.Error.FailedToOpenDir,
+    };
+
+    const dir = std.Io.Dir.cwd().openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+
+    var incr_seq: u32 = 1;
+    const maybe_manifest = Manifest.read(io, allocator, dir) catch return Journal.Error.FailedToReadManifest;
+    if (maybe_manifest) |manifest| {
+        incr_seq = Manifest.nextSeq(manifest);
+    } else {
+        Manifest.write(
+            io,
+            allocator,
+            dir,
+            Manifest.manifestName(allocator, config.append_filename),
+        ) catch return Journal.Error.FailedToWriteManifest;
+    }
+
+    const file = dir.openFile(io, config.append_filename, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => try dir.createFile(io, config.append_filename, .{}),
+        else => return Journal.Error.FailedToOpenManifest,
+    };
+
+    const incr_bytes = file.length(io) catch return Journal.Error.FailedToOpenManifest;
+
     return .{
+        ._io = io,
         ._allocator = allocator,
         ._encoder = AofEncoder.init(),
         ._persistence_state = state,
+        ._config = config,
+        .incr_seq = incr_seq,
+        ._file = file,
+        ._incr_bytes = incr_bytes,
     };
 }
 
