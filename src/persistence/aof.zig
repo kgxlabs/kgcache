@@ -36,27 +36,43 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     const dir = std.Io.Dir.cwd().openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
 
     var incr_seq: u32 = 1;
+    const read_manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToReadManifest;
+    defer allocator.free(read_manifest_name);
+
     const maybe_manifest = Manifest.read(
         io,
         allocator,
         dir,
-        Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToReadManifest,
+        read_manifest_name,
     ) catch return Journal.Error.FailedToReadManifest;
 
+    const incr_name = Manifest.incrName(allocator, config.append_filename, incr_seq) catch return Journal.Error.FailedToWriteManifest;
+    defer allocator.free(incr_name);
+
     if (maybe_manifest) |manifest| {
+        defer manifest.deinit(allocator);
         incr_seq = Manifest.nextSeq(manifest);
     } else {
+        const incr: Manifest.Entry = .{
+            .kind = .incr,
+            .seq = incr_seq,
+            .name = incr_name,
+        };
+        var incrs = [_]Manifest.Entry{incr};
+        const write_manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToWriteManifest;
+        defer allocator.free(write_manifest_name);
+
         Manifest.write(
             io,
             allocator,
             dir,
-            Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToWriteManifest,
-            .{ .base = null, .incrs = &.{} },
+            write_manifest_name,
+            .{ .base = null, .incrs = &incrs },
         ) catch return Journal.Error.FailedToWriteManifest;
     }
 
     const file = dir.openFile(io, config.append_filename, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => dir.createFile(io, config.append_filename, .{}) catch return Journal.Error.FailedToOpenManifest,
+        error.FileNotFound => dir.createFile(io, incr_name, .{}) catch return Journal.Error.FailedToOpenManifest,
         else => return Journal.Error.FailedToOpenManifest,
     };
 
