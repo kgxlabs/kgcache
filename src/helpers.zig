@@ -32,3 +32,9 @@ pub fn fileExists(io: std.Io, dir: std.Io.Dir, path: []const u8) !bool {
     };
     return true;
 }
+
+pub fn logStderr(io: std.Io, comptime fmt: []const u8, args: anytype) void {
+    var buf: [256]u8 = undefined;
+    const message = std.fmt.bufPrint(&buf, fmt, args) catch fmt;
+    std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+}

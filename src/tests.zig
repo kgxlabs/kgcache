@@ -14,6 +14,7 @@ test {
     _ = @import("config.zig");
     _ = @import("config_parser.zig");
     _ = @import("persistence/manifest.zig");
+    _ = @import("persistence/aof.zig");
     _ = @import("change_tracker.zig");
     _ = @import("server.zig");
 }

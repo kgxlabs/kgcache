@@ -13,6 +13,15 @@ pub const Error = error{
     UnableToLoad,
     UnableToRewrite,
     RewriteAlreadyInProgress,
+    FailedToOpenDir,
+    FailedToReadManifest,
+    FailedToWriteManifest,
+    FailedToOpenManifest,
+    FailedToOpenIncrFile,
+    FailedToWriteIncrFile,
+    FailedToOpenBase,
+    FailedBufferAppend,
+    FailedToCloseAof,
 };
 
 pub const WriteEvent = union(enum) {
@@ -25,7 +34,7 @@ pub const VTable = struct {
     flush: *const fn (*anyopaque, i64) Error!void,
     bgRewrite: *const fn (*anyopaque) Error!void,
     finishRewrite: *const fn (*anyopaque, bool) Error!void,
-    close: *const fn (*anyopaque) Error!void,
+    deinit: *const fn (*anyopaque) Error!void,
 };
 
 pub fn onWrite(self: JournalPersistence, event: WriteEvent) Error!void {
@@ -44,6 +53,6 @@ pub fn finishRewrite(self: JournalPersistence, child_succeeded: bool) Error!void
     return self.vtable.finishRewrite(self.ptr, child_succeeded);
 }
 
-pub fn close(self: JournalPersistence) Error!void {
-    return self.vtable.close(self.ptr);
+pub fn deinit(self: JournalPersistence) Error!void {
+    return self.vtable.deinit(self.ptr);
 }

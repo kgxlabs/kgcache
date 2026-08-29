@@ -7,6 +7,7 @@ const ChangeTracker = @import("change_tracker.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
 const connection = @import("connection.zig");
+const helpers = @import("helpers.zig");
 
 const Server = @This();
 
@@ -54,7 +55,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     self._persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
 
     self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, config.snapshot_path);
-    self._aof = persistence.AofPersistence.init(allocator, &self._persistence_state);
+    self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
 
     const kgc_snapshot = self._kgc.snapshot();
     const aof_journal = self._aof.journal();
@@ -104,11 +105,13 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
 /// so the storage backends must not be deinitialized separately here.
 pub fn destroy(self: *Server) void {
     self._store.deinit();
+    self._aof.journal().deinit() catch |err| {
+        helpers.logStderr(self._io, "server: failed to destoy: {s}\n", .{@errorName(err)});
+    };
 
     self._allocator.free(self._data_storages);
     self._allocator.free(self._notifier_storages);
     self._allocator.free(self._default_storages);
-
     self._allocator.destroy(self);
 }
 

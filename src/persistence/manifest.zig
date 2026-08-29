@@ -64,32 +64,6 @@ pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename:
     return try dupeManifest(allocator, borrowed);
 }
 
-fn dupeManifest(allocator: std.mem.Allocator, manifest: Manifest) !Manifest {
-    var base: ?Entry = null;
-    if (manifest.base) |b| base = .{
-        .name = try allocator.dupe(u8, b.name),
-        .seq = b.seq,
-        .kind = b.kind,
-    };
-    errdefer if (base) |b| allocator.free(b.name);
-
-    var incrs: std.ArrayList(Entry) = .empty;
-    errdefer {
-        for (incrs.items) |incr| allocator.free(incr.name);
-        incrs.deinit(allocator);
-    }
-
-    for (manifest.incrs) |incr| {
-        try incrs.append(allocator, .{
-            .name = try allocator.dupe(u8, incr.name),
-            .seq = incr.seq,
-            .kind = incr.kind,
-        });
-    }
-
-    return .{ .base = base, .incrs = try incrs.toOwnedSlice(allocator) };
-}
-
 /// `Entry.name` borrows directly from `contents`, so `contents` must
 /// outlive the returned `Manifest`.
 pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Manifest {
@@ -203,6 +177,40 @@ pub fn incrName(allocator: std.mem.Allocator, append_filename: []const u8, seq: 
 
 pub fn manifestName(allocator: std.mem.Allocator, append_filename: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}.manifest", .{append_filename});
+}
+
+pub fn liveIncr(manifest: Manifest) ?Entry {
+    var live: ?Entry = null;
+    for (manifest.incrs) |incr| {
+        if (live == null or incr.seq > live.?.seq) live = incr;
+    }
+    return live;
+}
+
+fn dupeManifest(allocator: std.mem.Allocator, manifest: Manifest) !Manifest {
+    var base: ?Entry = null;
+    if (manifest.base) |b| base = .{
+        .name = try allocator.dupe(u8, b.name),
+        .seq = b.seq,
+        .kind = b.kind,
+    };
+    errdefer if (base) |b| allocator.free(b.name);
+
+    var incrs: std.ArrayList(Entry) = .empty;
+    errdefer {
+        for (incrs.items) |incr| allocator.free(incr.name);
+        incrs.deinit(allocator);
+    }
+
+    for (manifest.incrs) |incr| {
+        try incrs.append(allocator, .{
+            .name = try allocator.dupe(u8, incr.name),
+            .seq = incr.seq,
+            .kind = incr.kind,
+        });
+    }
+
+    return .{ .base = base, .incrs = try incrs.toOwnedSlice(allocator) };
 }
 
 test "parse reads a manifest with a base and two incrs, in order" {
