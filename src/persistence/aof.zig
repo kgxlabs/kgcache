@@ -151,8 +151,15 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
     try flushLocked(self);
 }
 
-pub fn close(_: *anyopaque) Journal.Error!void {
-    return;
+pub fn close(ptr: *anyopaque) Journal.Error!void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    try flush(ptr, time.nowMs(self._io));
+
+    const file = self._file orelse return Journal.Error.FailedToCloseAof;
+    file.sync(self._io) catch return Journal.Error.FailedToCloseAof;
+    file.close(self._io);
+
+    self._buffer.deinit(self._allocator);
 }
 
 fn flushLocked(self: *AofBackend) Journal.Error!void {

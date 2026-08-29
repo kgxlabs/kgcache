@@ -21,6 +21,7 @@ pub const Error = error{
     FailedToWriteIncrFile,
     FailedToOpenBase,
     FailedBufferAppend,
+    FailedToCloseAof,
 };
 
 pub const WriteEvent = union(enum) {
