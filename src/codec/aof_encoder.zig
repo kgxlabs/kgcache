@@ -16,9 +16,6 @@ pub fn init() AofEncoder {
 /// replay. The AOF file is a log of client-shaped commands, not a bespoke
 /// binary format, so this leans entirely on the RESP serializer that already
 /// exists for talking to clients.
-/// TODO: `db_index` is not yet reflected as a `SELECT` command, and `put`
-/// options (TTL/KEEPTTL) are not yet re-encoded — every entry currently
-/// replays as a plain `SET`.
 pub fn encode(self: AofEncoder, allocator: std.mem.Allocator, event: Journal.WriteEvent) Error![]const u8 {
     const items = try toCommandItems(allocator, event);
     defer allocator.free(items);
