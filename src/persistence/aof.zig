@@ -16,6 +16,7 @@ _config: Config,
 _file: ?std.Io.File,
 _incr_bytes: u64,
 _incr_seq: u32,
+_base_size: u64,
 
 const vtable: Journal.VTable = .{
     .bgRewrite = bgRewrite,
@@ -37,6 +38,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     const dir = std.Io.Dir.cwd().openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
 
     var incr_seq: u32 = 1;
+    var base_size: u64 = 0;
     const read_manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToReadManifest;
     defer allocator.free(read_manifest_name);
 
@@ -53,6 +55,12 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         const maybe_live_incr = Manifest.liveIncr(manifest);
         if (maybe_live_incr) |live_incr| {
             incr_seq = live_incr.seq;
+        }
+
+        if (manifest.base) |base_entry| {
+            const base_file = dir.openFile(io, base_entry.name, .{}) catch return Journal.Error.FailedToOpenBase;
+            defer base_file.close(io);
+            base_size = base_file.length(io) catch return Journal.Error.FailedToOpenBase;
         }
     } else {
         // if there are no manifest yet, create one and write a live incr
@@ -81,11 +89,11 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     defer allocator.free(incr_name);
 
     const file = dir.openFile(io, incr_name, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => dir.createFile(io, incr_name, .{}) catch return Journal.Error.FailedToOpenManifest,
-        else => return Journal.Error.FailedToOpenManifest,
+        error.FileNotFound => dir.createFile(io, incr_name, .{}) catch return Journal.Error.FailedToOpenIncrFile,
+        else => return Journal.Error.FailedToOpenIncrFile,
     };
 
-    const incr_bytes = file.length(io) catch return Journal.Error.FailedToOpenManifest;
+    const incr_bytes = file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
 
     return .{
         ._io = io,
@@ -96,6 +104,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         ._incr_seq = incr_seq,
         ._file = file,
         ._incr_bytes = incr_bytes,
+        ._base_size = base_size,
     };
 }
 

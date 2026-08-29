@@ -17,6 +17,8 @@ pub const Error = error{
     FailedToReadManifest,
     FailedToWriteManifest,
     FailedToOpenManifest,
+    FailedToOpenIncrFile,
+    FailedToOpenBase,
 };
 
 pub const WriteEvent = union(enum) {
