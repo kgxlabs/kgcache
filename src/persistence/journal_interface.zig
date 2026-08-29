@@ -18,6 +18,7 @@ pub const Error = error{
     FailedToWriteManifest,
     FailedToOpenManifest,
     FailedToOpenIncrFile,
+    FailedToWriteIncrFile,
     FailedToOpenBase,
     FailedBufferAppend,
 };
