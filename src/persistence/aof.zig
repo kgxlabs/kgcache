@@ -129,11 +129,9 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     if (self._last_write_failed) return Journal.Error.UnableToRecordWrite;
 
     try appendEvent(self, event);
-    try flush(ptr, time.nowMs(self._io));
-
-    // TODO: append `encoded` to the AOF file on disk. Needs its own design
-    // pass (append-mode file handle, buffering/fsync policy) — out of scope
-    // for wiring up the encoder itself.
+    if (self._config.append_fsync == .always) {
+        try flush(ptr, time.nowMs(self._io));
+    }
 }
 
 pub fn bgRewrite(_: *anyopaque) Journal.Error!void {
@@ -150,10 +148,14 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
         self._last_write_failed = true;
         helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
     }
+    try flushLocked(self);
+}
 
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
+pub fn close(_: *anyopaque) Journal.Error!void {
+    return;
+}
 
+fn flushLocked(self: *AofBackend) Journal.Error!void {
     const file = self._file orelse return Journal.Error.FailedToWriteIncrFile;
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
@@ -161,17 +163,12 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
     file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
 
     if (self._config.append_fsync == .always) {
-        file.sync(self.io) catch return Journal.Error.FailedToWriteIncrFile;
+        file.sync(self._io) catch return Journal.Error.FailedToWriteIncrFile;
     }
 
+    self._incr_bytes += self._buffer.items.len;
     self._buffer.clearRetainingCapacity();
     self._last_write_failed = false;
-
-    return;
-}
-
-pub fn close(_: *anyopaque) Journal.Error!void {
-    return;
 }
 
 fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void {
