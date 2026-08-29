@@ -25,6 +25,7 @@ const vtable: Journal.VTable = .{
     .onWrite = onWrite,
 };
 
+// TODO: Refactor init. separate concerns
 pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) Journal.Error!AofBackend {
     const cwd = std.Io.Dir.cwd();
 
@@ -46,9 +47,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         read_manifest_name,
     ) catch return Journal.Error.FailedToReadManifest;
 
-    const incr_name = Manifest.incrName(allocator, config.append_filename, incr_seq) catch return Journal.Error.FailedToWriteManifest;
-    defer allocator.free(incr_name);
-
     // if manifest exists (reopening), set live seq of incr
     if (maybe_manifest) |manifest| {
         defer manifest.deinit(allocator);
@@ -58,6 +56,9 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         }
     } else {
         // if there are no manifest yet, create one and write a live incr
+        const incr_name = Manifest.incrName(allocator, config.append_filename, incr_seq) catch return Journal.Error.FailedToWriteManifest;
+        defer allocator.free(incr_name);
+
         const incr: Manifest.Entry = .{
             .kind = .incr,
             .seq = incr_seq,
@@ -76,7 +77,10 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         ) catch return Journal.Error.FailedToWriteManifest;
     }
 
-    const file = dir.openFile(io, config.append_filename, .{ .mode = .read_write }) catch |err| switch (err) {
+    const incr_name = Manifest.incrName(allocator, config.append_filename, incr_seq) catch return Journal.Error.FailedToWriteManifest;
+    defer allocator.free(incr_name);
+
+    const file = dir.openFile(io, incr_name, .{ .mode = .read_write }) catch |err| switch (err) {
         error.FileNotFound => dir.createFile(io, incr_name, .{}) catch return Journal.Error.FailedToOpenManifest,
         else => return Journal.Error.FailedToOpenManifest,
     };
