@@ -49,10 +49,15 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     const incr_name = Manifest.incrName(allocator, config.append_filename, incr_seq) catch return Journal.Error.FailedToWriteManifest;
     defer allocator.free(incr_name);
 
+    // if manifest exists (reopening), set live seq of incr
     if (maybe_manifest) |manifest| {
         defer manifest.deinit(allocator);
-        incr_seq = Manifest.nextSeq(manifest);
+        const maybe_live_incr = Manifest.liveIncr(manifest);
+        if (maybe_live_incr) |live_incr| {
+            incr_seq = live_incr.seq;
+        }
     } else {
+        // if there are no manifest yet, create one and write a live incr
         const incr: Manifest.Entry = .{
             .kind = .incr,
             .seq = incr_seq,

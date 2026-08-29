@@ -179,6 +179,14 @@ pub fn manifestName(allocator: std.mem.Allocator, append_filename: []const u8) !
     return std.fmt.allocPrint(allocator, "{s}.manifest", .{append_filename});
 }
 
+pub fn liveIncr(manifest: Manifest) ?Entry {
+    var live: ?Entry = null;
+    for (manifest.incrs) |incr| {
+        if (live == null or incr.seq > live.?.seq) live = incr;
+    }
+    return live;
+}
+
 fn dupeManifest(allocator: std.mem.Allocator, manifest: Manifest) !Manifest {
     var base: ?Entry = null;
     if (manifest.base) |b| base = .{
