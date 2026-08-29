@@ -54,7 +54,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     self._persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
 
     self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, config.snapshot_path);
-    self._aof = persistence.AofPersistence.init(allocator, &self._persistence_state);
+    self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
 
     const kgc_snapshot = self._kgc.snapshot();
     const aof_journal = self._aof.journal();

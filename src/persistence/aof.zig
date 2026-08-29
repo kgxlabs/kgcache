@@ -26,7 +26,9 @@ const vtable: Journal.VTable = .{
 };
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) Journal.Error!AofBackend {
-    std.Io.Dir.cwd().createDir(io, config.append_dirname, .{}) catch |err| switch (err) {
+    const cwd = std.Io.Dir.cwd();
+
+    cwd.createDir(io, config.append_dirname, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return Journal.Error.FailedToOpenDir,
     };
@@ -34,7 +36,13 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     const dir = std.Io.Dir.cwd().openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
 
     var incr_seq: u32 = 1;
-    const maybe_manifest = Manifest.read(io, allocator, dir) catch return Journal.Error.FailedToReadManifest;
+    const maybe_manifest = Manifest.read(
+        io,
+        allocator,
+        dir,
+        Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToReadManifest,
+    ) catch return Journal.Error.FailedToReadManifest;
+
     if (maybe_manifest) |manifest| {
         incr_seq = Manifest.nextSeq(manifest);
     } else {
@@ -42,12 +50,13 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
             io,
             allocator,
             dir,
-            Manifest.manifestName(allocator, config.append_filename),
+            Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToWriteManifest,
+            .{ .base = null, .incrs = &.{} },
         ) catch return Journal.Error.FailedToWriteManifest;
     }
 
     const file = dir.openFile(io, config.append_filename, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => try dir.createFile(io, config.append_filename, .{}),
+        error.FileNotFound => dir.createFile(io, config.append_filename, .{}) catch return Journal.Error.FailedToOpenManifest,
         else => return Journal.Error.FailedToOpenManifest,
     };
 
@@ -59,7 +68,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         ._encoder = AofEncoder.init(),
         ._persistence_state = state,
         ._config = config,
-        .incr_seq = incr_seq,
+        ._incr_seq = incr_seq,
         ._file = file,
         ._incr_bytes = incr_bytes,
     };
