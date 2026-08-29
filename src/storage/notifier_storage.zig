@@ -224,7 +224,7 @@ const FailingJournal = struct {
         .flush = flush,
         .bgRewrite = bgRewrite,
         .finishRewrite = finishRewrite,
-        .close = close,
+        .deinit = journalDeinit,
     };
 
     fn journal(self: *FailingJournal) persistence.JournalPersistence {
@@ -238,7 +238,7 @@ const FailingJournal = struct {
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque) persistence.JournalPersistence.Error!void {}
     fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
-    fn close(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn journalDeinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
 };
 
 test "a journal that fails to record a write fails the put" {

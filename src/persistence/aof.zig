@@ -173,6 +173,8 @@ fn flushLocked(self: *AofBackend) Journal.Error!void {
     const file = self._file orelse return Journal.Error.FailedToWriteIncrFile;
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
+    // NOTE: We need to go to the exact bytes because new fresh writer starts at pos 0.
+    file_writer.seekTo(self._incr_bytes) catch return Journal.Error.FailedToWriteIncrFile;
     file_writer.interface.writeAll(self._buffer.items) catch return Journal.Error.FailedToWriteIncrFile;
     file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
 
@@ -193,4 +195,246 @@ fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void 
     defer self._mutex.unlock(self._io);
 
     self._buffer.appendSlice(self._allocator, encoded) catch return Journal.Error.FailedBufferAppend;
+}
+
+fn sampleEvent() Journal.WriteEvent {
+    return .{ .put = .{
+        .db_index = 0,
+        .key = "foo",
+        .value = .{ .string = "bar" },
+        .options = .{ .expires_at = null },
+    } };
+}
+
+fn withScratchDir(comptime name: []const u8, comptime testFn: fn (std.Io, std.Io.Dir) anyerror!void) !void {
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+
+    cwd.deleteTree(io, name) catch {};
+    defer cwd.deleteTree(io, name) catch {};
+
+    try cwd.createDir(io, name, .default_dir);
+    var dir = try cwd.openDir(io, name, .{});
+    defer dir.close(io);
+
+    try testFn(io, dir);
+}
+
+test "init creates the append directory and a seq-1 manifest on first boot" {
+    try withScratchDir("scratch-aof-init-first-boot", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-init-first-boot" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+
+            try testing.expectEqual(1, backend._incr_seq);
+            try testing.expectEqual(0, backend._base_size);
+            try testing.expectEqual(0, backend._incr_bytes);
+
+            const manifest = try Manifest.read(io, testing.allocator, dir, "appendonly.aof.manifest") orelse return error.TestUnexpectedResult;
+            defer manifest.deinit(testing.allocator);
+
+            try testing.expect(manifest.base == null);
+            try testing.expectEqual(1, manifest.incrs.len);
+            try testing.expectEqual(1, manifest.incrs[0].seq);
+            try testing.expectEqualStrings("appendonly.aof.1.incr", manifest.incrs[0].name);
+        }
+    }.run);
+}
+
+test "onWrite followed by flush puts the encoded command in the incr file" {
+    try withScratchDir("scratch-aof-onwrite-flush", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-onwrite-flush" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const j = backend.journal();
+
+            try j.onWrite(sampleEvent());
+            try j.flush(0);
+
+            const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(contents);
+
+            try testing.expect(std.mem.indexOf(u8, contents, "SET") != null);
+            try testing.expect(std.mem.indexOf(u8, contents, "foo") != null);
+            try testing.expect(std.mem.indexOf(u8, contents, "bar") != null);
+        }
+    }.run);
+}
+
+test "onWrite alone leaves the file untouched" {
+    try withScratchDir("scratch-aof-onwrite-buffers", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-onwrite-buffers" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+
+            try backend.journal().onWrite(sampleEvent());
+
+            const file = try dir.openFile(io, "appendonly.aof.1.incr", .{});
+            defer file.close(io);
+            try testing.expectEqual(0, try file.length(io));
+        }
+    }.run);
+}
+
+test "init reopens the existing live incr file and appends after its existing contents rather than truncating it" {
+    try withScratchDir("scratch-aof-reopen-no-truncate", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            const config: Config = .{ .append_dirname = "scratch-aof-reopen-no-truncate" };
+
+            {
+                var state = PersistenceState.init(io, false);
+                var backend = try AofBackend.init(io, testing.allocator, &state, config);
+                try backend.journal().onWrite(sampleEvent());
+                try backend.journal().flush(0);
+                try backend.journal().deinit();
+            }
+
+            const before = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(before);
+            try testing.expect(before.len > 0);
+
+            var state2 = PersistenceState.init(io, false);
+            var backend2 = try AofBackend.init(io, testing.allocator, &state2, config);
+            defer backend2.journal().deinit() catch {};
+
+            try testing.expectEqual(before.len, backend2._incr_bytes);
+
+            try backend2.journal().onWrite(sampleEvent());
+            try backend2.journal().flush(0);
+
+            const after = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(after);
+
+            try testing.expect(after.len > before.len);
+            try testing.expect(std.mem.startsWith(u8, after, before));
+        }
+    }.run);
+}
+
+test "init picks the highest-seq incr from a manifest with several" {
+    try withScratchDir("scratch-aof-picks-highest-seq", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            var incrs = [_]Manifest.Entry{
+                .{ .name = "appendonly.aof.1.incr", .seq = 1, .kind = .incr },
+                .{ .name = "appendonly.aof.2.incr", .seq = 2, .kind = .incr },
+                .{ .name = "appendonly.aof.3.incr", .seq = 3, .kind = .incr },
+            };
+            try Manifest.write(io, testing.allocator, dir, "appendonly.aof.manifest", .{ .base = null, .incrs = &incrs });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = "existing" });
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-picks-highest-seq" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+
+            try testing.expectEqual(3, backend._incr_seq);
+            try testing.expectEqual(8, backend._incr_bytes);
+        }
+    }.run);
+}
+
+test "a flush failure latches, and the next onWrite fails fast" {
+    try withScratchDir("scratch-aof-flush-failure-latch", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            _ = dir;
+            const testing = std.testing;
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-flush-failure-latch" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            const j = backend.journal();
+
+            try j.onWrite(sampleEvent());
+
+            const real_file = backend._file.?;
+            backend._file = null;
+
+            // flush's errdefer logs to the real stderr on failure -- exactly
+            // what this test exercises. Redirect it for the failing call,
+            // then restore it, same as cron.zig's/persistence_state.zig's
+            // own tests that trigger a logged failure path.
+            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+            if (devnull < 0) return error.OpenDevNullFailed;
+            defer _ = std.c.close(devnull);
+
+            const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+            if (saved_stderr < 0) return error.DupFailed;
+            defer {
+                _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+                _ = std.c.close(saved_stderr);
+            }
+            _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+            try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(0));
+            try testing.expect(backend._last_write_failed);
+            try testing.expectError(Journal.Error.UnableToRecordWrite, j.onWrite(sampleEvent()));
+
+            backend._file = real_file;
+            try j.deinit();
+        }
+    }.run);
+}
+
+test "concurrent onWrite from several threads loses no bytes" {
+    try withScratchDir("scratch-aof-concurrent-onwrite", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-concurrent-onwrite" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const j = backend.journal();
+
+            var sample_encoder = AofEncoder.init();
+            const sample_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
+            const per_write_len = sample_encoded.len;
+            sample_encoder.deinit(testing.allocator, sample_encoded);
+
+            const thread_count = 8;
+            const writes_per_thread = 100;
+
+            const worker = struct {
+                fn run(worker_journal: Journal) void {
+                    for (0..writes_per_thread) |_| {
+                        worker_journal.onWrite(sampleEvent()) catch unreachable;
+                    }
+                }
+            }.run;
+
+            var threads: [thread_count]std.Thread = undefined;
+            for (&threads) |*thread| {
+                thread.* = try std.Thread.spawn(.{}, worker, .{j});
+            }
+            for (threads) |thread| thread.join();
+
+            try j.flush(0);
+
+            const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(contents);
+
+            try testing.expectEqual(thread_count * writes_per_thread * per_write_len, contents.len);
+        }
+    }.run);
 }
