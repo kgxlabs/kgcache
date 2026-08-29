@@ -4,9 +4,11 @@ const AofEncoder = @import("../codec/aof_encoder.zig");
 const Manifest = @import("../persistence/manifest.zig");
 const PersistenceState = @import("../persistence_state.zig");
 const Config = @import("../config.zig");
+const time = @import("../time.zig");
 
 const AofBackend = @This();
 
+_mutex: std.Io.Mutex = .init,
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
@@ -17,6 +19,9 @@ _file: ?std.Io.File,
 _incr_bytes: u64,
 _incr_seq: u32,
 _base_size: u64,
+_last_write_failed: bool = false,
+_loading: bool = false,
+_buffer: std.ArrayList(u8) = .empty,
 
 const vtable: Journal.VTable = .{
     .bgRewrite = bgRewrite,
@@ -118,8 +123,14 @@ pub fn journal(self: *AofBackend) Journal {
 pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
-    const encoded = self._encoder.encode(self._allocator, event) catch return Journal.Error.OutOfMemory;
-    defer self._encoder.deinit(self._allocator, encoded);
+    if (self._loading) return;
+
+    if (self._last_write_failed) return Journal.Error.UnableToRecordWrite;
+
+    try appendEvent(self, event);
+    if (self._config.append_fsync == .always) {
+        try flush(ptr, time.nowMs(self._io));
+    }
 
     // TODO: append `encoded` to the AOF file on disk. Needs its own design
     // pass (append-mode file handle, buffering/fsync policy) — out of scope
@@ -140,4 +151,14 @@ pub fn flush(_: *anyopaque, _: i64) Journal.Error!void {
 
 pub fn close(_: *anyopaque) Journal.Error!void {
     return;
+}
+
+fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void {
+    const encoded = self._encoder.encode(self._allocator, event) catch return Journal.Error.OutOfMemory;
+    defer self._encoder.deinit(self._allocator, encoded);
+
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
+
+    self._buffer.appendSlice(self._allocator, encoded) catch return Journal.Error.FailedBufferAppend;
 }
