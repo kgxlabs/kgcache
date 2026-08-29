@@ -26,7 +26,7 @@ _buffer: std.ArrayList(u8) = .empty,
 
 const vtable: Journal.VTable = .{
     .bgRewrite = bgRewrite,
-    .close = close,
+    .deinit = deinit,
     .finishRewrite = finishRewrite,
     .flush = flush,
     .onWrite = onWrite,
@@ -151,18 +151,25 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
     try flushLocked(self);
 }
 
-pub fn close(ptr: *anyopaque) Journal.Error!void {
+pub fn deinit(ptr: *anyopaque) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    try flush(ptr, time.nowMs(self._io));
+    // stderr instead of propagating since close is the last gate for aof
+    flush(ptr, time.nowMs(self._io)) catch |err| {
+        helpers.logStderr(self._io, "aof: failed to close: {s}\n", .{@errorName(err)});
+    };
 
     const file = self._file orelse return Journal.Error.FailedToCloseAof;
     file.sync(self._io) catch return Journal.Error.FailedToCloseAof;
     file.close(self._io);
+    self._file = null;
 
     self._buffer.deinit(self._allocator);
 }
 
 fn flushLocked(self: *AofBackend) Journal.Error!void {
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
+
     const file = self._file orelse return Journal.Error.FailedToWriteIncrFile;
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
