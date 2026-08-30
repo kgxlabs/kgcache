@@ -137,6 +137,7 @@ pub fn run(self: *Server) !void {
         &self._persistence_state,
         &self._change_tracker,
         &self._store,
+        self._aof,
         self._config,
     });
     cron_thread.detach();
