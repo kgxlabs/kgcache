@@ -461,6 +461,56 @@ test "reject incomplete request" {
     try testing.expectError(RESPError.Incomplete, p.parse(testing.allocator));
 }
 
+test "next walks two commands back to back" {
+    var p = parser("+OK\r\n:42\r\n");
+
+    const first = (try p.next(testing.allocator)).?;
+    defer p.deinit(testing.allocator, first);
+    try expectSimpleString(first, "OK");
+
+    const second = (try p.next(testing.allocator)).?;
+    defer p.deinit(testing.allocator, second);
+    try expectInteger(second, 42);
+}
+
+test "next returns null at the end of the buffer" {
+    var p = parser("+OK\r\n");
+
+    const value = (try p.next(testing.allocator)).?;
+    defer p.deinit(testing.allocator, value);
+
+    try testing.expect(try p.next(testing.allocator) == null);
+}
+
+test "next returns null immediately for an empty buffer" {
+    var p = parser("");
+
+    try testing.expect(try p.next(testing.allocator) == null);
+}
+
+test "next on a truncated final command leaves position at its start" {
+    const first_command = "+OK\r\n";
+    var p = parser(first_command ++ "$5\r\nhel");
+
+    const first = (try p.next(testing.allocator)).?;
+    defer p.deinit(testing.allocator, first);
+
+    try testing.expectError(RESPError.Incomplete, p.next(testing.allocator));
+    try testing.expectEqual(first_command.len, p._pos);
+}
+
+test "next parses a command after a valid bulk string" {
+    var p = parser("$5\r\nhello\r\n+OK\r\n");
+
+    const first = (try p.next(testing.allocator)).?;
+    defer p.deinit(testing.allocator, first);
+    try expectBulkString(first, "hello");
+
+    const second = (try p.next(testing.allocator)).?;
+    defer p.deinit(testing.allocator, second);
+    try expectSimpleString(second, "OK");
+}
+
 fn expectArray(value: RESPValue, expected_len: usize) ![]RESPValue {
     switch (value) {
         .array => |maybe_items| {
