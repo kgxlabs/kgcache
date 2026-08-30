@@ -155,3 +155,103 @@ test "create builds the full object graph and destroy leaks nothing" {
     const server = try Server.create(testing.io, testing.allocator, Config.default());
     server.destroy();
 }
+
+fn writeKgcSnapshotWithFooBar(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
+    var backend = storage.DefaultStorage.init(io, allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    {
+        var tx = try backend_storage.begin();
+        defer tx.end();
+        _ = try backend_storage.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    }
+
+    var persistence_state = PersistenceState.init(io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(io, allocator, &persistence_state, path);
+    try kgc_backend.snapshot().save(&.{backend_storage});
+}
+
+test "create with appendonly off builds no aof backend and creates no append directory" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-appendonly-off-no-dir";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var config = Config.default();
+    config.append_dirname = dirname;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    try testing.expect(server._aof == null);
+    server.destroy();
+
+    try testing.expectError(error.FileNotFound, cwd.openDir(testing.io, dirname, .{}));
+}
+
+test "create with appendonly on opens the append directory and destroy leaves no leaks" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-appendonly-on-opens-dir";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    try testing.expect(server._aof != null);
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    dir.close(testing.io);
+
+    server.destroy();
+}
+
+test "create with appendonly on does not load the kgc snapshot" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-appendonly-on-skips-kgc";
+    const snapshot_path = "scratch-server-appendonly-on-skips-kgc.kgc";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteFile(testing.io, snapshot_path) catch {};
+
+    try writeKgcSnapshotWithFooBar(testing.io, testing.allocator, snapshot_path);
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+    config.snapshot_path = snapshot_path;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    defer server.destroy();
+
+    const loaded = try server._store.get("foo", 0);
+    try testing.expect(loaded == null);
+}
+
+test "create with appendonly off still loads the kgc snapshot" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const snapshot_path = "scratch-server-appendonly-off-loads-kgc.kgc";
+
+    defer cwd.deleteFile(testing.io, snapshot_path) catch {};
+
+    try writeKgcSnapshotWithFooBar(testing.io, testing.allocator, snapshot_path);
+
+    var config = Config.default();
+    config.snapshot_path = snapshot_path;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    defer server.destroy();
+
+    const loaded = try server._store.get("foo", 0) orelse return error.TestUnexpectedResult;
+    switch (loaded) {
+        .string => |str| try testing.expectEqualStrings("bar", str),
+    }
+}
