@@ -103,22 +103,36 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
     self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
+        const maybe_exp = try self._inner.getExp(key);
+        const expires_at: ?time.UnixMs = if (maybe_exp) |exp| exp.expires_at else null;
+
         // TODO: improve error mapping after error map design imp
         aof.onWrite(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
             .value = value,
-            .options = options,
+            .expires_at = expires_at,
         } }) catch return Storage.Error.UnableToRecordWrite;
     }
 
     return result;
 }
 
+// remove returns void meaning it cannot say if anything was actually deleted.
+// DEL for a missing key gets journaled too. DEL on missing key is idempotent on replay. We have to accept this
+// TODO: make report whether or not if removed something or not.
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     try self._inner.remove(key);
     self._change_tracker.recordChange();
+
+    if (self._aof) |aof| {
+        // TODO: improve error mapping after error map design imp
+        aof.onWrite(.{ .remove = .{
+            .db_index = self._db_index,
+            .key = key,
+        } }) catch return Storage.Error.UnableToRecordWrite;
+    }
 }
 
 pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
@@ -131,6 +145,9 @@ pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpir
     return self._inner.getExp(key);
 }
 
+// TODO: setExp doesn't journal. Harmless today since no command reaches this
+// without also writing a value; EXPIRE/PERSIST/GETEX will need to journal
+// from here once they exist.
 pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.setExp(key, exp);
@@ -138,7 +155,21 @@ pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error
 
 pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    return self._inner.tryExpireRandom();
+    const maybe_key = self._inner.tryExpireRandom() catch return Storage.Error.UnableToExpire;
+    if (maybe_key == null) return null;
+    const key = maybe_key.?;
+
+    self._change_tracker.recordChange();
+
+    if (self._aof) |aof| {
+        // TODO: improve error mapping after error map design imp
+        aof.onWrite(.{ .remove = .{
+            .key = key,
+            .db_index = self._db_index,
+        } }) catch return Storage.Error.UnableToRecordWrite;
+    }
+
+    return key;
 }
 
 pub fn getExpirableCount(ptr: *anyopaque) u32 {
@@ -146,6 +177,7 @@ pub fn getExpirableCount(ptr: *anyopaque) u32 {
     return self._inner.getExpirableCount();
 }
 
+// TODO: same gap as setExp. PERSIST will need to journal from here.
 pub fn clearExp(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.clearExp(key);
@@ -287,4 +319,157 @@ test "a read that finds no expired key does not increment the dirty count" {
     _ = try wrapped.get("foo");
 
     try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+}
+
+const RecordingJournal = struct {
+    last_event: ?persistence.JournalPersistence.WriteEvent = null,
+
+    const journal_vtable: persistence.JournalPersistence.VTable = .{
+        .onWrite = onWrite,
+        .flush = flush,
+        .bgRewrite = bgRewrite,
+        .finishRewrite = finishRewrite,
+        .deinit = journalDeinit,
+    };
+
+    fn journal(self: *RecordingJournal) persistence.JournalPersistence {
+        return .{ .ptr = self, .vtable = &journal_vtable };
+    }
+
+    fn onWrite(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
+        const self: *RecordingJournal = @ptrCast(@alignCast(ptr));
+        self.last_event = event;
+    }
+
+    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
+    fn journalDeinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+};
+
+test "KEEPTTL over an existing expiry journals the existing absolute expiry" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    const expires_at = time.nowMs(testing.io) + 100_000;
+    _ = try wrapped.put("k", .{ .string = "v1" }, .{ .expires_at = expires_at });
+    _ = try wrapped.put("k", .{ .string = "v2" }, .{ .expires_at = null, .keepttl = true });
+
+    switch (recording_journal.last_event.?) {
+        .put => |put_event| try testing.expectEqual(expires_at, put_event.expires_at),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "remove journals a DEL" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    try wrapped.remove("foo");
+
+    switch (recording_journal.last_event.?) {
+        .remove => |remove_event| try testing.expectEqualStrings("foo", remove_event.key),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "an active-expiration removal journals a DEL and increments the dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("expired", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) - 1,
+    });
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+
+    const removed_key = try wrapped.tryExpireRandom();
+    try testing.expect(removed_key != null);
+    defer testing.allocator.free(removed_key.?);
+
+    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+
+    switch (recording_journal.last_event.?) {
+        .remove => |remove_event| try testing.expectEqualStrings("expired", remove_event.key),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "sampling a live key does not increment the dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("alive", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) + 100_000,
+    });
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+
+    const removed_key = try wrapped.tryExpireRandom();
+    try testing.expect(removed_key == null);
+
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    switch (recording_journal.last_event.?) {
+        .put => {},
+        .remove => return error.TestUnexpectedResult,
+    }
 }

@@ -209,8 +209,11 @@ pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
     return try removeByKey(self, key, .expired_only);
 }
 
-pub fn getExp(_: *anyopaque, _: []const u8) Storage.Error!?entry.ObjectExpiration {
-    return null;
+pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpiration {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    const existing = self._entry_map.get(key) orelse return null;
+    const index = existing.exp_index orelse return null;
+    return self._expirables.items[index];
 }
 
 pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {

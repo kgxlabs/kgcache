@@ -29,7 +29,6 @@ _store: store.Store,
 _listener: ?std.Io.net.Server = null,
 
 /// Builds the whole object graph on the heap and returns a stable `*Server`.
-///
 /// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`, and
 /// `_mem_store` (via `_kgc`/`_data_storages`) capture pointers back into
 /// `self`'s own fields. Returning `Server` by value would copy those fields

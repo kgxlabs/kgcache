@@ -1,6 +1,6 @@
 const std = @import("std");
-const Storage = @import("../storage/interface.zig");
 const object = @import("../object.zig");
+const time = @import("../time.zig");
 
 const JournalPersistence = @This();
 
@@ -25,7 +25,7 @@ pub const Error = error{
 };
 
 pub const WriteEvent = union(enum) {
-    put: struct { db_index: u32, key: []const u8, value: object.Object, options: Storage.PutOptions },
+    put: struct { db_index: u32, key: []const u8, value: object.Object, expires_at: ?time.UnixMs },
     remove: struct { db_index: u32, key: []const u8 },
 };
 

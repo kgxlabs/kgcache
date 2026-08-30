@@ -188,13 +188,15 @@ fn flushLocked(self: *AofBackend) Journal.Error!void {
 }
 
 fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void {
-    const encoded = self._encoder.encode(self._allocator, event) catch return Journal.Error.OutOfMemory;
-    defer self._encoder.deinit(self._allocator, encoded);
-
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
-    self._buffer.appendSlice(self._allocator, encoded) catch return Journal.Error.FailedBufferAppend;
+    const encoded = self._encoder.encode(self._allocator, event) catch return Journal.Error.OutOfMemory;
+    defer self._encoder.deinit(self._allocator, encoded.bytes);
+
+    self._buffer.appendSlice(self._allocator, encoded.bytes) catch return Journal.Error.FailedBufferAppend;
+    // we need to make sure that we only set db after we actaully successfully add the bytes to buffer
+    self._encoder.commitDb(encoded.db_index);
 }
 
 fn sampleEvent() Journal.WriteEvent {
@@ -202,7 +204,7 @@ fn sampleEvent() Journal.WriteEvent {
         .db_index = 0,
         .key = "foo",
         .value = .{ .string = "bar" },
-        .options = .{ .expires_at = null },
+        .expires_at = null,
     } };
 }
 
@@ -407,10 +409,16 @@ test "concurrent onWrite from several threads loses no bytes" {
             defer backend.journal().deinit() catch {};
             const j = backend.journal();
 
+            // First encode on a fresh encoder includes a SELECT; the second
+            // (same db) doesn't, matching backend's own first-vs-rest split.
             var sample_encoder = AofEncoder.init();
-            const sample_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
-            const per_write_len = sample_encoded.len;
-            sample_encoder.deinit(testing.allocator, sample_encoded);
+            const first_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
+            sample_encoder.commitDb(first_encoded.db_index);
+            const second_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
+            const per_write_len = second_encoded.bytes.len;
+            const select_len = first_encoded.bytes.len - per_write_len;
+            sample_encoder.deinit(testing.allocator, first_encoded.bytes);
+            sample_encoder.deinit(testing.allocator, second_encoded.bytes);
 
             const thread_count = 8;
             const writes_per_thread = 100;
@@ -434,7 +442,7 @@ test "concurrent onWrite from several threads loses no bytes" {
             const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
             defer testing.allocator.free(contents);
 
-            try testing.expectEqual(thread_count * writes_per_thread * per_write_len, contents.len);
+            try testing.expectEqual(select_len + thread_count * writes_per_thread * per_write_len, contents.len);
         }
     }.run);
 }
