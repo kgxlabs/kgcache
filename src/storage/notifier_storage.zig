@@ -118,10 +118,21 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
     return result;
 }
 
+// remove returns void meaning it cannot say if anything was actually deleted.
+// DEL for a missing key gets journaled too. DEL on missing key is idempotent on replay. We have to accept this
+// TODO: make report whether or not if removed something or not.
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     try self._inner.remove(key);
     self._change_tracker.recordChange();
+
+    if (self._aof) |aof| {
+        // TODO: improve error mapping after error map design imp
+        aof.onWrite(.{ .remove = .{
+            .db_index = self._db_index,
+            .key = key,
+        } }) catch return Storage.Error.UnableToRecordWrite;
+    }
 }
 
 pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
@@ -141,7 +152,21 @@ pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error
 
 pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    return self._inner.tryExpireRandom();
+    const maybe_key = self._inner.tryExpireRandom() catch return Storage.Error.UnableToExpire;
+    self._change_tracker.recordChange();
+
+    if (maybe_key == null) return null;
+    const key = maybe_key.?;
+
+    if (self._aof) |aof| {
+        // TODO: improve error mapping after error map design imp
+        aof.onWrite(.{ .remove = .{
+            .key = key,
+            .db_index = self._db_index,
+        } }) catch return Storage.Error.UnableToRecordWrite;
+    }
+
+    return key;
 }
 
 pub fn getExpirableCount(ptr: *anyopaque) u32 {
