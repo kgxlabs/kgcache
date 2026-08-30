@@ -105,3 +105,72 @@ fn eventDbIndex(event: Journal.WriteEvent) u32 {
         .remove => |remove| remove.db_index,
     };
 }
+
+fn putEvent(db_index: u32, key: []const u8, value: []const u8, expires_at: ?i64) Journal.WriteEvent {
+    return .{ .put = .{
+        .db_index = db_index,
+        .key = key,
+        .value = .{ .string = value },
+        .expires_at = expires_at,
+    } };
+}
+
+test "a put with an expiry encodes as SET with PXAT" {
+    const testing = std.testing;
+    var encoder = AofEncoder.init();
+
+    const encoded = try encoder.encode(testing.allocator, putEvent(0, "foo", "bar", 123));
+    defer encoder.deinit(testing.allocator, encoded);
+
+    try testing.expect(std.mem.indexOf(u8, encoded, "SET") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded, "PXAT") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded, "123") != null);
+}
+
+test "a put without an expiry encodes as a plain SET" {
+    const testing = std.testing;
+    var encoder = AofEncoder.init();
+
+    const encoded = try encoder.encode(testing.allocator, putEvent(0, "foo", "bar", null));
+    defer encoder.deinit(testing.allocator, encoded);
+
+    try testing.expect(std.mem.indexOf(u8, encoded, "SET") != null);
+    try testing.expect(std.mem.indexOf(u8, encoded, "PXAT") == null);
+}
+
+test "the first command after a file is opened is preceded by SELECT" {
+    const testing = std.testing;
+    var encoder = AofEncoder.init();
+
+    const encoded = try encoder.encode(testing.allocator, putEvent(0, "foo", "bar", null));
+    defer encoder.deinit(testing.allocator, encoded);
+
+    const select_pos = std.mem.indexOf(u8, encoded, "SELECT") orelse return error.TestUnexpectedResult;
+    const set_pos = std.mem.indexOf(u8, encoded, "SET") orelse return error.TestUnexpectedResult;
+    try testing.expect(select_pos < set_pos);
+}
+
+test "consecutive writes to the same db emit SELECT once" {
+    const testing = std.testing;
+    var encoder = AofEncoder.init();
+
+    const first = try encoder.encode(testing.allocator, putEvent(0, "foo", "bar", null));
+    defer encoder.deinit(testing.allocator, first);
+    const second = try encoder.encode(testing.allocator, putEvent(0, "baz", "qux", null));
+    defer encoder.deinit(testing.allocator, second);
+
+    try testing.expect(std.mem.indexOf(u8, first, "SELECT") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "SELECT") == null);
+}
+
+test "a write to a different db emits a new SELECT" {
+    const testing = std.testing;
+    var encoder = AofEncoder.init();
+
+    const first = try encoder.encode(testing.allocator, putEvent(0, "foo", "bar", null));
+    defer encoder.deinit(testing.allocator, first);
+    const second = try encoder.encode(testing.allocator, putEvent(1, "baz", "qux", null));
+    defer encoder.deinit(testing.allocator, second);
+
+    try testing.expect(std.mem.indexOf(u8, second, "SELECT") != null);
+}

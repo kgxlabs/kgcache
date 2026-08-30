@@ -145,6 +145,9 @@ pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpir
     return self._inner.getExp(key);
 }
 
+// TODO: setExp doesn't journal. Harmless today since no command reaches this
+// without also writing a value; EXPIRE/PERSIST/GETEX will need to journal
+// from here once they exist.
 pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.setExp(key, exp);
@@ -174,6 +177,7 @@ pub fn getExpirableCount(ptr: *anyopaque) u32 {
     return self._inner.getExpirableCount();
 }
 
+// TODO: same gap as setExp. PERSIST will need to journal from here.
 pub fn clearExp(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.clearExp(key);
@@ -368,6 +372,70 @@ test "KEEPTTL over an existing expiry journals the existing absolute expiry" {
 
     switch (recording_journal.last_event.?) {
         .put => |put_event| try testing.expectEqual(expires_at, put_event.expires_at),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "remove journals a DEL" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    try wrapped.remove("foo");
+
+    switch (recording_journal.last_event.?) {
+        .remove => |remove_event| try testing.expectEqualStrings("foo", remove_event.key),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "an active-expiration removal journals a DEL and increments the dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("expired", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) - 1,
+    });
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+
+    const removed_key = try wrapped.tryExpireRandom();
+    try testing.expect(removed_key != null);
+    defer testing.allocator.free(removed_key.?);
+
+    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+
+    switch (recording_journal.last_event.?) {
+        .remove => |remove_event| try testing.expectEqualStrings("expired", remove_event.key),
         else => return error.TestUnexpectedResult,
     }
 }
