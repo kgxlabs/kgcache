@@ -202,7 +202,7 @@ fn sampleEvent() Journal.WriteEvent {
         .db_index = 0,
         .key = "foo",
         .value = .{ .string = "bar" },
-        .options = .{ .expires_at = null },
+        .expires_at = null,
     } };
 }
 

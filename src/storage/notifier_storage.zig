@@ -103,12 +103,15 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
     self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
+        const maybe_exp = try self._inner.getExp(key);
+        const expires_at: ?time.UnixMs = if (maybe_exp) |exp| exp.expires_at else null;
+
         // TODO: improve error mapping after error map design imp
         aof.onWrite(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
             .value = value,
-            .options = options,
+            .expires_at = expires_at,
         } }) catch return Storage.Error.UnableToRecordWrite;
     }
 
@@ -287,4 +290,59 @@ test "a read that finds no expired key does not increment the dirty count" {
     _ = try wrapped.get("foo");
 
     try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+}
+
+const RecordingJournal = struct {
+    last_event: ?persistence.JournalPersistence.WriteEvent = null,
+
+    const journal_vtable: persistence.JournalPersistence.VTable = .{
+        .onWrite = onWrite,
+        .flush = flush,
+        .bgRewrite = bgRewrite,
+        .finishRewrite = finishRewrite,
+        .deinit = journalDeinit,
+    };
+
+    fn journal(self: *RecordingJournal) persistence.JournalPersistence {
+        return .{ .ptr = self, .vtable = &journal_vtable };
+    }
+
+    fn onWrite(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
+        const self: *RecordingJournal = @ptrCast(@alignCast(ptr));
+        self.last_event = event;
+    }
+
+    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
+    fn journalDeinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+};
+
+test "KEEPTTL over an existing expiry journals the existing absolute expiry" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    const expires_at = time.nowMs(testing.io) + 100_000;
+    _ = try wrapped.put("k", .{ .string = "v1" }, .{ .expires_at = expires_at });
+    _ = try wrapped.put("k", .{ .string = "v2" }, .{ .expires_at = null, .keepttl = true });
+
+    switch (recording_journal.last_event.?) {
+        .put => |put_event| try testing.expectEqual(expires_at, put_event.expires_at),
+        else => return error.TestUnexpectedResult,
+    }
 }

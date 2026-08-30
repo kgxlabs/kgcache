@@ -62,7 +62,7 @@ fn toCommandItems(allocator: std.mem.Allocator, cmd: Command) Error!CommandItem 
                     .string => |str| str,
                 };
 
-                if (put.options.expires_at) |ms| {
+                if (put.expires_at) |ms| {
                     const ms_str = try std.fmt.allocPrint(allocator, "{d}", .{ms});
                     const items = try allocator.alloc(resp.RESPValue, 5);
                     items[0] = .{ .bulk_string = "SET" };
