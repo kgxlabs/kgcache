@@ -30,6 +30,8 @@ const vtable: Journal.VTable = .{
     .finishRewrite = finishRewrite,
     .flush = flush,
     .onWrite = onWrite,
+    .beginLoading = beginLoading,
+    .endLoading = endLoading,
 };
 
 // TODO: Refactor init. separate concerns
@@ -149,6 +151,16 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
         helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
     }
     try flushLocked(self);
+}
+
+pub fn beginLoading(ptr: *anyopaque) void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    self._loading = true;
+}
+
+pub fn endLoading(ptr: *anyopaque) void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    self._loading = false;
 }
 
 pub fn deinit(ptr: *anyopaque) Journal.Error!void {
