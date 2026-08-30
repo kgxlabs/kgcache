@@ -65,6 +65,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     // Load against the raw storages if aof is not enabled, before they're wrapped for AOF
     // notification below. This block and the wrapping below it must not be
     // reordered.
+    // AOF is history and snapshot is a state, applying both would double-apply . So they are mutaully exclusive
     if (!config.append_only) {
         const raw_storages = try allocator.alloc(storage.Interface, num_databases);
         defer allocator.free(raw_storages);
@@ -107,12 +108,14 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
 pub fn destroy(self: *Server) void {
-    self._store.deinit();
+    // flush out buffered datas and clear it before tearning down store
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {
             helpers.logStderr(self._io, "server: failed to destoy: {s}\n", .{@errorName(err)});
         };
     }
+
+    self._store.deinit();
 
     self._allocator.free(self._data_storages);
     self._allocator.free(self._notifier_storages);
@@ -130,6 +133,7 @@ pub fn run(self: *Server) !void {
     });
     defer self._listener.?.deinit(self._io);
 
+    const aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
     const cron_thread = try std.Thread.spawn(.{}, cron.run, .{
         self._io,
         self._allocator,
@@ -137,7 +141,7 @@ pub fn run(self: *Server) !void {
         &self._persistence_state,
         &self._change_tracker,
         &self._store,
-        self._aof,
+        aof_journal,
         self._config,
     });
     cron_thread.detach();
