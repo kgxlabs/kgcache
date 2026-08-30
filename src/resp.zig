@@ -67,6 +67,16 @@ pub const Parser = struct {
         return result.value;
     }
 
+    // AOF replay treats `Incomplete` as an unfinished command at the end of the file.
+    // It treats every other error as corrupted data.
+    // The parser also returns `Incomplete` when a bulk string ends with an invalid CRLF, because it cannot tell these two cases apart.
+    pub fn next(self: *Self, allocator: std.mem.Allocator) RESPError!?RESPValue {
+        if (self._pos >= self.data.len) return null;
+        const result = try parseRESP(allocator, self.data[self._pos..]);
+        self._pos += result.consumed;
+        return result.value;
+    }
+
     pub fn deinit(self: *Self, allocator: std.mem.Allocator, value: RESPValue) void {
         switch (value) {
             .array => |optional_items| {
