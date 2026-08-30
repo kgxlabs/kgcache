@@ -22,11 +22,9 @@ pub fn encode(self: *AofEncoder, allocator: std.mem.Allocator, event: Journal.Wr
     errdefer out.deinit(allocator);
 
     const command_item = try toCommandItems(allocator, event);
-    defer allocator.free(command_item.items);
     // the above only free the items list, we need to free for ms separately here.
-    defer if (command_item.owned_ms) |ms| allocator.free(ms);
 
-    try appendSerialized(self, allocator, &out, command_item.items);
+    try appendSerialized(self, allocator, &out, command_item);
     return out.toOwnedSlice(allocator);
 }
 
@@ -67,10 +65,11 @@ fn toCommandItems(allocator: std.mem.Allocator, event: Journal.WriteEvent) Error
     };
 }
 
-fn appendSerialized(self: *AofEncoder, allocator: std.mem.Allocator, out: *std.ArrayList(u8), items: []resp.RESPValue) Error!void {
-    defer allocator.free(items);
+fn appendSerialized(self: *AofEncoder, allocator: std.mem.Allocator, out: *std.ArrayList(u8), command_item: CommandItem) Error!void {
+    defer allocator.free(command_item.items);
+    defer if (command_item.owned_ms) |ms| allocator.free(ms);
 
-    const bytes = self._serializer.serialize(allocator, .{ .array = items }) catch return Error.OutOfMemory;
+    const bytes = self._serializer.serialize(allocator, .{ .array = command_item.items }) catch return Error.OutOfMemory;
     defer self._serializer.deinit(allocator, bytes);
 
     out.appendSlice(allocator, bytes) catch return Error.OutOfMemory;
