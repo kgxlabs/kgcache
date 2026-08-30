@@ -73,8 +73,6 @@ zig build test
 
 ## Scope and current limitations
 
-`kgcache` is intentionally not a drop-in Redis replacement yet.
-
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, transactions, or RESP3.
 - The server processes one parsed request per connection read, into a per-connection buffer (1 KiB by default, configurable). Pipelining and requests split across reads are not supported.
 - Argument validation remains incomplete for `PING` and `GET`; extra arguments are accepted.
