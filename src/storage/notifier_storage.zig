@@ -156,10 +156,10 @@ pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error
 pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     const maybe_key = self._inner.tryExpireRandom() catch return Storage.Error.UnableToExpire;
-    self._change_tracker.recordChange();
-
     if (maybe_key == null) return null;
     const key = maybe_key.?;
+
+    self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
         // TODO: improve error mapping after error map design imp
@@ -437,5 +437,39 @@ test "an active-expiration removal journals a DEL and increments the dirty count
     switch (recording_journal.last_event.?) {
         .remove => |remove_event| try testing.expectEqualStrings("expired", remove_event.key),
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "sampling a live key does not increment the dirty count" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var tracker = ChangeTracker.init(testing.io);
+    var recording_journal = RecordingJournal{};
+    var notifier = NotifierStorage.init(
+        testing.allocator,
+        backend.storage(),
+        recording_journal.journal(),
+        &tracker,
+        0,
+    );
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    _ = try wrapped.put("alive", .{ .string = "value" }, .{
+        .expires_at = time.nowMs(testing.io) + 100_000,
+    });
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+
+    const removed_key = try wrapped.tryExpireRandom();
+    try testing.expect(removed_key == null);
+
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    switch (recording_journal.last_event.?) {
+        .put => {},
+        .remove => return error.TestUnexpectedResult,
     }
 }

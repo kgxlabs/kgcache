@@ -192,9 +192,11 @@ fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void 
     defer self._mutex.unlock(self._io);
 
     const encoded = self._encoder.encode(self._allocator, event) catch return Journal.Error.OutOfMemory;
-    defer self._encoder.deinit(self._allocator, encoded);
+    defer self._encoder.deinit(self._allocator, encoded.bytes);
 
-    self._buffer.appendSlice(self._allocator, encoded) catch return Journal.Error.FailedBufferAppend;
+    self._buffer.appendSlice(self._allocator, encoded.bytes) catch return Journal.Error.FailedBufferAppend;
+    // we need to make sure that we only set db after we actaully successfully add the bytes to buffer
+    self._encoder.commitDb(encoded.db_index);
 }
 
 fn sampleEvent() Journal.WriteEvent {
@@ -411,11 +413,12 @@ test "concurrent onWrite from several threads loses no bytes" {
             // (same db) doesn't, matching backend's own first-vs-rest split.
             var sample_encoder = AofEncoder.init();
             const first_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
+            sample_encoder.commitDb(first_encoded.db_index);
             const second_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
-            const per_write_len = second_encoded.len;
-            const select_len = first_encoded.len - per_write_len;
-            sample_encoder.deinit(testing.allocator, first_encoded);
-            sample_encoder.deinit(testing.allocator, second_encoded);
+            const per_write_len = second_encoded.bytes.len;
+            const select_len = first_encoded.bytes.len - per_write_len;
+            sample_encoder.deinit(testing.allocator, first_encoded.bytes);
+            sample_encoder.deinit(testing.allocator, second_encoded.bytes);
 
             const thread_count = 8;
             const writes_per_thread = 100;
