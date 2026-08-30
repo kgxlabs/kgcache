@@ -62,10 +62,10 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     const kgc_snapshot = self._kgc.snapshot();
     const aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
 
-    // Load against the raw storages, before they're wrapped for AOF
+    // Load against the raw storages if aof is not enabled, before they're wrapped for AOF
     // notification below. This block and the wrapping below it must not be
     // reordered.
-    {
+    if (!config.append_only) {
         const raw_storages = try allocator.alloc(storage.Interface, num_databases);
         defer allocator.free(raw_storages);
         for (0..num_databases) |i| raw_storages[i] = self._default_storages[i].storage();
@@ -99,6 +99,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     );
     self._store = self._mem_store.store();
 
+    // TODO: if aof is enabled, replay aof through the store
     return self;
 }
 
