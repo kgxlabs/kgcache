@@ -1,6 +1,7 @@
 const std = @import("std");
 const storage = @import("storage.zig");
 const store = @import("store.zig");
+const persistence = @import("persistence.zig");
 const PersistenceState = @import("persistence_state.zig");
 const ChangeTracker = @import("change_tracker.zig");
 const Config = @import("config.zig");
@@ -14,6 +15,7 @@ pub fn run(
     persistence_state: *PersistenceState,
     change_tracker: *ChangeTracker,
     data_store: *store.Store,
+    _: ?persistence.JournalPersistence,
     config: Config,
 ) !void {
     const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
@@ -64,7 +66,7 @@ test "a completed background save resets the change tracker once reaped, not bef
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const NotifierStorage = @import("storage/notifier_storage.zig");
-    const persistence = @import("persistence.zig");
+    const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var change_tracker = ChangeTracker.init(testing.io);
@@ -72,7 +74,7 @@ test "a completed background save resets the change tracker once reaped, not bef
     const notified_storage = notifier.storage();
 
     var persistence_state = PersistenceState.init(testing.io, false);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-reap-reset.kgc");
+    var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-reap-reset.kgc");
     var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -157,7 +159,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const NotifierStorage = @import("storage/notifier_storage.zig");
-    const persistence = @import("persistence.zig");
+    const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var change_tracker = ChangeTracker.init(testing.io);
@@ -165,7 +167,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
     const notified_storage = notifier.storage();
 
     var persistence_state = PersistenceState.init(testing.io, false);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-trigger.kgc");
+    var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-trigger.kgc");
     var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -192,7 +194,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const NotifierStorage = @import("storage/notifier_storage.zig");
-    const persistence = @import("persistence.zig");
+    const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var change_tracker = ChangeTracker.init(testing.io);
@@ -200,7 +202,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
     const notified_storage = notifier.storage();
 
     var persistence_state = PersistenceState.init(testing.io, false);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-trigger.kgc");
+    var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-trigger.kgc");
     var memory_store = store.MemoryStore.init(
         &.{notified_storage},
         kgc_backend.snapshot(),
@@ -224,7 +226,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const NotifierStorage = @import("storage/notifier_storage.zig");
-    const persistence = @import("persistence.zig");
+    const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var change_tracker = ChangeTracker.init(testing.io);
@@ -232,7 +234,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
     const notified_storage = notifier.storage();
 
     var persistence_state = PersistenceState.init(testing.io, false);
-    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-rules.kgc");
+    var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-rules.kgc");
     var memory_store = store.MemoryStore.init(
         &.{notified_storage},
         kgc_backend.snapshot(),
