@@ -34,6 +34,13 @@ const vtable: Journal.VTable = .{
     .endLoading = endLoading,
 };
 
+pub fn journal(self: *AofBackend) Journal {
+    return .{
+        .ptr = self,
+        .vtable = &vtable,
+    };
+}
+
 // TODO: Refactor init. separate concerns
 pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) Journal.Error!AofBackend {
     const cwd = std.Io.Dir.cwd();
@@ -43,7 +50,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         else => return Journal.Error.FailedToOpenDir,
     };
 
-    const dir = std.Io.Dir.cwd().openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+    const dir = cwd.openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
 
     var incr_seq: u32 = 1;
     var base_size: u64 = 0;
@@ -113,13 +120,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         ._file = file,
         ._incr_bytes = incr_bytes,
         ._base_size = base_size,
-    };
-}
-
-pub fn journal(self: *AofBackend) Journal {
-    return .{
-        .ptr = self,
-        .vtable = &vtable,
     };
 }
 
