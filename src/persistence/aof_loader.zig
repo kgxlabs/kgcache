@@ -53,25 +53,13 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
     var client_state = ClientState.init();
 
     if (manifest.base) |base| {
-        const base_name = Manifest.baseName(allocator, base.name, base.seq) catch return Error.FailedToLoadManifest;
-        const base_contents = dir.readFileAlloc(io, base_name, allocator, .unlimited) catch |err| switch (err) {
-            error.FileNotFound => {
-                helpers.logStdout(io, "aof: base aof file not found: {s}\n", .{@errorName(err)});
-                return;
-            },
-            error.OutOfMemory => return Error.OutOfMemory,
-            else => return Error.FailedToReadManifest,
-        };
-        defer allocator.free(base_contents);
-
-        try replayFile(io, allocator, data_store, &client_state, config, dir, base_name, false);
+        try replayFile(io, allocator, data_store, &client_state, config, dir, base.name, false);
     }
 
     // This is already in ascending order. `Manifest.parse` guarantees it otherwise it will throw `NonAscendingIncrSeq`
     for (manifest.incrs, 0..) |incr, index| {
         const is_last = index + 1 == manifest.incrs.len;
-        const incr_name = Manifest.incrName(allocator, incr.name, incr.seq) catch return Error.FailedToLoadManifest;
-        try replayFile(io, allocator, data_store, &client_state, config, dir, incr_name, is_last);
+        try replayFile(io, allocator, data_store, &client_state, config, dir, incr.name, is_last);
     }
 }
 

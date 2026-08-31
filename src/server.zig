@@ -113,9 +113,10 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
         return error.FailedToReplayAof;
     };
     aof_journal.beginLoading();
+    defer aof_journal.endLoading();
+
     try persistence.AofLoader.replay(io, allocator, &self._store, self._config);
     self._change_tracker.markSaved(time.nowMs(io));
-    aof_journal.endLoading();
 }
 
 /// Unwinds `create` in reverse. `_store.deinit()` chains through
