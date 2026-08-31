@@ -108,14 +108,18 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
 }
 
 fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
-    const aof_journal = if (self._aof) |*aof| aof.journal() else {
-        helpers.logStderr(io, "server: failed to repaly aof on start up", .{});
-        return error.FailedToReplayAof;
-    };
-    aof_journal.beginLoading();
-    defer aof_journal.endLoading();
+    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
 
-    try persistence.AofLoader.replay(io, allocator, &self._store, self._config);
+    const journal = aof.journal();
+    journal.beginLoading();
+    defer journal.endLoading();
+
+    const stats = try persistence.AofLoader.replay(io, allocator, &self._store, self._config);
+
+    aof.finishLoading(stats.base_size, stats.incr_bytes);
+
+    // Replay uses the normal storage path, which increments the dirty count.
+    // These changes are already stored in the AOF, so startup begins clean.
     self._change_tracker.markSaved(time.nowMs(io));
 }
 
