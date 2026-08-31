@@ -8,6 +8,7 @@ const commander = @import("../commander.zig");
 const helpers = @import("../helpers.zig");
 
 pub const Error = error{
+    OutOfMemory,
     FailedToLoadManifestDir,
     FailedToLoadManifest,
     FailedToReadManifest,
@@ -31,6 +32,7 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
     var dir = cwd.openDir(io, config.append_dirname, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             helpers.logStdout(io, "aof: manifest dir not found: {s}\n", .{@errorName(err)});
+            return;
         },
         else => {
             return Error.FailedToLoadManifestDir;
@@ -39,20 +41,22 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
     defer dir.close(io);
 
     const manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Error.FailedToLoadManifest;
+    defer allocator.free(manifest_name);
     const manifest = (Manifest.read(
         io,
         allocator,
         dir,
         manifest_name,
-    ) catch return Error.FailedToReadManifest) orelse return null;
+    ) catch return Error.FailedToReadManifest) orelse return;
+    defer manifest.deinit(allocator);
 
-    const client_state = ClientState.init();
+    var client_state = ClientState.init();
 
     if (manifest.base) |base| {
         const base_name = Manifest.baseName(allocator, base.name, base.seq) catch return Error.FailedToLoadManifest;
         const base_contents = dir.readFileAlloc(io, base_name, allocator, .unlimited) catch |err| switch (err) {
             error.FileNotFound => {
-                helpers.logStdout(io, "aof: base aof file not found: {s}\n", @errorName(err));
+                helpers.logStdout(io, "aof: base aof file not found: {s}\n", .{@errorName(err)});
                 return;
             },
             error.OutOfMemory => return Error.OutOfMemory,
@@ -60,14 +64,14 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
         };
         defer allocator.free(base_contents);
 
-        try replayFile(io, allocator, data_store, client_state, dir, base_name, false);
+        try replayFile(io, allocator, data_store, &client_state, config, dir, base_name, false);
     }
 
     // This is already in ascending order. `Manifest.parse` guarantees it otherwise it will throw `NonAscendingIncrSeq`
     for (manifest.incrs, 0..) |incr, index| {
         const is_last = index + 1 == manifest.incrs.len;
         const incr_name = Manifest.incrName(allocator, incr.name, incr.seq) catch return Error.FailedToLoadManifest;
-        try replayFile(io, allocator, data_store, client_state, dir, incr_name, is_last);
+        try replayFile(io, allocator, data_store, &client_state, config, dir, incr_name, is_last);
     }
 }
 
@@ -75,13 +79,18 @@ fn replayFile(
     io: std.Io,
     allocator: std.mem.Allocator,
     data_store: *store.Store,
-    client_state: ClientState,
+    client_state: *ClientState,
     config: Config,
     dir: std.Io.Dir,
     filename: []const u8,
     is_last: bool,
 ) Error!void {
-    const contents = try dir.readFileAlloc(io, filename, allocator, .{.unlimited});
+    const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => return Error.MissingAofFile,
+        error.OutOfMemory => return Error.OutOfMemory,
+        else => return Error.FailedToReadManifest,
+    };
+    defer allocator.free(contents);
     const result = try replayContents(
         io,
         allocator,
@@ -134,7 +143,7 @@ fn replayContents(io: std.Io, allocator: std.mem.Allocator, contents: []const u8
         };
         defer c.deinit();
 
-        _ = c.execute(io, data_store, &client_state) catch |err| {
+        _ = c.execute(io, data_store, client_state) catch |err| {
             helpers.logStderr(io, "aof_loader: Failed to execute command: {s}\n", .{@errorName(err)});
             return Error.FailedToExecuteCommand;
         };

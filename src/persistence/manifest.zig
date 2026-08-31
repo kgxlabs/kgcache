@@ -55,7 +55,7 @@ pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename:
     const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => {
             helpers.logStdout(io, "aof: manifest file not found: {s}\n", .{@errorName(err)});
-            return err;
+            return null;
         },
         error.OutOfMemory => return Error.OutOfMemory,
         else => return Error.FailedToReadManifest,
@@ -171,6 +171,7 @@ pub fn nextSeq(manifest: Manifest) u32 {
     return max_seq + 1;
 }
 
+// Whoever calls these name methods, must free them also
 pub fn baseName(allocator: std.mem.Allocator, append_filename: []const u8, seq: u32) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}.{d}.base", .{ append_filename, seq });
 }

@@ -3,6 +3,7 @@ pub const SnapshotPersistence = @import("persistence/snapshot_interface.zig");
 pub const KgcPersistence = @import("persistence/kgc.zig");
 pub const AofPersistence = @import("persistence/aof.zig");
 pub const AofManifest = @import("persistence/manifest.zig");
+pub const AofLoader = @import("persistence/aof_loader.zig");
 
 /// The two persistence handles threaded into the storage stack at startup.
 /// They are consumed by two different layers, not one:
