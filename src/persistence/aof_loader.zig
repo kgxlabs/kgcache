@@ -14,6 +14,16 @@ pub const Error = error{
     FailedToParseEntry,
     FailedToInitCommander,
     FailedToExecuteCommand,
+    CorruptAof,
+    TruncatedAof,
+    CommandFailed,
+    MissingAofFile,
+    FailedToTruncateAof,
+};
+
+const ReplayResult = union(enum) {
+    complete,
+    truncated: usize,
 };
 
 pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) Error!void {
@@ -50,27 +60,81 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
         };
         defer allocator.free(base_contents);
 
-        try replayFile(io, allocator, data_store, client_state, base_contents);
+        try replayFile(io, allocator, data_store, client_state, dir, base_name, false);
+    }
+
+    // This is already in ascending order. `Manifest.parse` guarantees it otherwise it will throw `NonAscendingIncrSeq`
+    for (manifest.incrs, 0..) |incr, index| {
+        const is_last = index + 1 == manifest.incrs.len;
+        const incr_name = Manifest.incrName(allocator, incr.name, incr.seq) catch return Error.FailedToLoadManifest;
+        try replayFile(io, allocator, data_store, client_state, dir, incr_name, is_last);
     }
 }
 
-fn replayFile(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, client_state: ClientState, contents: []u8) Error!void {
-    while (true) {
-        var parser = resp.parser(contents);
-        const command = parser.next(allocator) catch |err| {
-            helpers.logStderr(io, "aof_loader: Failed to parse command: {s}\n", .{@errorName(err)});
-            return Error.FailedToParseEntry;
-        };
-        defer parser.deinit(allocator, command);
-        if (command == null) break;
+fn replayFile(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    data_store: *store.Store,
+    client_state: ClientState,
+    config: Config,
+    dir: std.Io.Dir,
+    filename: []const u8,
+    is_last: bool,
+) Error!void {
+    const contents = try dir.readFileAlloc(io, filename, allocator, .{.unlimited});
+    const result = try replayContents(
+        io,
+        allocator,
+        contents,
+        data_store,
+        client_state,
+    );
 
-        const c = commander.init(allocator, command) catch |err| {
+    switch (result) {
+        .complete => {},
+        .truncated => |safe_offset| {
+            if (!is_last or !config.aof_load_truncated) {
+                return Error.TruncatedAof;
+            }
+
+            const file = dir.openFile(
+                io,
+                filename,
+                .{ .mode = .read_write },
+            ) catch return Error.MissingAofFile;
+            defer file.close(io);
+
+            // truncate the incomplete command from file
+            file.setLength(io, @intCast(safe_offset)) catch {
+                return Error.FailedToTruncateAof;
+            };
+
+            helpers.logStderr(io, "aof: removed unfinished command from {s} bytes at byte {d}\n", .{ filename, safe_offset });
+        },
+    }
+}
+
+fn replayContents(io: std.Io, allocator: std.mem.Allocator, contents: []const u8, data_store: *store.Store, client_state: *ClientState) Error!ReplayResult {
+    var parser = resp.parser(contents);
+    while (true) {
+        // TODO: we are reaching to the implementation details here. refactor
+        const command_start = parser._pos;
+        const maybe_value = parser.next(allocator) catch |err| switch (err) {
+            error.Incomplete => {
+                return .{ .truncated = command_start };
+            },
+            else => return Error.CorruptAof,
+        };
+        const value = maybe_value orelse return .complete;
+        defer parser.deinit(allocator, value);
+
+        const c = commander.init(allocator, value) catch |err| {
             helpers.logStderr(io, "aof_loader: Failed to failed to initialize commander: {s}\n", .{@errorName(err)});
-            return Error.FailedToInitCommander;
+            return Error.CommandFailed;
         };
         defer c.deinit();
 
-        c.execute(io, data_store, &client_state) catch |err| {
+        _ = c.execute(io, data_store, &client_state) catch |err| {
             helpers.logStderr(io, "aof_loader: Failed to execute command: {s}\n", .{@errorName(err)});
             return Error.FailedToExecuteCommand;
         };
