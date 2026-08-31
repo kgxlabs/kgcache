@@ -8,6 +8,7 @@ const Config = @import("config.zig");
 const cron = @import("cron.zig");
 const connection = @import("connection.zig");
 const helpers = @import("helpers.zig");
+const time = @import("time.zig");
 
 const Server = @This();
 
@@ -60,7 +61,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     }
 
     const kgc_snapshot = self._kgc.snapshot();
-    const aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
+    const maybe_aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
 
     // Load against the raw storages if aof is not enabled, before they're wrapped for AOF
     // notification below. This block and the wrapping below it must not be
@@ -85,7 +86,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
         self._notifier_storages[i] = storage.NotifierStorage.init(
             allocator,
             self._default_storages[i].storage(),
-            aof_journal,
+            maybe_aof_journal,
             &self._change_tracker,
             @intCast(i),
         );
@@ -95,13 +96,31 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     self._mem_store = store.MemoryStore.init(
         self._data_storages,
         kgc_snapshot,
-        aof_journal,
+        maybe_aof_journal,
         &self._change_tracker,
     );
     self._store = self._mem_store.store();
 
-    // TODO: if aof is enabled, replay aof through the store
+    // start aof replay
+    if (config.append_only) try loadAof(self, io, allocator);
+
     return self;
+}
+
+fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
+    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
+
+    const journal = aof.journal();
+    journal.beginLoading();
+    defer journal.endLoading();
+
+    const stats = try persistence.AofLoader.replay(io, allocator, &self._store, self._config);
+
+    aof.finishLoading(stats.base_size, stats.incr_bytes);
+
+    // Replay uses the normal storage path, which increments the dirty count.
+    // These changes are already stored in the AOF, so startup begins clean.
+    self._change_tracker.markSaved(time.nowMs(io));
 }
 
 /// Unwinds `create` in reverse. `_store.deinit()` chains through

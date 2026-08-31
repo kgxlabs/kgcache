@@ -30,7 +30,22 @@ const vtable: Journal.VTable = .{
     .finishRewrite = finishRewrite,
     .flush = flush,
     .onWrite = onWrite,
+    .beginLoading = beginLoading,
+    .endLoading = endLoading,
 };
+
+pub fn journal(self: *AofBackend) Journal {
+    return .{
+        .ptr = self,
+        .vtable = &vtable,
+    };
+}
+
+pub fn finishLoading(self: *AofBackend, base_size: u64, incr_bytes: u64) void {
+    self._base_size = base_size;
+    self._incr_bytes = incr_bytes;
+    self._encoder.resetDbTracking();
+}
 
 // TODO: Refactor init. separate concerns
 pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) Journal.Error!AofBackend {
@@ -41,7 +56,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         else => return Journal.Error.FailedToOpenDir,
     };
 
-    const dir = std.Io.Dir.cwd().openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+    const dir = cwd.openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
 
     var incr_seq: u32 = 1;
     var base_size: u64 = 0;
@@ -114,13 +129,6 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     };
 }
 
-pub fn journal(self: *AofBackend) Journal {
-    return .{
-        .ptr = self,
-        .vtable = &vtable,
-    };
-}
-
 pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
@@ -149,6 +157,16 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
         helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
     }
     try flushLocked(self);
+}
+
+pub fn beginLoading(ptr: *anyopaque) void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    self._loading = true;
+}
+
+pub fn endLoading(ptr: *anyopaque) void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    self._loading = false;
 }
 
 pub fn deinit(ptr: *anyopaque) Journal.Error!void {

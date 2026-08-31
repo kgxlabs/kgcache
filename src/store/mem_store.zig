@@ -41,6 +41,7 @@ pub fn store(self: *MemoryStore) Store {
 const vtable = Store.VTable{
     .get = get,
     .set = set,
+    .remove = remove,
     .dbsize = dbsize,
     .numDatabases = numDatabases,
     .save = save,
@@ -94,6 +95,19 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!
     }) catch return Store.Error.SomethingWentWrong;
 
     return makeSetResponse(req, stored_entry.value);
+}
+
+pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!bool {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const storage = self._storages[db_index];
+
+    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    defer tx.end();
+
+    const existed = storage.get(key) catch return Store.Error.SomethingWentWrong;
+    storage.remove(key) catch return Store.Error.SomethingWentWrong;
+
+    return existed != null;
 }
 
 pub fn dbsize(ptr: *anyopaque, db_index: u32) u32 {

@@ -5,6 +5,7 @@ pub const BgSave = @import("commander/bgsave.zig");
 pub const Commander = @import("commander/interface.zig");
 pub const Command = @import("commander/command.zig");
 pub const DBSize = @import("commander/dbsize.zig");
+pub const Del = @import("commander/del.zig");
 pub const Echo = @import("commander/echo.zig");
 pub const Get = @import("commander/get.zig");
 pub const Ping = @import("commander/ping.zig");
@@ -18,6 +19,7 @@ const CommandKind = enum {
     bgsave,
     command,
     dbsize,
+    del,
     echo,
     get,
     ping,
@@ -30,6 +32,7 @@ const CommandKind = enum {
         if (std.ascii.eqlIgnoreCase(keyword, "bgsave")) return .bgsave;
         if (std.ascii.eqlIgnoreCase(keyword, "command")) return .command;
         if (std.ascii.eqlIgnoreCase(keyword, "dbsize")) return .dbsize;
+        if (std.ascii.eqlIgnoreCase(keyword, "del")) return .del;
         if (std.ascii.eqlIgnoreCase(keyword, "echo")) return .echo;
         if (std.ascii.eqlIgnoreCase(keyword, "get")) return .get;
         if (std.ascii.eqlIgnoreCase(keyword, "ping")) return .ping;
@@ -50,6 +53,7 @@ pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander
         .bgsave => try create(BgSave, allocator, arguments),
         .command => try create(Command, allocator, arguments),
         .dbsize => try create(DBSize, allocator, arguments),
+        .del => try create(Del, allocator, arguments),
         .echo => try create(Echo, allocator, arguments),
         .get => try create(Get, allocator, arguments),
         .ping => try create(Ping, allocator, arguments),
