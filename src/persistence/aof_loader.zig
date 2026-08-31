@@ -94,12 +94,14 @@ fn replayFile(
         contents,
         data_store,
         client_state,
+        filename,
     );
 
     switch (result) {
         .complete => return @intCast(contents.len),
         .truncated => |safe_offset| {
             if (!is_last or !config.aof_load_truncated) {
+                helpers.logStderr(io, "aof: unfinished command in {s} at byte {d}\n", .{ filename, safe_offset });
                 return Error.TruncatedAof;
             }
 
@@ -121,7 +123,14 @@ fn replayFile(
     }
 }
 
-fn replayContents(io: std.Io, allocator: std.mem.Allocator, contents: []const u8, data_store: *store.Store, client_state: *ClientState) Error!ReplayResult {
+fn replayContents(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    data_store: *store.Store,
+    client_state: *ClientState,
+    filename: []const u8,
+) Error!ReplayResult {
     var parser = resp.parser(contents);
     while (true) {
         // TODO: we are reaching to the implementation details here. refactor
@@ -130,25 +139,44 @@ fn replayContents(io: std.Io, allocator: std.mem.Allocator, contents: []const u8
             error.Incomplete => {
                 return .{ .truncated = command_start };
             },
-            else => return Error.CorruptAof,
+            else => {
+                helpers.logStderr(
+                    io,
+                    "aof: invalid command in {s} at byte {d}: {s}\n",
+                    .{ filename, command_start, @errorName(err) },
+                );
+                return Error.CorruptAof;
+            },
         };
         const value = maybe_value orelse return .complete;
         defer parser.deinit(allocator, value);
 
         const c = commander.init(allocator, value) catch |err| {
-            helpers.logStderr(io, "aof_loader: Failed to failed to initialize commander: {s}\n", .{@errorName(err)});
-            return Error.CommandFailed;
+            helpers.logStderr(
+                io,
+                "aof: cannot initialize command in {s} at byte {d}: {s}\n",
+                .{ filename, command_start, @errorName(err) },
+            );
+            return Error.FailedToInitCommander;
         };
         defer c.deinit();
 
         const reply = c.execute(io, data_store, client_state) catch |err| {
-            helpers.logStderr(io, "aof: command failed at byte {d}: {s}\n", .{ command_start, @errorName(err) });
+            helpers.logStderr(
+                io,
+                "aof: command failed in {s} at byte {d}: {s}\n",
+                .{ filename, command_start, @errorName(err) },
+            );
             return Error.FailedToExecuteCommand;
         };
 
         switch (reply) {
             .simple_error => |message| {
-                helpers.logStderr(io, "aof: command failed at byte {d}: {s}\n", .{ command_start, message });
+                helpers.logStderr(
+                    io,
+                    "aof: command failed in {s} at byte {d}: {s}\n",
+                    .{ filename, command_start, message },
+                );
                 return Error.FailedToExecuteCommand;
             },
             else => {},
