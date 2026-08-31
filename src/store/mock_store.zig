@@ -6,10 +6,12 @@ const MockStore = @This();
 
 get_result: Store.Error!?object.Object = null,
 set_result: Store.Error!?object.Object = null,
+remove_result: Store.Error!bool = false,
 dbsize_result: u32 = 0,
 num_databases_result: u32 = 1,
 get_calls: usize = 0,
 set_calls: usize = 0,
+remove_calls: usize = 0,
 dbsize_calls: usize = 0,
 save_calls: usize = 0,
 bgsave_calls: usize = 0,
@@ -17,6 +19,7 @@ bgrewriteaof_calls: usize = 0,
 last_get_key: ?[]const u8 = null,
 last_set_key: ?[]const u8 = null,
 last_set_value: ?[]const u8 = null,
+last_remove_key: ?[]const u8 = null,
 
 pub fn init() MockStore {
     return .{};
@@ -32,6 +35,7 @@ pub fn store(self: *MockStore) Store {
 const vtable = Store.VTable{
     .get = get,
     .set = set,
+    .remove = remove,
     .dbsize = dbsize,
     .numDatabases = numDatabases,
     .save = save,
@@ -53,6 +57,13 @@ fn set(ptr: *anyopaque, req: Request.SetRequest, _: u32) Store.Error!?object.Obj
     self.last_set_key = req.key;
     self.last_set_value = req.value;
     return self.set_result;
+}
+
+fn remove(ptr: *anyopaque, key: []const u8, _: u32) Store.Error!bool {
+    const self: *MockStore = @ptrCast(@alignCast(ptr));
+    self.remove_calls += 1;
+    self.last_remove_key = key;
+    return self.remove_result;
 }
 
 fn dbsize(ptr: *anyopaque, _: u32) u32 {
