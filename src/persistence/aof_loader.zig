@@ -141,9 +141,17 @@ fn replayContents(io: std.Io, allocator: std.mem.Allocator, contents: []const u8
         };
         defer c.deinit();
 
-        _ = c.execute(io, data_store, client_state) catch |err| {
-            helpers.logStderr(io, "aof_loader: Failed to execute command: {s}\n", .{@errorName(err)});
+        const reply = c.execute(io, data_store, client_state) catch |err| {
+            helpers.logStderr(io, "aof: command failed at byte {d}: {s}\n", .{ command_start, @errorName(err) });
             return Error.FailedToExecuteCommand;
         };
+
+        switch (reply) {
+            .simple_error => |message| {
+                helpers.logStderr(io, "aof: command failed at byte {d}: {s}\n", .{ command_start, message });
+                return Error.FailedToExecuteCommand;
+            },
+            else => {},
+        }
     }
 }
