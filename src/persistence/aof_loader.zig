@@ -27,12 +27,17 @@ const ReplayResult = union(enum) {
     truncated: usize,
 };
 
-pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) Error!void {
+pub const ReplayStats = struct {
+    base_size: u64 = 0,
+    incr_bytes: u64 = 0,
+};
+
+pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) Error!ReplayStats {
     const cwd = std.Io.Dir.cwd();
     var dir = cwd.openDir(io, config.append_dirname, .{}) catch |err| switch (err) {
         error.FileNotFound => {
             helpers.logStdout(io, "aof: manifest dir not found: {s}\n", .{@errorName(err)});
-            return;
+            return .{};
         },
         else => {
             return Error.FailedToLoadManifestDir;
@@ -47,20 +52,24 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
         allocator,
         dir,
         manifest_name,
-    ) catch return Error.FailedToReadManifest) orelse return;
+    ) catch return Error.FailedToReadManifest) orelse return .{};
     defer manifest.deinit(allocator);
 
     var client_state = ClientState.init();
+    var stats: ReplayStats = .{};
 
     if (manifest.base) |base| {
-        try replayFile(io, allocator, data_store, &client_state, config, dir, base.name, false);
+        stats.base_size = try replayFile(io, allocator, data_store, &client_state, config, dir, base.name, false);
     }
 
     // This is already in ascending order. `Manifest.parse` guarantees it otherwise it will throw `NonAscendingIncrSeq`
     for (manifest.incrs, 0..) |incr, index| {
         const is_last = index + 1 == manifest.incrs.len;
-        try replayFile(io, allocator, data_store, &client_state, config, dir, incr.name, is_last);
+        const size = try replayFile(io, allocator, data_store, &client_state, config, dir, incr.name, is_last);
+        if (is_last) stats.incr_bytes = size;
     }
+
+    return stats;
 }
 
 fn replayFile(
@@ -72,7 +81,7 @@ fn replayFile(
     dir: std.Io.Dir,
     filename: []const u8,
     is_last: bool,
-) Error!void {
+) Error!u64 {
     const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return Error.MissingAofFile,
         error.OutOfMemory => return Error.OutOfMemory,
@@ -88,7 +97,7 @@ fn replayFile(
     );
 
     switch (result) {
-        .complete => {},
+        .complete => return @intCast(contents.len),
         .truncated => |safe_offset| {
             if (!is_last or !config.aof_load_truncated) {
                 return Error.TruncatedAof;
@@ -106,7 +115,8 @@ fn replayFile(
                 return Error.FailedToTruncateAof;
             };
 
-            helpers.logStderr(io, "aof: removed unfinished command from {s} bytes at byte {d}\n", .{ filename, safe_offset });
+            helpers.logStderr(io, "aof: removed unfinished command from {s} at byte {d}\n", .{ filename, safe_offset });
+            return @intCast(safe_offset);
         },
     }
 }

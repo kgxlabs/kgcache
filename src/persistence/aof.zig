@@ -41,6 +41,12 @@ pub fn journal(self: *AofBackend) Journal {
     };
 }
 
+pub fn finishLoading(self: *AofBackend, base_size: u64, incr_bytes: u64) void {
+    self._base_size = base_size;
+    self._incr_bytes = incr_bytes;
+    self._encoder.resetDbTracking();
+}
+
 // TODO: Refactor init. separate concerns
 pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) Journal.Error!AofBackend {
     const cwd = std.Io.Dir.cwd();
