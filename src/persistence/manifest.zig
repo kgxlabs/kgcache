@@ -1,5 +1,4 @@
 const std = @import("std");
-const helpers = @import("../helpers.zig");
 
 pub const Kind = enum { base, incr };
 
@@ -54,7 +53,6 @@ pub const Error = error{
 pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename: []const u8) !?Manifest {
     const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => {
-            helpers.logStdout(io, "aof: manifest file not found: {s}\n", .{@errorName(err)});
             return null;
         },
         error.OutOfMemory => return Error.OutOfMemory,
