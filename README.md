@@ -77,7 +77,7 @@ zig build test
 - The server processes one parsed request per connection read, into a per-connection buffer (1 KiB by default, configurable). Pipelining and requests split across reads are not supported.
 - Argument validation remains incomplete for `PING` and `GET`; extra arguments are accepted.
 - `COMMAND` is a placeholder, not Redis-compatible introspection.
-- The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`.
+- The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`. 
 
 ## License
 No license file is currently included.
