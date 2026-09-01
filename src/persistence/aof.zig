@@ -149,7 +149,7 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
         helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
     }
 
-    if (!self._persistence_state.tryStartAof()) return Journal.Error.RewriteAlreadyInProgress;
+    if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
 
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
@@ -158,22 +158,22 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
     const cwd = std.Io.Dir.cwd();
     cwd.createDir(self._io, self._config.append_dirname, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
-        else => return Journal.Error.FailedToOpenDir,
+        else => return error.FailedToOpenDir,
     };
 
     // read existing manifest
-    const manifest_name = Manifest.manifestName(self._allocator, self._config.append_filename) catch return Journal.Error.FailedToReadManifest;
+    const manifest_name = Manifest.manifestName(self._allocator, self._config.append_filename) catch return error.FailedToReadManifest;
     defer self._allocator.free(manifest_name);
-    const dir = cwd.openDir(self._io, self._config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+    const dir = cwd.openDir(self._io, self._config.append_dirname, .{}) catch return error.FailedToOpenDir;
     const maybe_manifest = Manifest.read(
         self._io,
         self._allocator,
         dir,
         manifest_name,
-    ) catch return Journal.Error.FailedToReadManifest;
+    ) catch return error.FailedToReadManifest;
     if (maybe_manifest == null) {
-        helpers.logStdout(self._io, "aof: cannot find existing manifest file: {s}\n", @errorName(Journal.Error.FailedToRewriteAof));
-        return Journal.Error.FailedToRewriteAof;
+        helpers.logStdout(self._io, "aof: cannot find existing manifest file: {s}\n", .{@errorName(Journal.Error.FailedToRewriteAof)});
+        return error.FailedToRewriteAof;
     }
     const manifest = maybe_manifest.?;
     const base_seq = Manifest.nextSeq(manifest);
@@ -183,12 +183,12 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
         self._allocator,
         self._config.append_filename,
         new_incr_seq,
-    ) catch return Journal.Error.FailedToWriteIncrFile;
+    ) catch return error.FailedToWriteIncrFile;
     defer self._allocator.free(new_incr_name);
 
     const new_incr_file = dir.openFile(self._io, new_incr_name, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => dir.createFile(self._io, new_incr_name, .{}) catch return Journal.Error.FailedToOpenIncrFile,
-        else => return Journal.Error.FailedToOpenIncrFile,
+        error.FileNotFound => dir.createFile(self._io, new_incr_name, .{}) catch return error.FailedToOpenIncrFile,
+        else => return error.FailedToOpenIncrFile,
     };
 
     // add new incr file to the list by allocating memory
@@ -201,15 +201,15 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
         .seq = new_incr_seq,
         .kind = .incr,
     };
-    try Manifest.write(
+    Manifest.write(
         self._io,
         self._allocator,
         dir,
         manifest_name,
         .{ .base = manifest.base, .incrs = updated_incrs },
     ) catch {
-        helpers.logStderr(self._io, "aof: failed to rewrite manifest file: {s}\n", @errorName(Journal.Error.FailedToWriteManifest));
-        return Journal.Error.FailedToWriteManifest;
+        helpers.logStderr(self._io, "aof: failed to rewrite manifest file: {s}\n", .{@errorName(Journal.Error.FailedToWriteManifest)});
+        return error.FailedToWriteManifest;
     };
 
     // switch file handle and reset db so that we can start from scratch for new incr file
