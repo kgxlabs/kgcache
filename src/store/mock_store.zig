@@ -19,6 +19,9 @@ bgrewriteaof_calls: usize = 0,
 last_get_key: ?[]const u8 = null,
 last_set_key: ?[]const u8 = null,
 last_set_value: ?[]const u8 = null,
+last_set_value_copy: [256]u8 = @splat(0),
+last_set_value_len: usize = 0,
+last_set_db: ?u32 = null,
 last_remove_key: ?[]const u8 = null,
 
 pub fn init() MockStore {
@@ -51,11 +54,16 @@ fn get(ptr: *anyopaque, key: []const u8, _: u32) Store.Error!?object.Object {
     return self.get_result;
 }
 
-fn set(ptr: *anyopaque, req: Request.SetRequest, _: u32) Store.Error!?object.Object {
+fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.set_calls += 1;
     self.last_set_key = req.key;
     self.last_set_value = req.value;
+    if (req.value.len <= self.last_set_value_copy.len) {
+        @memcpy(self.last_set_value_copy[0..req.value.len], req.value);
+        self.last_set_value_len = req.value.len;
+    }
+    self.last_set_db = db_index;
     return self.set_result;
 }
 

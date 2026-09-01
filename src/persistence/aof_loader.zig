@@ -192,3 +192,169 @@ fn nextLegacyBulk(parser: *resp.Parser, allocator: std.mem.Allocator) Error!resp
         else => Error.CorruptAof,
     };
 }
+
+const MockStore = @import("../store/mock_store.zig");
+const testing = std.testing;
+
+const select_db_1 = "*2\r\n$6\r\nSELECT\r\n$1\r\n1\r\n";
+const set_key_base = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$4\r\nbase\r\n";
+const set_key_first = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nfirst\r\n";
+const set_key_final = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nfinal\r\n";
+const truncated_set = "*3\r\n$3\r\nSET\r\n$3\r\nbad\r\n$5\r\npar";
+
+fn withReplayDir(comptime name: []const u8, comptime testFn: fn (std.Io, std.Io.Dir, Config) anyerror!void) !void {
+    const io = testing.io;
+    const cwd = std.Io.Dir.cwd();
+
+    cwd.deleteTree(io, name) catch {};
+    defer cwd.deleteTree(io, name) catch {};
+
+    try cwd.createDir(io, name, .default_dir);
+    var dir = try cwd.openDir(io, name, .{});
+    defer dir.close(io);
+
+    var config = Config.default();
+    config.append_dirname = name;
+    try testFn(io, dir, config);
+}
+
+fn writeThreeFileManifest(io: std.Io, dir: std.Io.Dir) !void {
+    try dir.writeFile(io, .{
+        .sub_path = "appendonly.aof.manifest",
+        .data = "file appendonly.aof.1.base seq 1 type b\n" ++
+            "file appendonly.aof.2.incr seq 2 type i\n" ++
+            "file appendonly.aof.3.incr seq 3 type i\n",
+    });
+}
+
+fn writeSingleIncrManifest(io: std.Io, dir: std.Io.Dir) !void {
+    try dir.writeFile(io, .{
+        .sub_path = "appendonly.aof.manifest",
+        .data = "file appendonly.aof.1.incr seq 1 type i\n",
+    });
+}
+
+test "replay of a base and two incrs applies them in manifest order" {
+    try withReplayDir("scratch-aof-replay-manifest-order", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeThreeFileManifest(io, dir);
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.base", .data = set_key_base });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.incr", .data = set_key_first });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = set_key_final });
+
+            var mock = MockStore.init();
+            mock.num_databases_result = 16;
+            var data_store = mock.store();
+            _ = try replay(io, testing.allocator, &data_store, config);
+
+            try testing.expectEqual(3, mock.set_calls);
+            try testing.expectEqualStrings("final", mock.last_set_value_copy[0..mock.last_set_value_len]);
+        }
+    }.run);
+}
+
+test "replay honours SELECT across files" {
+    try withReplayDir("scratch-aof-replay-select-across-files", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try dir.writeFile(io, .{
+                .sub_path = "appendonly.aof.manifest",
+                .data = "file appendonly.aof.1.base seq 1 type b\n" ++
+                    "file appendonly.aof.2.incr seq 2 type i\n",
+            });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.base", .data = select_db_1 });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.incr", .data = set_key_final });
+
+            var mock = MockStore.init();
+            mock.num_databases_result = 16;
+            var data_store = mock.store();
+            _ = try replay(io, testing.allocator, &data_store, config);
+
+            try testing.expectEqual(@as(?u32, 1), mock.last_set_db);
+        }
+    }.run);
+}
+
+test "a truncated final command is truncated away and the load succeeds" {
+    try withReplayDir("scratch-aof-replay-truncated-final", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            const good = set_key_final;
+            try dir.writeFile(io, .{
+                .sub_path = "appendonly.aof.1.incr",
+                .data = good ++ truncated_set,
+            });
+
+            var mock = MockStore.init();
+            mock.num_databases_result = 16;
+            var data_store = mock.store();
+            const stats = try replay(io, testing.allocator, &data_store, config);
+
+            const file = try dir.openFile(io, "appendonly.aof.1.incr", .{});
+            defer file.close(io);
+            try testing.expectEqual(@as(u64, good.len), try file.length(io));
+            try testing.expectEqual(@as(u64, good.len), stats.incr_bytes);
+            try testing.expectEqual(1, mock.set_calls);
+        }
+    }.run);
+}
+
+test "a truncated final command fails the load when aof-load-truncated is no" {
+    try withReplayDir("scratch-aof-replay-truncated-disabled", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, original_config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = truncated_set });
+
+            var config = original_config;
+            config.aof_load_truncated = false;
+            var mock = MockStore.init();
+            var data_store = mock.store();
+            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
+        }
+    }.run);
+}
+
+test "truncation in the base file is fatal even with aof-load-truncated yes" {
+    try withReplayDir("scratch-aof-replay-truncated-base", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try dir.writeFile(io, .{
+                .sub_path = "appendonly.aof.manifest",
+                .data = "file appendonly.aof.1.base seq 1 type b\n" ++
+                    "file appendonly.aof.2.incr seq 2 type i\n",
+            });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.base", .data = truncated_set });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.incr", .data = "" });
+
+            var mock = MockStore.init();
+            var data_store = mock.store();
+            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
+        }
+    }.run);
+}
+
+test "a manifest naming a missing file is fatal" {
+    try withReplayDir("scratch-aof-replay-missing-file", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+
+            var mock = MockStore.init();
+            var data_store = mock.store();
+            try testing.expectError(Error.MissingAofFile, replay(io, testing.allocator, &data_store, config));
+        }
+    }.run);
+}
+
+test "an unknown command in the file is fatal" {
+    try withReplayDir("scratch-aof-replay-unknown-command", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            try dir.writeFile(io, .{
+                .sub_path = "appendonly.aof.1.incr",
+                .data = "*1\r\n$7\r\nUNKNOWN\r\n",
+            });
+
+            var mock = MockStore.init();
+            var data_store = mock.store();
+            try testing.expectError(Error.FailedToInitCommander, replay(io, testing.allocator, &data_store, config));
+        }
+    }.run);
+}
