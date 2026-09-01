@@ -329,8 +329,10 @@ fn serializeArray(allocator: std.mem.Allocator, maybe_value: ?[]RESPValue) RESPE
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(allocator);
 
-    // TODO: Implement
     const values = maybe_value.?;
+    const header = std.fmt.allocPrint(allocator, "*{d}\r\n", .{values.len}) catch return RESPError.TooLong;
+    defer allocator.free(header);
+    list.appendSlice(allocator, header) catch return RESPError.TooLong;
     for (values) |item| {
         const serialized_value = try switch (item) {
             .bulk_string => |bs| serializeBulkString(allocator, bs),
@@ -435,7 +437,7 @@ test "serialize array" {
         .{ .bulk_string = "hello" },
     };
 
-    try expectSerialized(.{ .array = &values }, "$4\r\nECHO\r\n$5\r\nhello\r\n");
+    try expectSerialized(.{ .array = &values }, "*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n");
 }
 
 test "reject unknown RESP type" {
