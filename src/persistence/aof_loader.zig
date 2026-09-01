@@ -183,3 +183,12 @@ fn replayContents(
         }
     }
 }
+
+fn nextLegacyBulk(parser: *resp.Parser, allocator: std.mem.Allocator) Error!resp.RESPValue {
+    const value = parser.next(allocator) catch return Error.TruncatedAof;
+    const parsed = value orelse return Error.TruncatedAof;
+    return switch (parsed) {
+        .bulk_string => parsed,
+        else => Error.CorruptAof,
+    };
+}
