@@ -274,3 +274,112 @@ test "create with appendonly off still loads the kgc snapshot" {
         .string => |str| try testing.expectEqualStrings("bar", str),
     }
 }
+
+fn writeReplayFixture(io: std.Io, dirname: []const u8, contents: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDir(io, dirname, .default_dir);
+    var dir = try cwd.openDir(io, dirname, .{});
+    defer dir.close(io);
+
+    try dir.writeFile(io, .{
+        .sub_path = "appendonly.aof.manifest",
+        .data = "file appendonly.aof.1.incr seq 1 type i\n",
+    });
+    try dir.writeFile(io, .{
+        .sub_path = "appendonly.aof.1.incr",
+        .data = contents,
+    });
+}
+
+test "replay does not append to the file it is replaying" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-replay-no-append";
+    const command = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+    try writeReplayFixture(testing.io, dirname, command);
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    defer server.destroy();
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    const file = try dir.openFile(testing.io, "appendonly.aof.1.incr", .{});
+    defer file.close(testing.io);
+    try testing.expectEqual(@as(u64, command.len), try file.length(testing.io));
+}
+
+test "replay leaves the dirty count at zero" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-replay-clean";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+    try writeReplayFixture(
+        testing.io,
+        dirname,
+        "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+    );
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    defer server.destroy();
+
+    try testing.expectEqual(0, server._change_tracker._dirty.load(.monotonic));
+}
+
+test "writes survive a simulated restart" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-restart";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+    config.append_fsync = .always;
+
+    const expires_at = time.nowMs(testing.io) + 60_000;
+    {
+        const first = try Server.create(testing.io, testing.allocator, config);
+        _ = try first._store.set(.{
+            .key = "persistent",
+            .value = "one",
+            .condition = null,
+            .expires_at = null,
+            .keepttl = false,
+            .response = null,
+        }, 0);
+        _ = try first._store.set(.{
+            .key = "expiring",
+            .value = "two",
+            .condition = null,
+            .expires_at = expires_at,
+            .keepttl = false,
+            .response = null,
+        }, 1);
+        first.destroy();
+    }
+
+    const second = try Server.create(testing.io, testing.allocator, config);
+    defer second.destroy();
+
+    const persistent = try second._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("one", persistent.string);
+    const expiring = try second._store.get("expiring", 1) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("two", expiring.string);
+    const expiration = try second._data_storages[1].getExp("expiring") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(expires_at, expiration.expires_at);
+}
