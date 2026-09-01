@@ -142,7 +142,81 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     }
 }
 
-pub fn bgRewrite(_: *anyopaque) Journal.Error!void {
+pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    errdefer |err| {
+        self._last_write_failed = true;
+        helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
+    }
+
+    if (!self._persistence_state.tryStartAof()) return Journal.Error.RewriteAlreadyInProgress;
+
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
+    try flushLocked(self);
+
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDir(self._io, self._config.append_dirname, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return Journal.Error.FailedToOpenDir,
+    };
+
+    // read existing manifest
+    const manifest_name = Manifest.manifestName(self._allocator, self._config.append_filename) catch return Journal.Error.FailedToReadManifest;
+    defer self._allocator.free(manifest_name);
+    const dir = cwd.openDir(self._io, self._config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+    const maybe_manifest = Manifest.read(
+        self._io,
+        self._allocator,
+        dir,
+        manifest_name,
+    ) catch return Journal.Error.FailedToReadManifest;
+    if (maybe_manifest == null) {
+        helpers.logStdout(self._io, "aof: cannot find existing manifest file: {s}\n", @errorName(Journal.Error.FailedToRewriteAof));
+        return Journal.Error.FailedToRewriteAof;
+    }
+    const manifest = maybe_manifest.?;
+    const base_seq = Manifest.nextSeq(manifest);
+    const new_incr_seq = base_seq + 1;
+
+    const new_incr_name = Manifest.incrName(
+        self._allocator,
+        self._config.append_filename,
+        new_incr_seq,
+    ) catch return Journal.Error.FailedToWriteIncrFile;
+    defer self._allocator.free(new_incr_name);
+
+    const new_incr_file = dir.openFile(self._io, new_incr_name, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => dir.createFile(self._io, new_incr_name, .{}) catch return Journal.Error.FailedToOpenIncrFile,
+        else => return Journal.Error.FailedToOpenIncrFile,
+    };
+
+    // add new incr file to the list by allocating memory
+    const updated_incrs = try self._allocator.alloc(Manifest.Entry, manifest.incrs.len + 1);
+    defer self._allocator.free(updated_incrs);
+
+    std.mem.copyForwards(Manifest.Entry, updated_incrs[0..manifest.incrs.len], manifest.incrs);
+    updated_incrs[manifest.incrs.len] = .{
+        .name = new_incr_name,
+        .seq = new_incr_seq,
+        .kind = .incr,
+    };
+    try Manifest.write(
+        self._io,
+        self._allocator,
+        dir,
+        manifest_name,
+        .{ .base = manifest.base, .incrs = updated_incrs },
+    ) catch {
+        helpers.logStderr(self._io, "aof: failed to rewrite manifest file: {s}\n", @errorName(Journal.Error.FailedToWriteManifest));
+        return Journal.Error.FailedToWriteManifest;
+    };
+
+    // switch file handle and reset db so that we can start from scratch for new incr file
+    self._file = new_incr_file;
+    self._incr_seq = new_incr_seq;
+    self._encoder.resetDbTracking();
+
     return;
 }
 
@@ -156,6 +230,9 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
         self._last_write_failed = true;
         helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
     }
+
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
     try flushLocked(self);
 }
 
@@ -184,10 +261,9 @@ pub fn deinit(ptr: *anyopaque) Journal.Error!void {
     self._buffer.deinit(self._allocator);
 }
 
+// TODO: this flush locked itself does not claim append lock but remind callers to claim it
+// Naming is confusing. Improve it.
 fn flushLocked(self: *AofBackend) Journal.Error!void {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     const file = self._file orelse return Journal.Error.FailedToWriteIncrFile;
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
