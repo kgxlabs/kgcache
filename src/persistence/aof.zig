@@ -17,7 +17,13 @@ _persistence_state: *PersistenceState,
 _config: Config,
 // Live incr file handle, will keep the file handle for the lifetime of the process (we can because we open it in append mode)
 _file: ?std.Io.File,
+// incr_bytes is pure information and accounting state only. we will use file_offset whenever we need to append with seek
+// They diverge only when we have multiple incr files (new incr file opening before child process fork).
+// After successful rewrite, they become equal again.
+// Total bytes across all incr files named by the live manifest.
 _incr_bytes: u64,
+// Current length of the live incr file, used as the next write offset.
+_file_offset: u64,
 _incr_seq: u32,
 _base_size: u64,
 _last_write_failed: bool = false,
@@ -41,9 +47,10 @@ pub fn journal(self: *AofBackend) Journal {
     };
 }
 
-pub fn finishLoading(self: *AofBackend, base_size: u64, incr_bytes: u64) void {
+pub fn finishLoading(self: *AofBackend, base_size: u64, incr_bytes: u64, file_offset: u64) void {
     self._base_size = base_size;
     self._incr_bytes = incr_bytes;
+    self._file_offset = file_offset;
     self._encoder.resetDbTracking();
 }
 
@@ -60,6 +67,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
 
     var incr_seq: u32 = 1;
     var base_size: u64 = 0;
+    var incr_bytes: u64 = 0;
     const read_manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToReadManifest;
     defer allocator.free(read_manifest_name);
 
@@ -76,6 +84,12 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         const maybe_live_incr = Manifest.liveIncr(manifest);
         if (maybe_live_incr) |live_incr| {
             incr_seq = live_incr.seq;
+        }
+
+        for (manifest.incrs) |incr| {
+            const incr_file = dir.openFile(io, incr.name, .{}) catch return Journal.Error.FailedToOpenIncrFile;
+            defer incr_file.close(io);
+            incr_bytes += incr_file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
         }
 
         if (manifest.base) |base_entry| {
@@ -114,7 +128,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         else => return Journal.Error.FailedToOpenIncrFile,
     };
 
-    const incr_bytes = file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
+    const file_offset = file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
 
     return .{
         ._io = io,
@@ -125,6 +139,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         ._incr_seq = incr_seq,
         ._file = file,
         ._incr_bytes = incr_bytes,
+        ._file_offset = file_offset,
         ._base_size = base_size,
     };
 }
@@ -165,6 +180,8 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
     const manifest_name = Manifest.manifestName(self._allocator, self._config.append_filename) catch return error.FailedToReadManifest;
     defer self._allocator.free(manifest_name);
     const dir = cwd.openDir(self._io, self._config.append_dirname, .{}) catch return error.FailedToOpenDir;
+    defer dir.close(self._io);
+
     const maybe_manifest = Manifest.read(
         self._io,
         self._allocator,
@@ -176,9 +193,10 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
         return error.FailedToRewriteAof;
     }
     const manifest = maybe_manifest.?;
+    defer manifest.deinit(self._allocator);
+
     const base_seq = Manifest.nextSeq(manifest);
     const new_incr_seq = base_seq + 1;
-
     const new_incr_name = Manifest.incrName(
         self._allocator,
         self._config.append_filename,
@@ -190,6 +208,7 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
         error.FileNotFound => dir.createFile(self._io, new_incr_name, .{}) catch return error.FailedToOpenIncrFile,
         else => return error.FailedToOpenIncrFile,
     };
+    errdefer new_incr_file.close(self._io);
 
     // add new incr file to the list by allocating memory
     const updated_incrs = try self._allocator.alloc(Manifest.Entry, manifest.incrs.len + 1);
@@ -213,9 +232,12 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
     };
 
     // switch file handle and reset db so that we can start from scratch for new incr file
+    const old_file = self._file;
     self._file = new_incr_file;
     self._incr_seq = new_incr_seq;
+    self._file_offset = 0;
     self._encoder.resetDbTracking();
+    if (old_file) |file| file.close(self._io);
 
     return;
 }
@@ -268,7 +290,7 @@ fn flushLocked(self: *AofBackend) Journal.Error!void {
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
     // NOTE: We need to go to the exact bytes because new fresh writer starts at pos 0.
-    file_writer.seekTo(self._incr_bytes) catch return Journal.Error.FailedToWriteIncrFile;
+    file_writer.seekTo(self._file_offset) catch return Journal.Error.FailedToWriteIncrFile;
     file_writer.interface.writeAll(self._buffer.items) catch return Journal.Error.FailedToWriteIncrFile;
     file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
 
@@ -277,6 +299,7 @@ fn flushLocked(self: *AofBackend) Journal.Error!void {
     }
 
     self._incr_bytes += self._buffer.items.len;
+    self._file_offset += self._buffer.items.len;
     self._buffer.clearRetainingCapacity();
     self._last_write_failed = false;
 }
@@ -330,6 +353,7 @@ test "init creates the append directory and a seq-1 manifest on first boot" {
             try testing.expectEqual(1, backend._incr_seq);
             try testing.expectEqual(0, backend._base_size);
             try testing.expectEqual(0, backend._incr_bytes);
+            try testing.expectEqual(0, backend._file_offset);
 
             const manifest = try Manifest.read(io, testing.allocator, dir, "appendonly.aof.manifest") orelse return error.TestUnexpectedResult;
             defer manifest.deinit(testing.allocator);
@@ -410,6 +434,7 @@ test "init reopens the existing live incr file and appends after its existing co
             defer backend2.journal().deinit() catch {};
 
             try testing.expectEqual(before.len, backend2._incr_bytes);
+            try testing.expectEqual(before.len, backend2._file_offset);
 
             try backend2.journal().onWrite(sampleEvent());
             try backend2.journal().flush(0);
@@ -434,6 +459,8 @@ test "init picks the highest-seq incr from a manifest with several" {
                 .{ .name = "appendonly.aof.3.incr", .seq = 3, .kind = .incr },
             };
             try Manifest.write(io, testing.allocator, dir, "appendonly.aof.manifest", .{ .base = null, .incrs = &incrs });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = "old" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.incr", .data = "older" });
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = "existing" });
 
             var state = PersistenceState.init(io, false);
@@ -443,7 +470,43 @@ test "init picks the highest-seq incr from a manifest with several" {
             defer backend.journal().deinit() catch {};
 
             try testing.expectEqual(3, backend._incr_seq);
-            try testing.expectEqual(8, backend._incr_bytes);
+            try testing.expectEqual(16, backend._incr_bytes);
+            try testing.expectEqual(8, backend._file_offset);
+        }
+    }.run);
+}
+
+test "rewrite cut preserves total incr bytes and resets the live file offset" {
+    try withScratchDir("scratch-aof-rewrite-cut-byte-accounting", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-rewrite-cut-byte-accounting" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+
+            try backend.journal().onWrite(sampleEvent());
+            try backend.journal().flush(0);
+            const old_total = backend._incr_bytes;
+            try testing.expect(old_total > 0);
+            try testing.expectEqual(old_total, backend._file_offset);
+
+            try backend.journal().bgRewrite();
+            try testing.expectEqual(old_total, backend._incr_bytes);
+            try testing.expectEqual(0, backend._file_offset);
+
+            try backend.journal().onWrite(sampleEvent());
+            try backend.journal().flush(0);
+
+            const new_incr_name = try Manifest.incrName(testing.allocator, config.append_filename, backend._incr_seq);
+            defer testing.allocator.free(new_incr_name);
+            const new_incr_file = try dir.openFile(io, new_incr_name, .{});
+            defer new_incr_file.close(io);
+            const new_incr_size = try new_incr_file.length(io);
+
+            try testing.expectEqual(new_incr_size, backend._file_offset);
+            try testing.expectEqual(old_total + new_incr_size, backend._incr_bytes);
         }
     }.run);
 }

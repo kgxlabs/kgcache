@@ -116,7 +116,7 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
 
     const stats = try persistence.AofLoader.replay(io, allocator, &self._store, self._config);
 
-    aof.finishLoading(stats.base_size, stats.incr_bytes);
+    aof.finishLoading(stats.base_size, stats.incr_bytes, stats.file_offset);
 
     // Replay uses the normal storage path, which increments the dirty count.
     // These changes are already stored in the AOF, so startup begins clean.

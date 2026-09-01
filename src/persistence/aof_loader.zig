@@ -29,7 +29,10 @@ const ReplayResult = union(enum) {
 
 pub const ReplayStats = struct {
     base_size: u64 = 0,
+    /// Total bytes across every incremental file in the manifest.
     incr_bytes: u64 = 0,
+    /// Final incremental file length, used as the live writer's offset.
+    file_offset: u64 = 0,
 };
 
 pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) Error!ReplayStats {
@@ -66,7 +69,8 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
     for (manifest.incrs, 0..) |incr, index| {
         const is_last = index + 1 == manifest.incrs.len;
         const size = try replayFile(io, allocator, data_store, &client_state, config, dir, incr.name, is_last);
-        if (is_last) stats.incr_bytes = size;
+        stats.incr_bytes += size;
+        if (is_last) stats.file_offset = size;
     }
 
     return stats;
