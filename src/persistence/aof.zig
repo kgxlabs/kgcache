@@ -239,7 +239,38 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
     self._encoder.resetDbTracking();
     if (old_file) |file| file.close(self._io);
 
-    return;
+    // start the fork
+    const rc = std.posix.system.fork();
+    const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AGAIN, .NOMEM => {
+            self._persistence_state.finishKgc();
+            return Journal.Error.FailedToRewriteAof;
+        },
+        else => |err| {
+            self._persistence_state.finishKgc();
+            return std.posix.unexpectedErrno(err) catch Journal.Error.FailedToRewriteAof;
+        },
+    };
+
+    if (pid == 0) {
+        // A background child has no business holding the parent's stdin/stdout
+        // open -- besides not needing them, keeping a duplicate fd around
+        // delays the OS from ever delivering EOF on them to whatever the
+        // parent's other end is (a terminal, a log pipe, or -- as seen under
+        // `zig build test` -- the build system's own IPC channel), even
+        // after the parent itself has moved on. stderr stays open since the
+        // failure path below deliberately writes to it.
+        _ = std.c.close(std.posix.STDIN_FILENO);
+        _ = std.c.close(std.posix.STDOUT_FILENO);
+        // TODO: write base file as command
+
+        // never reutrn . do not fall back into caller's connection loop since this is a child process now
+        // using _exit to sidestep clearing the buffered data (at the time of fork) completely
+        std.c._exit(0);
+    }
+
+    self._persistence_state.setAofPid(pid);
 }
 
 pub fn finishRewrite(_: *anyopaque, _: bool) Journal.Error!void {
