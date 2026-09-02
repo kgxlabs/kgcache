@@ -238,6 +238,30 @@ fn writeSingleIncrManifest(io: std.Io, dir: std.Io.Dir) !void {
     });
 }
 
+const StderrGuard = struct {
+    saved: std.posix.fd_t,
+    devnull: std.posix.fd_t,
+
+    fn silence() !StderrGuard {
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull < 0) return error.OpenDevNullFailed;
+        errdefer _ = std.c.close(devnull);
+
+        const saved = std.c.dup(std.posix.STDERR_FILENO);
+        if (saved < 0) return error.DupFailed;
+        errdefer _ = std.c.close(saved);
+
+        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
+        return .{ .saved = saved, .devnull = devnull };
+    }
+
+    fn restore(self: StderrGuard) void {
+        _ = std.c.dup2(self.saved, std.posix.STDERR_FILENO);
+        _ = std.c.close(self.saved);
+        _ = std.c.close(self.devnull);
+    }
+};
+
 test "replay of a base and two incrs applies them in manifest order" {
     try withReplayDir("scratch-aof-replay-manifest-order", struct {
         fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
@@ -291,6 +315,8 @@ test "a truncated final command is truncated away and the load succeeds" {
             var mock = MockStore.init();
             mock.num_databases_result = 16;
             var data_store = mock.store();
+            const stderr_guard = try StderrGuard.silence();
+            defer stderr_guard.restore();
             const stats = try replay(io, testing.allocator, &data_store, config);
 
             const file = try dir.openFile(io, "appendonly.aof.1.incr", .{});
@@ -312,6 +338,8 @@ test "a truncated final command fails the load when aof-load-truncated is no" {
             config.aof_load_truncated = false;
             var mock = MockStore.init();
             var data_store = mock.store();
+            const stderr_guard = try StderrGuard.silence();
+            defer stderr_guard.restore();
             try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
         }
     }.run);
@@ -330,6 +358,8 @@ test "truncation in the base file is fatal even with aof-load-truncated yes" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
+            const stderr_guard = try StderrGuard.silence();
+            defer stderr_guard.restore();
             try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
         }
     }.run);
@@ -358,6 +388,8 @@ test "an unknown command in the file is fatal" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
+            const stderr_guard = try StderrGuard.silence();
+            defer stderr_guard.restore();
             try testing.expectError(Error.FailedToInitCommander, replay(io, testing.allocator, &data_store, config));
         }
     }.run);

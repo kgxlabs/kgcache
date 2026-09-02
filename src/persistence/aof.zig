@@ -677,6 +677,15 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
             try testing.expectEqual(old_total, backend._incr_bytes);
             try testing.expectEqual(0, backend._file_offset);
 
+            var reap_result: PersistenceState.ReapResult = .running;
+            var tries: usize = 0;
+            while (reap_result == .running) {
+                reap_result = state.reapAof();
+                tries += 1;
+                if (tries > 100_000) return error.ChildNeverReaped;
+            }
+            try testing.expectEqual(PersistenceState.ReapResult.succeeded, reap_result);
+
             try backend.journal().onWrite(sampleEvent());
             try backend.journal().flush(0);
 
