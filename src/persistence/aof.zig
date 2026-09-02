@@ -318,6 +318,7 @@ fn beginBase(self: *AofBackend, seq: u32) Journal.Error!void {
         self._config.append_filename,
         seq,
     ) catch return Journal.Error.OutOfMemory;
+    defer self._allocator.free(base_name);
 
     const cwd = std.Io.Dir.cwd();
     const dir = cwd.openDir(
@@ -358,7 +359,21 @@ fn visitBaseEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?
 }
 
 fn writeBaseEntry(self: *AofBackend, db_index: u32, key: []const u8, value: object.Object, exp: ?time.UnixMs) Journal.Error!void {
-    // TODO: Encode the commands needed to reconstruct this entry.
+    const encoder = if (self._base_encoder) |*base_encoder|
+        base_encoder
+    else
+        return Journal.Error.FailedToRewriteAof;
+
+    const encoded = encoder.encodeRewriteEntry(self._allocator, .{
+        .db_index = db_index,
+        .key = key,
+        .value = value,
+        .expires_at = exp,
+    }) catch return Journal.Error.OutOfMemory;
+    defer encoder.deinit(self._allocator, encoded.bytes);
+
+    self._base_buffer.appendSlice(self._allocator, encoded.bytes) catch return Journal.Error.FailedBufferAppend;
+    encoder.commitDb(encoded.db_index);
 }
 
 // TODO: Refactor this and flushLocked. some of the logics are duplciated
@@ -446,7 +461,7 @@ fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void 
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
-    const encoded = self._encoder.encode(self._allocator, event) catch return Journal.Error.OutOfMemory;
+    const encoded = self._encoder.encodeWriteEvent(self._allocator, event) catch return Journal.Error.OutOfMemory;
     defer self._encoder.deinit(self._allocator, encoded.bytes);
 
     self._buffer.appendSlice(self._allocator, encoded.bytes) catch return Journal.Error.FailedBufferAppend;
@@ -707,9 +722,9 @@ test "concurrent onWrite from several threads loses no bytes" {
             // First encode on a fresh encoder includes a SELECT; the second
             // (same db) doesn't, matching backend's own first-vs-rest split.
             var sample_encoder = AofEncoder.init();
-            const first_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
+            const first_encoded = try sample_encoder.encodeWriteEvent(testing.allocator, sampleEvent());
             sample_encoder.commitDb(first_encoded.db_index);
-            const second_encoded = try sample_encoder.encode(testing.allocator, sampleEvent());
+            const second_encoded = try sample_encoder.encodeWriteEvent(testing.allocator, sampleEvent());
             const per_write_len = second_encoded.bytes.len;
             const select_len = first_encoded.bytes.len - per_write_len;
             sample_encoder.deinit(testing.allocator, first_encoded.bytes);
