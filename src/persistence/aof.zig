@@ -31,6 +31,7 @@ _incr_seq: u32,
 //NOTE: base file is only for child rewrite. never use it in parent
 _base_file: ?std.Io.File = null,
 _base_file_offset: u64 = 0,
+_base_buffer: std.ArrayList(u8) = .empty,
 _base_encoder: ?AofEncoder = null,
 _base_size: u64,
 _last_write_failed: bool = false,
@@ -289,6 +290,8 @@ const BaseEntryVisitor = struct {
     db_index: u32,
 };
 
+// TODO: we are doing command based `base rewrite`for simplicity sake.
+// For faster load time, Refactor to .kgc dump rewrite.
 fn writeBase(self: *AofBackend, storages: []const Storage, base_seq: u32) Journal.Error!void {
     try self.beginBase(base_seq);
 
@@ -354,12 +357,27 @@ fn visitBaseEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?
     try visitor.backend.writeBaseEntry(visitor.db_index, key, value, exp);
 }
 
-fn writeBaseEntry(_: *AofBackend, _: u32, _: []const u8, _: object.Object, _: ?time.UnixMs) Journal.Error!void {
+fn writeBaseEntry(self: *AofBackend, db_index: u32, key: []const u8, value: object.Object, exp: ?time.UnixMs) Journal.Error!void {
     // TODO: Encode the commands needed to reconstruct this entry.
 }
 
-fn endBase(_: *AofBackend) Journal.Error!void {
-    // TODO: Flush and sync the completed base file.
+// TODO: Refactor this and flushLocked. some of the logics are duplciated
+fn endBase(self: *AofBackend) Journal.Error!void {
+    const file = self._base_file orelse return Journal.Error.FailedToRewriteAof;
+    var write_buf: [1024]u8 = undefined;
+    var file_writer = file.writer(self._io, &write_buf);
+
+    file_writer.seekTo(self._base_file_offset) catch return Journal.Error.FailedToWriteIncrFile;
+    file_writer.interface.writeAll(self._base_buffer.items) catch return Journal.Error.FailedToWriteIncrFile;
+    file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
+
+    file.sync(self._io) catch return Journal.Error.FailedToRewriteAof;
+
+    file.close(self._io);
+    self._base_file = null;
+    self._base_file_offset = 0;
+    self._base_buffer.clearRetainingCapacity();
+    self._base_encoder = null;
 }
 
 pub fn finishRewrite(_: *anyopaque, _: bool) Journal.Error!void {

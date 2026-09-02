@@ -59,6 +59,7 @@ const Command = union(enum) {
 };
 
 const CommandItem = struct { items: []resp.RESPValue, owned: ?[]const u8 = null };
+// TODO: Refactor this. too bloated with implementation details
 fn toCommandItems(allocator: std.mem.Allocator, cmd: Command) Error!CommandItem {
     return switch (cmd) {
         .select => |db_index| blk: {
