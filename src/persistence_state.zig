@@ -2,6 +2,12 @@ const std = @import("std");
 
 const PersistenceState = @This();
 
+pub const ReapResult = enum {
+    running,
+    succeeded,
+    failed,
+};
+
 _io: std.Io,
 _mutex: std.Io.Mutex = .init,
 _kgc_in_progress: bool = false,
@@ -64,26 +70,28 @@ pub fn finishAof(self: *PersistenceState) void {
     self._aof_in_progress = false;
 }
 
-pub fn reapKgc(self: *PersistenceState) bool {
+pub fn reapKgc(self: *PersistenceState) ReapResult {
     return self.reapPid("kgc", &self._kgc_pid, &self._kgc_in_progress);
 }
 
-pub fn reapAof(self: *PersistenceState) void {
-    _ = self.reapPid("aof", &self._aof_pid, &self._aof_in_progress);
+pub fn reapAof(self: *PersistenceState) ReapResult {
+    return self.reapPid("aof", &self._aof_pid, &self._aof_in_progress);
 }
 
 // returns bool flag to indicate if a child finished (succeeded or failed) save or still running
 // True => finished saving (failed or succeeded)
 // False => still saving
 // This is will retry only on NEXT RULE MATCH instead of failed save being retried on every tick of cron job
-fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) bool {
+fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) ReapResult {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
-    const pid = maybe_pid.* orelse return false;
+
+    const pid = maybe_pid.* orelse return .failed;
+
     var status: c_int = undefined;
     const r = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
     // Child porcess is still running
-    if (r == 0) return false;
+    if (r == 0) return .running;
     maybe_pid.* = null;
     in_progress.* = false;
 
@@ -98,10 +106,10 @@ fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid
         ) catch "kgcache: background save child exited with a failure status\n";
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
         // even though this is triggered but failed scenario, we will reset the tracker
-        return true;
+        return .failed;
     }
 
-    return true;
+    return .succeeded;
 }
 
 test "tryStartKgc blocks a second start until finishKgc releases it" {
@@ -191,7 +199,7 @@ test "reapKgc leaves state untouched while the child is still running" {
     _ = std.c.close(fds[0]);
     state.setKgcPid(pid);
 
-    try testing.expect(!state.reapKgc());
+    try testing.expect(state.reapKgc() == .running);
     try testing.expect(state._kgc_in_progress);
     try testing.expect(state._kgc_pid != null);
 
