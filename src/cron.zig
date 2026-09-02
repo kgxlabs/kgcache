@@ -33,8 +33,16 @@ pub fn run(
 
         if (maybe_aof) |aof| {
             const aof_result = persistence_state.reapAof();
-            if (aof_result == .succeeded) {
-                try aof.finishRewrite(aof_result);
+            if (aof_result != .running) {
+                aof.finishRewrite(aof_result) catch |err| {
+                    var buf: [160]u8 = undefined;
+                    const message = std.fmt.bufPrint(
+                        &buf,
+                        "kgcache: failed to finish AOF rewrite: {s}\n",
+                        .{@errorName(err)},
+                    ) catch "kgcache: failed to finish AOF rewrite\n";
+                    std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+                };
             }
         }
 

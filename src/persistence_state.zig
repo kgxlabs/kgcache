@@ -78,15 +78,14 @@ pub fn reapAof(self: *PersistenceState) ReapResult {
     return self.reapPid("aof", &self._aof_pid, &self._aof_in_progress);
 }
 
-// returns bool flag to indicate if a child finished (succeeded or failed) save or still running
-// True => finished saving (failed or succeeded)
-// False => still saving
-// This is will retry only on NEXT RULE MATCH instead of failed save being retried on every tick of cron job
+// A completed child is reported exactly once. With no pid there is no
+// completion event, so callers receive .running and do no follow-up work.
 fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) ReapResult {
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
 
-    const pid = maybe_pid.* orelse return .failed;
+    // No pid means there is no completion event for the caller to handle.
+    const pid = maybe_pid.* orelse return .running;
 
     var status: c_int = undefined;
     const r = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
@@ -96,14 +95,22 @@ fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid
     in_progress.* = false;
 
     const status_bits: u32 = @bitCast(status);
-    // If child process exited normally with non-zero exit code, std err
-    if (std.c.W.IFEXITED(status_bits) and std.c.W.EXITSTATUS(status_bits) != 0) {
+    // Only a normal zero exit proves the child completed its persistence
+    // work. A non-zero exit or signal termination must never publish output.
+    if (!std.c.W.IFEXITED(status_bits) or std.c.W.EXITSTATUS(status_bits) != 0) {
         var buf: [128]u8 = undefined;
-        const message = std.fmt.bufPrint(
-            &buf,
-            "kgcache: {s} background save child exited with status {d}\n",
-            .{ name, std.c.W.EXITSTATUS(status_bits) },
-        ) catch "kgcache: background save child exited with a failure status\n";
+        const message = if (std.c.W.IFEXITED(status_bits))
+            std.fmt.bufPrint(
+                &buf,
+                "kgcache: {s} background save child exited with status {d}\n",
+                .{ name, std.c.W.EXITSTATUS(status_bits) },
+            ) catch "kgcache: background save child exited with a failure status\n"
+        else
+            std.fmt.bufPrint(
+                &buf,
+                "kgcache: {s} background save child terminated abnormally\n",
+                .{name},
+            ) catch "kgcache: background save child terminated abnormally\n";
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
         // even though this is triggered but failed scenario, we will reset the tracker
         return .failed;

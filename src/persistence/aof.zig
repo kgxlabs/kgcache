@@ -34,9 +34,7 @@ _base_file_offset: u64 = 0,
 _base_buffer: std.ArrayList(u8) = .empty,
 _base_encoder: ?AofEncoder = null,
 _base_size: u64,
-// incoming seq for rewrite
 _pending_base_seq: ?u32 = null,
-_pending_incr_seq: ?u32 = null,
 _last_write_failed: bool = false,
 _loading: bool = false,
 _buffer: std.ArrayList(u8) = .empty,
@@ -248,11 +246,6 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     self._incr_seq = new_incr_seq;
     self._file_offset = 0;
     self._encoder.resetDbTracking();
-
-    // set seq
-    self._pending_base_seq = base_seq;
-    self._pending_incr_seq = new_incr_seq;
-
     if (old_file) |file| file.close(self._io);
 
     // start the fork
@@ -290,6 +283,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
         std.c._exit(0);
     }
 
+    self._pending_base_seq = base_seq;
     self._persistence_state.setAofPid(pid);
 }
 
@@ -405,26 +399,59 @@ fn endBase(self: *AofBackend) Journal.Error!void {
 
 pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    if (self._pending_base_seq == null) return Journal.Error.FailedToFinishAofRewrite;
-    const pending_base_seq = self._pending_base_seq.?;
+    if (reap_result == .running) return Journal.Error.FailedToRewriteAof;
 
-    if (reap_result != .succeeded) {
-        // TODO: delete pending base, clean up pending rewrite
-    }
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
 
-    const base_name = Manifest.baseName(
-        self._allocator,
-        self._config.append_filename,
-        pending_base_seq,
-    ) catch return Journal.Error.FailedToFinishAofRewrite;
-    defer self._allocator.free(base_name);
+    const base_seq = self._pending_base_seq orelse return Journal.Error.FailedToRewriteAof;
+    defer self._pending_base_seq = null;
 
-    const dir = std.Io.Dir.cwd().openDir(
+    const cwd = std.Io.Dir.cwd();
+    const dir = cwd.openDir(
         self._io,
         self._config.append_dirname,
         .{},
     ) catch return Journal.Error.FailedToOpenDir;
     defer dir.close(self._io);
+
+    const base_name = Manifest.baseName(
+        self._allocator,
+        self._config.append_filename,
+        base_seq,
+    ) catch return Journal.Error.OutOfMemory;
+    defer self._allocator.free(base_name);
+
+    if (reap_result == .failed) {
+        dir.deleteFile(self._io, base_name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return Journal.Error.FailedToRewriteAof,
+        };
+        helpers.logStderr(self._io, "aof: rewrite failed; keeping the cut manifest and live incremental file\n", .{});
+        return;
+    }
+
+    const manifest_name = Manifest.manifestName(
+        self._allocator,
+        self._config.append_filename,
+    ) catch return Journal.Error.OutOfMemory;
+    defer self._allocator.free(manifest_name);
+
+    const maybe_manifest = Manifest.read(
+        self._io,
+        self._allocator,
+        dir,
+        manifest_name,
+    ) catch return Journal.Error.FailedToReadManifest;
+    const manifest = maybe_manifest orelse
+        return Journal.Error.FailedToReadManifest;
+    defer manifest.deinit(self._allocator);
+
+    const live_incr = Manifest.liveIncr(manifest) orelse
+        return Journal.Error.FailedToRewriteAof;
+    if (live_incr.seq != self._incr_seq or live_incr.seq != base_seq + 1) {
+        return Journal.Error.FailedToRewriteAof;
+    }
 
     const base_file = dir.openFile(
         self._io,
@@ -433,11 +460,51 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     ) catch return Journal.Error.FailedToOpenBase;
     defer base_file.close(self._io);
 
-    // NOTE: base_size could still be `zero` . that is okay and valid since there can be empty dataset
-    const base_len = base_file.length(self._io) catch return Journal.Error.FailedToOpenBase;
-    self._base_size = base_len;
+    // A command-based base can legitimately be empty when there are no live
+    // entries, so existence and readable metadata are the sanity checks.
+    const base_size = base_file.length(self._io) catch
+        return Journal.Error.FailedToOpenBase;
 
-    return;
+    const live_file = self._file orelse return Journal.Error.FailedToOpenIncrFile;
+    const live_incr_size = live_file.length(self._io) catch
+        return Journal.Error.FailedToOpenIncrFile;
+
+    const new_base: Manifest.Entry = .{
+        .name = base_name,
+        .seq = base_seq,
+        .kind = .base,
+    };
+    var new_incrs = [_]Manifest.Entry{live_incr};
+
+    Manifest.write(
+        self._io,
+        self._allocator,
+        dir,
+        manifest_name,
+        .{ .base = new_base, .incrs = &new_incrs },
+    ) catch return Journal.Error.FailedToWriteManifest;
+
+    // delete old base and incrs files
+    var delete_failed = false;
+    if (manifest.base) |old_base| {
+        dir.deleteFile(self._io, old_base.name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => delete_failed = true,
+        };
+    }
+    for (manifest.incrs) |old_incr| {
+        if (old_incr.seq == live_incr.seq) continue;
+        dir.deleteFile(self._io, old_incr.name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => delete_failed = true,
+        };
+    }
+
+    // reset base size and incr bytes to new base and live incr
+    self._base_size = base_size;
+    self._incr_bytes = live_incr_size;
+
+    if (delete_failed) return Journal.Error.FailedToRewriteAof;
 }
 
 pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
@@ -532,6 +599,30 @@ fn withScratchDir(comptime name: []const u8, comptime testFn: fn (std.Io, std.Io
 
     try testFn(io, dir);
 }
+
+const TestStderrGuard = struct {
+    saved: std.posix.fd_t,
+    devnull: std.posix.fd_t,
+
+    fn silence() !TestStderrGuard {
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull < 0) return error.OpenDevNullFailed;
+        errdefer _ = std.c.close(devnull);
+
+        const saved = std.c.dup(std.posix.STDERR_FILENO);
+        if (saved < 0) return error.DupFailed;
+        errdefer _ = std.c.close(saved);
+
+        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
+        return .{ .saved = saved, .devnull = devnull };
+    }
+
+    fn restore(self: TestStderrGuard) void {
+        _ = std.c.dup2(self.saved, std.posix.STDERR_FILENO);
+        _ = std.c.close(self.saved);
+        _ = std.c.close(self.devnull);
+    }
+};
 
 test "init creates the append directory and a seq-1 manifest on first boot" {
     try withScratchDir("scratch-aof-init-first-boot", struct {
@@ -738,6 +829,107 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
 
             try testing.expectEqual(new_incr_size, backend._file_offset);
             try testing.expectEqual(old_total + new_incr_size, backend._incr_bytes);
+        }
+    }.run);
+}
+
+test "successful finishRewrite publishes the new base and removes retired files" {
+    try withScratchDir("scratch-aof-finish-rewrite-success", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-finish-rewrite-success" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+
+            try backend.journal().onWrite(sampleEvent());
+            try backend.journal().flush(0);
+
+            const new_live_file = try dir.createFile(io, "appendonly.aof.3.incr", .{});
+            backend._file.?.close(io);
+            backend._file = new_live_file;
+            backend._incr_seq = 3;
+            backend._file_offset = 0;
+            backend._encoder.resetDbTracking();
+            backend._pending_base_seq = 2;
+
+            var cut_incrs = [_]Manifest.Entry{
+                .{ .name = "appendonly.aof.1.incr", .seq = 1, .kind = .incr },
+                .{ .name = "appendonly.aof.3.incr", .seq = 3, .kind = .incr },
+            };
+            try Manifest.write(io, testing.allocator, dir, "appendonly.aof.manifest", .{
+                .base = null,
+                .incrs = &cut_incrs,
+            });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.base", .data = "base" });
+
+            try backend.journal().onWrite(sampleEvent());
+            try backend.journal().flush(0);
+            const live_size = backend._file_offset;
+
+            try backend.journal().finishRewrite(.succeeded);
+
+            const manifest = try Manifest.read(
+                io,
+                testing.allocator,
+                dir,
+                "appendonly.aof.manifest",
+            ) orelse return error.TestUnexpectedResult;
+            defer manifest.deinit(testing.allocator);
+
+            try testing.expectEqual(@as(u32, 2), manifest.base.?.seq);
+            try testing.expectEqualStrings("appendonly.aof.2.base", manifest.base.?.name);
+            try testing.expectEqual(@as(usize, 1), manifest.incrs.len);
+            try testing.expectEqual(@as(u32, 3), manifest.incrs[0].seq);
+            try testing.expectError(error.FileNotFound, dir.openFile(io, "appendonly.aof.1.incr", .{}));
+            try testing.expectEqual(@as(u64, 4), backend._base_size);
+            try testing.expectEqual(live_size, backend._incr_bytes);
+            try testing.expect(backend._pending_base_seq == null);
+        }
+    }.run);
+}
+
+test "failed finishRewrite removes the orphan base and preserves the cut manifest" {
+    try withScratchDir("scratch-aof-finish-rewrite-failure", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-finish-rewrite-failure" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+
+            var cut_incrs = [_]Manifest.Entry{
+                .{ .name = "appendonly.aof.1.incr", .seq = 1, .kind = .incr },
+                .{ .name = "appendonly.aof.3.incr", .seq = 3, .kind = .incr },
+            };
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = "" });
+            try Manifest.write(io, testing.allocator, dir, "appendonly.aof.manifest", .{
+                .base = null,
+                .incrs = &cut_incrs,
+            });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.base", .data = "partial" });
+            backend._pending_base_seq = 2;
+
+            const stderr_guard = try TestStderrGuard.silence();
+            defer stderr_guard.restore();
+            try backend.journal().finishRewrite(.failed);
+
+            const manifest = try Manifest.read(
+                io,
+                testing.allocator,
+                dir,
+                "appendonly.aof.manifest",
+            ) orelse return error.TestUnexpectedResult;
+            defer manifest.deinit(testing.allocator);
+
+            try testing.expect(manifest.base == null);
+            try testing.expectEqual(@as(usize, 2), manifest.incrs.len);
+            try testing.expectEqual(@as(u32, 1), manifest.incrs[0].seq);
+            try testing.expectEqual(@as(u32, 3), manifest.incrs[1].seq);
+            try testing.expectError(error.FileNotFound, dir.openFile(io, "appendonly.aof.2.base", .{}));
+            try testing.expect(backend._pending_base_seq == null);
         }
     }.run);
 }
