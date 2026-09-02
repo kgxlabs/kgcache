@@ -395,7 +395,7 @@ fn endBase(self: *AofBackend) Journal.Error!void {
     self._base_encoder = null;
 }
 
-pub fn finishRewrite(_: *anyopaque, _: bool) Journal.Error!void {
+pub fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) Journal.Error!void {
     return;
 }
 

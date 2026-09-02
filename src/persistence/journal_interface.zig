@@ -1,6 +1,7 @@
 const std = @import("std");
 const object = @import("../object.zig");
 const Storage = @import("../storage/interface.zig");
+const PersistenceState = @import("../persistence_state.zig");
 const time = @import("../time.zig");
 
 const JournalPersistence = @This();
@@ -35,7 +36,7 @@ pub const VTable = struct {
     onWrite: *const fn (*anyopaque, WriteEvent) Error!void,
     flush: *const fn (*anyopaque, i64) Error!void,
     bgRewrite: *const fn (*anyopaque, []const Storage) Error!void,
-    finishRewrite: *const fn (*anyopaque, bool) Error!void,
+    finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) Error!void,
     beginLoading: *const fn (*anyopaque) void,
     endLoading: *const fn (*anyopaque) void,
     deinit: *const fn (*anyopaque) Error!void,
@@ -53,8 +54,8 @@ pub fn bgRewrite(self: JournalPersistence, storages: []const Storage) Error!void
     return self.vtable.bgRewrite(self.ptr, storages);
 }
 
-pub fn finishRewrite(self: JournalPersistence, child_succeeded: bool) Error!void {
-    return self.vtable.finishRewrite(self.ptr, child_succeeded);
+pub fn finishRewrite(self: JournalPersistence, reap_result: PersistenceState.ReapResult) Error!void {
+    return self.vtable.finishRewrite(self.ptr, reap_result);
 }
 
 pub fn beginLoading(self: JournalPersistence) void {

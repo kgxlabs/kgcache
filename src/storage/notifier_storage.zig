@@ -9,6 +9,7 @@ const entry = @import("../entry.zig");
 const object = @import("../object.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
+const PersistenceState = @import("../persistence_state.zig");
 const ChangeTracker = @import("../change_tracker.zig");
 const DefaultStorage = @import("default_storage.zig");
 
@@ -271,7 +272,7 @@ const FailingJournal = struct {
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
-    fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
+    fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
     fn journalDeinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
@@ -349,7 +350,7 @@ const RecordingJournal = struct {
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
-    fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
+    fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
     fn journalDeinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}

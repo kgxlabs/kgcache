@@ -15,7 +15,7 @@ pub fn run(
     persistence_state: *PersistenceState,
     change_tracker: *ChangeTracker,
     data_store: *store.Store,
-    _: ?persistence.JournalPersistence,
+    maybe_aof: ?persistence.JournalPersistence,
     config: Config,
 ) !void {
     const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
@@ -26,11 +26,17 @@ pub fn run(
         start = try expiration.runRound(io, allocator, data_storages, start, config);
 
         // clean up forked child processes if any
-        const finished_kgc_save = persistence_state.reapKgc();
-        if (finished_kgc_save) {
+        const kg_result = persistence_state.reapKgc();
+        if (kg_result != .running) {
             change_tracker.markSaved(time.nowMs(io));
         }
-        persistence_state.reapAof();
+
+        if (maybe_aof) |aof| {
+            const aof_result = persistence_state.reapAof();
+            if (aof_result == .succeeded) {
+                try aof.finishRewrite(aof_result);
+            }
+        }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
     }
@@ -93,7 +99,8 @@ test "a completed background save resets the change tracker once reaped, not bef
     // child has actually been observed to exit, not at bgsave()'s call site.
     var tries: usize = 0;
     while (persistence_state._kgc_in_progress) {
-        if (persistence_state.reapKgc()) {
+        const reap_result = persistence_state.reapKgc();
+        if (reap_result != .running) {
             change_tracker.markSaved(time.nowMs(testing.io));
         }
         tries += 1;
@@ -143,7 +150,8 @@ test "a failed background save still resets the change tracker" {
 
     var tries: usize = 0;
     while (persistence_state._kgc_in_progress) {
-        if (persistence_state.reapKgc()) {
+        const reap_result = persistence_state.reapKgc();
+        if (reap_result != .running) {
             change_tracker.markSaved(time.nowMs(testing.io));
         }
         tries += 1;
