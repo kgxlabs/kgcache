@@ -232,7 +232,7 @@ test "a failed write does not commit its db, so the next write still gets a SELE
     try testing.expect(std.mem.indexOf(u8, second.bytes, "SELECT") != null);
 }
 
-test "a rewrite entry encodes the complete string value as SET" {
+test "a rewrite entry encodes the complete string value as SET with PXAT" {
     const testing = std.testing;
     var encoder = AofEncoder.init();
 
@@ -244,7 +244,62 @@ test "a rewrite entry encodes the complete string value as SET" {
     });
     defer encoder.deinit(testing.allocator, encoded.bytes);
 
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "SELECT") != null);
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "SET") != null);
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "PXAT") != null);
+    try testing.expectEqualStrings(
+        "*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n" ++
+            "*5\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$4\r\nPXAT\r\n$3\r\n123\r\n",
+        encoded.bytes,
+    );
+}
+
+test "a rewrite entry without expiry encodes a plain SET" {
+    const testing = std.testing;
+    var encoder = AofEncoder.init();
+
+    const encoded = try encoder.encodeRewriteEntry(testing.allocator, .{
+        .db_index = 0,
+        .key = "key",
+        .value = .{ .string = "value" },
+        .expires_at = null,
+    });
+    defer encoder.deinit(testing.allocator, encoded.bytes);
+
+    try testing.expectEqualStrings(
+        "*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n" ++
+            "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+        encoded.bytes,
+    );
+}
+
+test "rewrite entries track SELECT independently through commitDb" {
+    const testing = std.testing;
+    var encoder = AofEncoder.init();
+
+    const first = try encoder.encodeRewriteEntry(testing.allocator, .{
+        .db_index = 1,
+        .key = "first",
+        .value = .{ .string = "one" },
+        .expires_at = null,
+    });
+    defer encoder.deinit(testing.allocator, first.bytes);
+    encoder.commitDb(first.db_index);
+
+    const same_db = try encoder.encodeRewriteEntry(testing.allocator, .{
+        .db_index = 1,
+        .key = "second",
+        .value = .{ .string = "two" },
+        .expires_at = null,
+    });
+    defer encoder.deinit(testing.allocator, same_db.bytes);
+
+    const other_db = try encoder.encodeRewriteEntry(testing.allocator, .{
+        .db_index = 2,
+        .key = "third",
+        .value = .{ .string = "three" },
+        .expires_at = null,
+    });
+    defer encoder.deinit(testing.allocator, other_db.bytes);
+
+    try testing.expect(std.mem.indexOf(u8, first.bytes, "SELECT") != null);
+    try testing.expect(std.mem.indexOf(u8, same_db.bytes, "SELECT") == null);
+    try testing.expect(std.mem.indexOf(u8, other_db.bytes, "SELECT") != null);
 }

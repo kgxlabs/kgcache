@@ -564,6 +564,34 @@ test "onWrite alone leaves the file untouched" {
     }.run);
 }
 
+test "writeBaseEntry buffers reconstruction commands and commits the selected db" {
+    try withScratchDir("scratch-aof-write-base-entry", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            _ = dir;
+            const testing = std.testing;
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-write-base-entry" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            defer backend._base_buffer.deinit(testing.allocator);
+            backend._base_encoder = AofEncoder.init();
+
+            try backend.writeBaseEntry(3, "first", .{ .string = "one" }, null);
+            try backend.writeBaseEntry(3, "second", .{ .string = "two" }, 456);
+
+            const contents = backend._base_buffer.items;
+            try testing.expectEqual(@as(usize, 1), std.mem.count(u8, contents, "SELECT"));
+            try testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "SET"));
+            try testing.expect(std.mem.indexOf(u8, contents, "first") != null);
+            try testing.expect(std.mem.indexOf(u8, contents, "second") != null);
+            try testing.expect(std.mem.indexOf(u8, contents, "PXAT") != null);
+            try testing.expect(std.mem.indexOf(u8, contents, "456") != null);
+        }
+    }.run);
+}
+
 test "init reopens the existing live incr file and appends after its existing contents rather than truncating it" {
     try withScratchDir("scratch-aof-reopen-no-truncate", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
