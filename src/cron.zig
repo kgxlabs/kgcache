@@ -32,22 +32,29 @@ pub fn run(
         }
 
         if (maybe_aof) |aof| {
-            const aof_result = persistence_state.reapAof();
-            if (aof_result != .running) {
-                aof.finishRewrite(aof_result) catch |err| {
-                    var buf: [160]u8 = undefined;
-                    const message = std.fmt.bufPrint(
-                        &buf,
-                        "kgcache: failed to finish AOF rewrite: {s}\n",
-                        .{@errorName(err)},
-                    ) catch "kgcache: failed to finish AOF rewrite\n";
-                    std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
-                };
-            }
+            finishAofIfCompleted(io, aof, persistence_state.reapAof());
         }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
     }
+}
+
+fn finishAofIfCompleted(
+    io: std.Io,
+    aof: persistence.JournalPersistence,
+    reap_result: PersistenceState.ReapResult,
+) void {
+    if (reap_result == .running) return;
+
+    aof.finishRewrite(reap_result) catch |err| {
+        var buf: [160]u8 = undefined;
+        const message = std.fmt.bufPrint(
+            &buf,
+            "kgcache: failed to finish AOF rewrite: {s}\n",
+            .{@errorName(err)},
+        ) catch "kgcache: failed to finish AOF rewrite\n";
+        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+    };
 }
 
 fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *store.Store, config: Config) void {
@@ -74,6 +81,76 @@ fn writeOneKey(data_store: *store.Store) !void {
         .keepttl = false,
         .response = null,
     }, 0);
+}
+
+const FinishRewriteJournal = struct {
+    calls: usize = 0,
+    last_result: ?PersistenceState.ReapResult = null,
+    fail: bool = false,
+
+    const vtable: persistence.JournalPersistence.VTable = .{
+        .onWrite = onWrite,
+        .flush = flush,
+        .bgRewrite = bgRewrite,
+        .finishRewrite = finishRewrite,
+        .beginLoading = beginLoading,
+        .endLoading = endLoading,
+        .deinit = deinit,
+    };
+
+    fn journal(self: *FinishRewriteJournal) persistence.JournalPersistence {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
+    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque, _: []const storage.Interface) persistence.JournalPersistence.Error!void {}
+
+    fn finishRewrite(ptr: *anyopaque, result: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {
+        const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        self.last_result = result;
+        if (self.fail) return error.FailedToRewriteAof;
+    }
+
+    fn beginLoading(_: *anyopaque) void {}
+    fn endLoading(_: *anyopaque) void {}
+    fn deinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+};
+
+test "cron forwards failed AOF completion and ignores a running child" {
+    const testing = std.testing;
+    var backend = FinishRewriteJournal{};
+    const journal = backend.journal();
+
+    finishAofIfCompleted(testing.io, journal, .running);
+    try testing.expectEqual(@as(usize, 0), backend.calls);
+
+    finishAofIfCompleted(testing.io, journal, .failed);
+    try testing.expectEqual(@as(usize, 1), backend.calls);
+    try testing.expectEqual(PersistenceState.ReapResult.failed, backend.last_result.?);
+}
+
+test "cron swallows finishRewrite errors" {
+    const testing = std.testing;
+    var backend = FinishRewriteJournal{ .fail = true };
+
+    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+    if (devnull < 0) return error.OpenDevNullFailed;
+    defer _ = std.c.close(devnull);
+
+    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+    if (saved_stderr < 0) return error.DupFailed;
+    defer {
+        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+        _ = std.c.close(saved_stderr);
+    }
+    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+    finishAofIfCompleted(testing.io, backend.journal(), .succeeded);
+
+    try testing.expectEqual(@as(usize, 1), backend.calls);
+    try testing.expectEqual(PersistenceState.ReapResult.succeeded, backend.last_result.?);
 }
 
 test "a completed background save resets the change tracker once reaped, not before" {
