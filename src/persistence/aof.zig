@@ -17,6 +17,7 @@ _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
 _persistence_state: *PersistenceState,
 _config: Config,
+//NOTE: base file is only for parent process. never use it in child fork
 // Live incr file handle, will keep the file handle for the lifetime of the process (we can because we open it in append mode)
 _file: ?std.Io.File,
 // incr_bytes is pure information and accounting state only. we will use file_offset whenever we need to append with seek
@@ -27,6 +28,10 @@ _incr_bytes: u64,
 // Current length of the live incr file, used as the next write offset.
 _file_offset: u64,
 _incr_seq: u32,
+//NOTE: base file is only for child rewrite. never use it in parent
+_base_file: ?std.Io.File = null,
+_base_file_offset: u64 = 0,
+_base_encoder: ?AofEncoder = null,
 _base_size: u64,
 _last_write_failed: bool = false,
 _loading: bool = false,
@@ -300,8 +305,48 @@ fn writeBase(self: *AofBackend, storages: []const Storage, base_seq: u32) Journa
     try self.endBase();
 }
 
-fn beginBase(_: *AofBackend, _: u32) Journal.Error!void {
-    // TODO: Create the base file and initialize rewrite output.
+fn beginBase(self: *AofBackend, seq: u32) Journal.Error!void {
+    if (self._base_file != null) {
+        return Journal.Error.FailedToOpenBase;
+    }
+
+    const base_name = Manifest.baseName(
+        self._allocator,
+        self._config.append_filename,
+        seq,
+    ) catch return Journal.Error.OutOfMemory;
+
+    const cwd = std.Io.Dir.cwd();
+    const dir = cwd.openDir(
+        self._io,
+        self._config.append_dirname,
+        .{},
+    ) catch return Journal.Error.FailedToOpenDir;
+    defer dir.close(self._io);
+
+    // createFile will truncates an existing file with the same name.
+    // This is intentional to clean up any previous failed rewrite
+    const base_file = dir.createFile(
+        self._io,
+        base_name,
+        .{},
+    ) catch return Journal.Error.FailedToOpenBase;
+    errdefer base_file.close(self._io);
+
+    // NOTE: This is to make sure the following things
+    // 1. This will avoid wasting file descriptor
+    // 2. OS wont fully release the file descriptor if something is still using it.
+    //    in our case both parent and child can hold a file descriptor. if we do not close it for child here, it wont be fully released by OS
+    //    even when parent close it unless we close it for child (in reaping mechanism) as well
+    //  3. closing now will prevent accidental rewrite. child must only write to base_file and never _file
+    if (self._file) |incr_file| {
+        incr_file.close(self._io);
+        self._file = null;
+    }
+
+    self._base_file = base_file;
+    self._base_file_offset = 0;
+    self._base_encoder = AofEncoder.init();
 }
 
 fn visitBaseEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void {
