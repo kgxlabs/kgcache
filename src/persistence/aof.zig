@@ -35,6 +35,7 @@ _base_buffer: std.ArrayList(u8) = .empty,
 _base_encoder: ?AofEncoder = null,
 _base_size: u64,
 _pending_base_seq: ?u32 = null,
+_last_rewrite_attempt_ms: ?time.UnixMs = null,
 _last_write_failed: bool = false,
 _loading: bool = false,
 _buffer: std.ArrayList(u8) = .empty,
@@ -174,6 +175,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     }
 
     if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
+    self._last_rewrite_attempt_ms = time.nowMs(self._io);
 
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
@@ -423,6 +425,7 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     defer self._allocator.free(base_name);
 
     if (reap_result == .failed) {
+        self._last_rewrite_attempt_ms = time.nowMs(self._io);
         dir.deleteFile(self._io, base_name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return Journal.Error.FailedToRewriteAof,
@@ -503,6 +506,7 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     // reset base size and incr bytes to new base and live incr
     self._base_size = base_size;
     self._incr_bytes = live_incr_size;
+    self._last_rewrite_attempt_ms = null;
 
     if (delete_failed) return Journal.Error.FailedToRewriteAof;
 }
@@ -853,6 +857,7 @@ test "successful finishRewrite publishes the new base and removes retired files"
             backend._file_offset = 0;
             backend._encoder.resetDbTracking();
             backend._pending_base_seq = 2;
+            backend._last_rewrite_attempt_ms = 1;
 
             var cut_incrs = [_]Manifest.Entry{
                 .{ .name = "appendonly.aof.1.incr", .seq = 1, .kind = .incr },
@@ -886,6 +891,7 @@ test "successful finishRewrite publishes the new base and removes retired files"
             try testing.expectEqual(@as(u64, 4), backend._base_size);
             try testing.expectEqual(live_size, backend._incr_bytes);
             try testing.expect(backend._pending_base_seq == null);
+            try testing.expect(backend._last_rewrite_attempt_ms == null);
         }
     }.run);
 }
@@ -911,6 +917,7 @@ test "failed finishRewrite removes the orphan base and preserves the cut manifes
             });
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.base", .data = "partial" });
             backend._pending_base_seq = 2;
+            backend._last_rewrite_attempt_ms = 1;
 
             const stderr_guard = try TestStderrGuard.silence();
             defer stderr_guard.restore();
@@ -930,6 +937,7 @@ test "failed finishRewrite removes the orphan base and preserves the cut manifes
             try testing.expectEqual(@as(u32, 3), manifest.incrs[1].seq);
             try testing.expectError(error.FileNotFound, dir.openFile(io, "appendonly.aof.2.base", .{}));
             try testing.expect(backend._pending_base_seq == null);
+            try testing.expect(backend._last_rewrite_attempt_ms.? > 1);
         }
     }.run);
 }
