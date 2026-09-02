@@ -1,5 +1,6 @@
 const std = @import("std");
 const object = @import("../object.zig");
+const Storage = @import("../storage/interface.zig");
 const time = @import("../time.zig");
 
 const JournalPersistence = @This();
@@ -22,6 +23,7 @@ pub const Error = error{
     FailedToOpenBase,
     FailedBufferAppend,
     FailedToCloseAof,
+    FailedToRewriteAof,
 };
 
 pub const WriteEvent = union(enum) {
@@ -32,7 +34,7 @@ pub const WriteEvent = union(enum) {
 pub const VTable = struct {
     onWrite: *const fn (*anyopaque, WriteEvent) Error!void,
     flush: *const fn (*anyopaque, i64) Error!void,
-    bgRewrite: *const fn (*anyopaque) Error!void,
+    bgRewrite: *const fn (*anyopaque, []const Storage) Error!void,
     finishRewrite: *const fn (*anyopaque, bool) Error!void,
     beginLoading: *const fn (*anyopaque) void,
     endLoading: *const fn (*anyopaque) void,
@@ -47,8 +49,8 @@ pub fn flush(self: JournalPersistence, now_ms: i64) Error!void {
     return self.vtable.flush(self.ptr, now_ms);
 }
 
-pub fn bgRewrite(self: JournalPersistence) Error!void {
-    return self.vtable.bgRewrite(self.ptr);
+pub fn bgRewrite(self: JournalPersistence, storages: []const Storage) Error!void {
+    return self.vtable.bgRewrite(self.ptr, storages);
 }
 
 pub fn finishRewrite(self: JournalPersistence, child_succeeded: bool) Error!void {

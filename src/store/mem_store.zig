@@ -134,7 +134,7 @@ pub fn bgsave(ptr: *anyopaque) Store.Error!void {
 pub fn bgrewriteaof(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const aof = self._aof orelse return Store.Error.AofDisabled;
-    aof.bgRewrite() catch return Store.Error.UnableToRewriteAof;
+    aof.bgRewrite(self._storages) catch return Store.Error.UnableToRewriteAof;
 }
 
 fn shouldSkipIfExist(maybe_condition: ?Request.SetCondition) bool {

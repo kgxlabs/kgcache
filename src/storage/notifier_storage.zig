@@ -270,7 +270,7 @@ const FailingJournal = struct {
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
-    fn bgRewrite(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
     fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
@@ -348,7 +348,7 @@ const RecordingJournal = struct {
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
-    fn bgRewrite(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
     fn finishRewrite(_: *anyopaque, _: bool) persistence.JournalPersistence.Error!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
