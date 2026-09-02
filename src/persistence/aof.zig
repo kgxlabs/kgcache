@@ -2,6 +2,8 @@ const std = @import("std");
 const Journal = @import("./journal_interface.zig");
 const AofEncoder = @import("../codec/aof_encoder.zig");
 const Manifest = @import("../persistence/manifest.zig");
+const Storage = @import("../storage/interface.zig");
+const object = @import("../object.zig");
 const PersistenceState = @import("../persistence_state.zig");
 const Config = @import("../config.zig");
 const time = @import("../time.zig");
@@ -157,7 +159,7 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     }
 }
 
-pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
+pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     errdefer |err| {
         self._last_write_failed = true;
@@ -244,12 +246,12 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .AGAIN, .NOMEM => {
-            self._persistence_state.finishKgc();
-            return Journal.Error.FailedToRewriteAof;
+            self._persistence_state.finishAof();
+            return error.FailedToRewriteAof;
         },
-        else => |err| {
-            self._persistence_state.finishKgc();
-            return std.posix.unexpectedErrno(err) catch Journal.Error.FailedToRewriteAof;
+        else => {
+            self._persistence_state.finishAof();
+            return error.FailedToRewriteAof;
         },
     };
 
@@ -263,7 +265,11 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
         // failure path below deliberately writes to it.
         _ = std.c.close(std.posix.STDIN_FILENO);
         _ = std.c.close(std.posix.STDOUT_FILENO);
-        // TODO: write base file as command
+
+        self.writeBase(storages, base_seq) catch |err| {
+            helpers.logStderr(self._io, "aof: background rewrite failed: {s}\n", .{@errorName(err)});
+            std.c._exit(1);
+        };
 
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
         // using _exit to sidestep clearing the buffered data (at the time of fork) completely
@@ -271,6 +277,44 @@ pub fn bgRewrite(ptr: *anyopaque) Journal.Error!void {
     }
 
     self._persistence_state.setAofPid(pid);
+}
+
+const BaseEntryVisitor = struct {
+    backend: *AofBackend,
+    db_index: u32,
+};
+
+fn writeBase(self: *AofBackend, storages: []const Storage, base_seq: u32) Journal.Error!void {
+    try self.beginBase(base_seq);
+
+    for (storages, 0..) |storage, db_index| {
+        if (storage.size() == 0) continue;
+
+        var visitor: BaseEntryVisitor = .{
+            .backend = self,
+            .db_index = @intCast(db_index),
+        };
+        storage.forEach(&visitor, visitBaseEntry) catch return Journal.Error.FailedToRewriteAof;
+    }
+
+    try self.endBase();
+}
+
+fn beginBase(_: *AofBackend, _: u32) Journal.Error!void {
+    // TODO: Create the base file and initialize rewrite output.
+}
+
+fn visitBaseEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void {
+    const visitor: *BaseEntryVisitor = @ptrCast(@alignCast(ctx));
+    try visitor.backend.writeBaseEntry(visitor.db_index, key, value, exp);
+}
+
+fn writeBaseEntry(_: *AofBackend, _: u32, _: []const u8, _: object.Object, _: ?time.UnixMs) Journal.Error!void {
+    // TODO: Encode the commands needed to reconstruct this entry.
+}
+
+fn endBase(_: *AofBackend) Journal.Error!void {
+    // TODO: Flush and sync the completed base file.
 }
 
 pub fn finishRewrite(_: *anyopaque, _: bool) Journal.Error!void {
@@ -523,7 +567,7 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
             try testing.expect(old_total > 0);
             try testing.expectEqual(old_total, backend._file_offset);
 
-            try backend.journal().bgRewrite();
+            try backend.journal().bgRewrite(&.{});
             try testing.expectEqual(old_total, backend._incr_bytes);
             try testing.expectEqual(0, backend._file_offset);
 
