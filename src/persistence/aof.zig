@@ -34,6 +34,9 @@ _base_file_offset: u64 = 0,
 _base_buffer: std.ArrayList(u8) = .empty,
 _base_encoder: ?AofEncoder = null,
 _base_size: u64,
+// incoming seq for rewrite
+_pending_base_seq: ?u32 = null,
+_pending_incr_seq: ?u32 = null,
 _last_write_failed: bool = false,
 _loading: bool = false,
 _buffer: std.ArrayList(u8) = .empty,
@@ -245,6 +248,11 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     self._incr_seq = new_incr_seq;
     self._file_offset = 0;
     self._encoder.resetDbTracking();
+
+    // set seq
+    self._pending_base_seq = base_seq;
+    self._pending_incr_seq = new_incr_seq;
+
     if (old_file) |file| file.close(self._io);
 
     // start the fork
@@ -395,7 +403,40 @@ fn endBase(self: *AofBackend) Journal.Error!void {
     self._base_encoder = null;
 }
 
-pub fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) Journal.Error!void {
+pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) Journal.Error!void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    if (self._pending_base_seq == null) return Journal.Error.FailedToFinishAofRewrite;
+    const pending_base_seq = self._pending_base_seq.?;
+
+    if (reap_result != .succeeded) {
+        // TODO: delete pending base, clean up pending rewrite
+    }
+
+    const base_name = Manifest.baseName(
+        self._allocator,
+        self._config.append_filename,
+        pending_base_seq,
+    ) catch return Journal.Error.FailedToFinishAofRewrite;
+    defer self._allocator.free(base_name);
+
+    const dir = std.Io.Dir.cwd().openDir(
+        self._io,
+        self._config.append_dirname,
+        .{},
+    ) catch return Journal.Error.FailedToOpenDir;
+    defer dir.close(self._io);
+
+    const base_file = dir.openFile(
+        self._io,
+        base_name,
+        .{},
+    ) catch return Journal.Error.FailedToOpenBase;
+    defer base_file.close(self._io);
+
+    // NOTE: base_size could still be `zero` . that is okay and valid since there can be empty dataset
+    const base_len = base_file.length(self._io) catch return Journal.Error.FailedToOpenBase;
+    self._base_size = base_len;
+
     return;
 }
 

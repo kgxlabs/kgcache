@@ -25,6 +25,7 @@ pub const Error = error{
     FailedBufferAppend,
     FailedToCloseAof,
     FailedToRewriteAof,
+    FailedToFinishAofRewrite,
 };
 
 pub const WriteEvent = union(enum) {
