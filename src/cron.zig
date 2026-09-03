@@ -33,6 +33,7 @@ pub fn run(
 
         if (maybe_aof) |aof| {
             finishAofIfCompleted(io, aof, persistence_state.reapAof());
+            triggerRewriteIfDue(io, aof, data_store, config);
         }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
@@ -68,6 +69,20 @@ fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *sto
     };
 }
 
+fn triggerRewriteIfDue(
+    io: std.Io,
+    aof: persistence.JournalPersistence,
+    data_store: *store.Store,
+    config: Config,
+) void {
+    if (!aof.dueForRewrite(config)) return;
+
+    data_store.bgrewriteaof() catch {
+        const message = "kgcache: failed to trigger automatic AOF rewrite\n";
+        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+    };
+}
+
 // One write through the real Store: DefaultStorage wrapped by NotifierStorage
 // (same wiring as Server.create), so `data_store.set()` reaches
 // `change_tracker.recordChange()` exactly the way a real client write would,
@@ -92,6 +107,7 @@ const FinishRewriteJournal = struct {
         .onWrite = onWrite,
         .flush = flush,
         .bgRewrite = bgRewrite,
+        .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
@@ -106,6 +122,9 @@ const FinishRewriteJournal = struct {
     fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque, _: []const storage.Interface) persistence.JournalPersistence.Error!void {}
+    fn dueForRewrite(_: *anyopaque, _: Config) bool {
+        return false;
+    }
 
     fn finishRewrite(ptr: *anyopaque, result: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));

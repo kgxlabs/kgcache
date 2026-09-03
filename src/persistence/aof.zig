@@ -46,6 +46,7 @@ const vtable: Journal.VTable = .{
     .finishRewrite = finishRewrite,
     .flush = flush,
     .onWrite = onWrite,
+    .dueForRewrite = dueForRewrite,
     .beginLoading = beginLoading,
     .endLoading = endLoading,
     .reconcile = reconcile,
@@ -293,6 +294,12 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
 
     self._pending_base_seq = base_seq;
     self._persistence_state.setAofPid(pid);
+}
+
+pub fn dueForRewrite(ptr: *anyopaque, config: Config) bool {
+    _ = ptr;
+    _ = config;
+    return false;
 }
 
 const BaseEntryVisitor = struct {
