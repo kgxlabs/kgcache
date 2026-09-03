@@ -48,6 +48,7 @@ const vtable: Journal.VTable = .{
     .onWrite = onWrite,
     .beginLoading = beginLoading,
     .endLoading = endLoading,
+    .reconcile = reconcile,
 };
 
 pub fn journal(self: *AofBackend) Journal {
@@ -532,6 +533,15 @@ pub fn endLoading(ptr: *anyopaque) void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     self._loading = false;
 }
+
+pub fn reconcile(
+    ptr: *anyopaque,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    filename: []const u8,
+    manifest: ?Manifest.Manifest,
+) Journal.Error!void {}
 
 pub fn deinit(ptr: *anyopaque) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));

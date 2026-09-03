@@ -4,6 +4,7 @@ const store = @import("store.zig");
 const persistence = @import("persistence.zig");
 const PersistenceState = @import("persistence_state.zig");
 const ChangeTracker = @import("change_tracker.zig");
+const Manifest = @import("persistence/manifest.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
 const connection = @import("connection.zig");
@@ -102,7 +103,12 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     self._store = self._mem_store.store();
 
     // start aof replay
-    if (config.append_only) try loadAof(self, io, allocator);
+    if (config.append_only) {
+        try loadAof(self, io, allocator);
+        // clean up files related to interrupted rewrite from previous rewrite run
+        // this needs to be after successfully loading aof. couple of leftovers files from previous failed rewrite costs basically nothing
+        try cleanupFailedAof(self, io, allocator, config);
+    }
 
     return self;
 }
@@ -121,6 +127,19 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
     // Replay uses the normal storage path, which increments the dirty count.
     // These changes are already stored in the AOF, so startup begins clean.
     self._change_tracker.markSaved(time.nowMs(io));
+}
+
+fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {
+    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
+    const journal = aof.journal();
+
+    const cwd = std.Io.Dir.cwd();
+    // open in iterate mode
+    var dir = try cwd.openDir(io, config.append_dirname, .{ .iterate = true });
+    defer dir.close(io);
+
+    const manifest = try Manifest.read(io, allocator, dir, config.append_filename);
+    try journal.reconcile(io, allocator, dir, config.append_filename, manifest);
 }
 
 /// Unwinds `create` in reverse. `_store.deinit()` chains through

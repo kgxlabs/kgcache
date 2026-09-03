@@ -2,6 +2,7 @@ const std = @import("std");
 const object = @import("../object.zig");
 const Storage = @import("../storage/interface.zig");
 const PersistenceState = @import("../persistence_state.zig");
+const Manifest = @import("./manifest.zig");
 const time = @import("../time.zig");
 
 const JournalPersistence = @This();
@@ -39,6 +40,7 @@ pub const VTable = struct {
     finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) Error!void,
     beginLoading: *const fn (*anyopaque) void,
     endLoading: *const fn (*anyopaque) void,
+    reconcile: *const fn (*anyopaque, std.Io, std.mem.Allocator, std.Io.Dir, []const u8, ?Manifest.Manifest) Error!void,
     deinit: *const fn (*anyopaque) Error!void,
 };
 
@@ -64,6 +66,17 @@ pub fn beginLoading(self: JournalPersistence) void {
 
 pub fn endLoading(self: JournalPersistence) void {
     return self.vtable.endLoading(self.ptr);
+}
+
+pub fn reconcile(
+    self: JournalPersistence,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    filename: []const u8,
+    manifest: ?Manifest.Manifest,
+) Error!void {
+    return self.vtable.reconcile(self.ptr, io, allocator, dir, filename, manifest);
 }
 
 pub fn deinit(self: JournalPersistence) Error!void {
