@@ -70,6 +70,13 @@ pub fn finishAof(self: *PersistenceState) void {
     self._aof_in_progress = false;
 }
 
+pub fn aofInProgress(self: *PersistenceState) bool {
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
+
+    return self._aof_in_progress;
+}
+
 pub fn reapKgc(self: *PersistenceState) ReapResult {
     return self.reapPid("kgc", &self._kgc_pid, &self._kgc_in_progress);
 }

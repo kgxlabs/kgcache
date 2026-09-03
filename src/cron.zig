@@ -30,10 +30,10 @@ pub fn run(
         if (kg_result != .running) {
             change_tracker.markSaved(time.nowMs(io));
         }
-
+        // clean up forked child processes and register for auto rewrite
         if (maybe_aof) |aof| {
             finishAofIfCompleted(io, aof, persistence_state.reapAof());
-            triggerRewriteIfDue(io, aof, data_store, config);
+            triggerRewriteIfDue(io, aof, data_storages, config);
         }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
@@ -72,14 +72,18 @@ fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *sto
 fn triggerRewriteIfDue(
     io: std.Io,
     aof: persistence.JournalPersistence,
-    data_store: *store.Store,
+    data_storages: []const storage.Interface,
     config: Config,
 ) void {
     if (!aof.dueForRewrite(config)) return;
 
-    data_store.bgrewriteaof() catch {
-        const message = "kgcache: failed to trigger automatic AOF rewrite\n";
-        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+    aof.bgRewrite(data_storages) catch |err| {
+        // A manual client command rewrite can come in after due check and before bgRewrite call and can win the race.
+        // client command takes the highest priority so that refusal is expected and must not produce one log per cron tick.
+        if (err != error.RewriteAlreadyInProgress) {
+            const message = "kgcache: failed to trigger automatic AOF rewrite\n";
+            std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+        }
     };
 }
 

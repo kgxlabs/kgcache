@@ -10,6 +10,7 @@ const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
 
 const AofBackend = @This();
+const rewrite_retry_delay_ms: time.UnixMs = 60_000;
 
 _mutex: std.Io.Mutex = .init,
 _io: std.Io,
@@ -174,13 +175,14 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
 
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    errdefer |err| {
-        self._last_write_failed = true;
-        helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
-    }
 
     if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
+    var child_started = false;
+    errdefer |err| {
+        if (!child_started) self._persistence_state.finishAof();
+        helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
+    }
 
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
@@ -261,14 +263,8 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
-        .AGAIN, .NOMEM => {
-            self._persistence_state.finishAof();
-            return error.FailedToRewriteAof;
-        },
-        else => {
-            self._persistence_state.finishAof();
-            return error.FailedToRewriteAof;
-        },
+        .AGAIN, .NOMEM => return error.FailedToRewriteAof,
+        else => return error.FailedToRewriteAof,
     };
 
     if (pid == 0) {
@@ -294,12 +290,32 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
 
     self._pending_base_seq = base_seq;
     self._persistence_state.setAofPid(pid);
+    child_started = true;
 }
 
 pub fn dueForRewrite(ptr: *anyopaque, config: Config) bool {
-    _ = ptr;
-    _ = config;
-    return false;
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+
+    if (!config.append_only or config.auto_aof_rewrite_percentage == 0) return false;
+    if (self._persistence_state.aofInProgress()) return false;
+
+    if (self._last_rewrite_attempt_ms) |last_attempt_ms| {
+        const now_ms = time.nowMs(self._io);
+        // NOTE: normally now_ms is always greater than the last attempt ms
+        // now_ms < last_attempt_ms is to protect against NTP correction, manual clock adjustment, VM time changes, or suspend/resume behavio
+        if (now_ms < last_attempt_ms or now_ms - last_attempt_ms < rewrite_retry_delay_ms) {
+            return false;
+        }
+    }
+
+    const current_size: u128 = @as(u128, self._base_size) + self._incr_bytes;
+    if (current_size < config.auto_aof_rewrite_min_size) return false;
+
+    // NOTE: Before the first rewrite there is no base file. making is as `0` will become devided by zero and will result in undefined behaviour.
+    // one makes growth effectively unbounded, leaving the minimum size as the guard.
+    const comparison_base: u128 = if (self._base_size == 0) 1 else self._base_size;
+    const growth_percentage = @as(u128, self._incr_bytes) * 100 / comparison_base;
+    return growth_percentage >= config.auto_aof_rewrite_percentage;
 }
 
 const BaseEntryVisitor = struct {
