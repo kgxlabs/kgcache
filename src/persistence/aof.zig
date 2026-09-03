@@ -1098,6 +1098,9 @@ test "reconcile removes stale and orphaned AOF files only" {
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.manifest.tmp", .data = "stale" });
             try dir.writeFile(io, .{ .sub_path = "operator-backup", .data = "keep" });
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.backup", .data = "keep" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof..base", .data = "keep" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.x.incr", .data = "keep" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.manifest", .data = "keep" });
 
             const stderr_guard = try TestStderrGuard.silence();
             defer stderr_guard.restore();
@@ -1114,6 +1117,9 @@ test "reconcile removes stale and orphaned AOF files only" {
             try dir.access(io, "appendonly.aof.3.incr", .{});
             try dir.access(io, "operator-backup", .{});
             try dir.access(io, "appendonly.aof.backup", .{});
+            try dir.access(io, "appendonly.aof..base", .{});
+            try dir.access(io, "appendonly.aof.x.incr", .{});
+            try dir.access(io, "appendonly.aof.1.manifest", .{});
             try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.4.base", .{}));
             try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.5.incr", .{}));
             try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.manifest.tmp", .{}));
