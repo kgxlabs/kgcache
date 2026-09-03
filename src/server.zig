@@ -316,6 +316,30 @@ fn writeReplayFixture(io: std.Io, dirname: []const u8, contents: []const u8) !vo
     });
 }
 
+const TestStderrGuard = struct {
+    saved: std.posix.fd_t,
+    devnull: std.posix.fd_t,
+
+    fn silence() !TestStderrGuard {
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull < 0) return error.OpenDevNullFailed;
+        errdefer _ = std.c.close(devnull);
+
+        const saved = std.c.dup(std.posix.STDERR_FILENO);
+        if (saved < 0) return error.DupFailed;
+        errdefer _ = std.c.close(saved);
+
+        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
+        return .{ .saved = saved, .devnull = devnull };
+    }
+
+    fn restore(self: TestStderrGuard) void {
+        _ = std.c.dup2(self.saved, std.posix.STDERR_FILENO);
+        _ = std.c.close(self.saved);
+        _ = std.c.close(self.devnull);
+    }
+};
+
 test "replay does not append to the file it is replaying" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();
@@ -387,6 +411,8 @@ test "failed AOF replay leaves orphaned files untouched" {
     config.append_only = true;
     config.append_dirname = dirname;
 
+    const stderr_guard = try TestStderrGuard.silence();
+    defer stderr_guard.restore();
     try testing.expectError(
         persistence.AofLoader.Error.FailedToInitCommander,
         Server.create(testing.io, testing.allocator, config),
