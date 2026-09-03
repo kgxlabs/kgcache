@@ -75,6 +75,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     };
 
     const dir = cwd.openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+    defer dir.close(io);
 
     var incr_seq: u32 = 1;
     var base_size: u64 = 0;
@@ -95,6 +96,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         const maybe_live_incr = Manifest.liveIncr(manifest);
         if (maybe_live_incr) |live_incr| {
             incr_seq = live_incr.seq;
+        } else {
+            incr_seq = Manifest.nextSeq(manifest);
         }
 
         for (manifest.incrs) |incr| {
@@ -537,30 +540,75 @@ pub fn endLoading(ptr: *anyopaque) void {
 }
 
 pub fn reconcile(
-    _: *anyopaque,
+    ptr: *anyopaque,
     io: std.Io,
     allocator: std.mem.Allocator,
     dir: std.Io.Dir,
     filename: []const u8,
     manifest: ?Manifest.Manifest,
 ) Journal.Error!void {
-    const live_manifest = manifest orelse return Journal.Error.FailedToReadManifest;
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    const loaded_manifest = manifest orelse return Journal.Error.FailedToReadManifest;
+
+    const manifest_name = Manifest.manifestName(allocator, filename) catch
+        return Journal.Error.OutOfMemory;
+    defer allocator.free(manifest_name);
 
     // Safe only because rewrite publishes a newly cut incremental before using
     // it; therefore every file containing live data is named by this manifest.
     var referenced = std.StringHashMap(void).init(allocator);
     defer referenced.deinit();
 
-    if (live_manifest.base) |base| {
+    if (loaded_manifest.base) |base| {
         referenced.put(base.name, {}) catch return Journal.Error.OutOfMemory;
     }
-    for (live_manifest.incrs) |incr| {
+    for (loaded_manifest.incrs) |incr| {
         referenced.put(incr.name, {}) catch return Journal.Error.OutOfMemory;
     }
 
-    const manifest_name = Manifest.manifestName(allocator, filename) catch
-        return Journal.Error.OutOfMemory;
-    defer allocator.free(manifest_name);
+    var new_incr_name: ?[]u8 = null;
+    defer if (new_incr_name) |name| allocator.free(name);
+
+    // if there are no incrs file stated in manifest, we are going to create one because `bgrewriteaof` commander expects incr file to exist.
+    // it will throw fatal error if incr is not there
+    if (loaded_manifest.incrs.len == 0) {
+        const incr_seq = Manifest.nextSeq(loaded_manifest);
+
+        // The file opened during init must be the same incremental we are about
+        // to publish otherwise the manifest would not describe future writes
+        if (incr_seq != self._incr_seq) return Journal.Error.FailedToReconcileAof;
+
+        const incr_name = Manifest.incrName(allocator, filename, incr_seq) catch
+            return Journal.Error.OutOfMemory;
+        new_incr_name = incr_name;
+
+        // reset existing file related things
+        if (self._file) |file| file.close(io);
+        self._file = null;
+        self._file = dir.createFile(io, incr_name, .{}) catch
+            return Journal.Error.FailedToReconcileAof;
+        self._file_offset = 0;
+        self._incr_bytes = 0;
+        self._encoder.resetDbTracking();
+
+        Manifest.write(
+            io,
+            allocator,
+            dir,
+            manifest_name,
+            .{
+                .base = loaded_manifest.base,
+                .incrs = &[_]Manifest.Entry{.{
+                    .name = incr_name,
+                    .seq = incr_seq,
+                    .kind = .incr,
+                }},
+            },
+        ) catch return Journal.Error.FailedToWriteManifest;
+
+        referenced.put(incr_name, {}) catch return Journal.Error.OutOfMemory;
+    }
+
     const tmp_manifest_name = std.fmt.allocPrint(
         allocator,
         "{s}.tmp",
@@ -588,8 +636,8 @@ pub fn reconcile(
     }
 }
 
-// <append_filename>.aof.<seq>.base => true
-// <append_filename>.aof.<seq>.incr => true
+// <append_filename>.<seq>.base => true
+// <append_filename>.<seq>.incr => true
 // everything else => false
 fn isAofDataFilename(name: []const u8, append_filename: []const u8) bool {
     if (!std.mem.startsWith(u8, name, append_filename)) return false;
