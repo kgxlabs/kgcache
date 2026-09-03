@@ -4,6 +4,7 @@ const store = @import("store.zig");
 const persistence = @import("persistence.zig");
 const PersistenceState = @import("persistence_state.zig");
 const ChangeTracker = @import("change_tracker.zig");
+const Manifest = @import("persistence/manifest.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
 const connection = @import("connection.zig");
@@ -59,6 +60,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     if (config.append_only) {
         self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
     }
+    errdefer if (self._aof) |*aof| aof.journal().deinit() catch {};
 
     const kgc_snapshot = self._kgc.snapshot();
     const maybe_aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
@@ -102,7 +104,12 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     self._store = self._mem_store.store();
 
     // start aof replay
-    if (config.append_only) try loadAof(self, io, allocator);
+    if (config.append_only) {
+        try loadAof(self, io, allocator);
+        // clean up files related to interrupted rewrite from previous rewrite run
+        // this needs to be after successfully loading aof. couple of leftovers files from previous failed rewrite costs basically nothing
+        try cleanupFailedAof(self, io, allocator, config);
+    }
 
     return self;
 }
@@ -121,6 +128,24 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
     // Replay uses the normal storage path, which increments the dirty count.
     // These changes are already stored in the AOF, so startup begins clean.
     self._change_tracker.markSaved(time.nowMs(io));
+}
+
+fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {
+    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
+    const journal = aof.journal();
+
+    const cwd = std.Io.Dir.cwd();
+    // open in iterate mode
+    var dir = try cwd.openDir(io, config.append_dirname, .{ .iterate = true });
+    defer dir.close(io);
+
+    const manifest_name = try Manifest.manifestName(allocator, config.append_filename);
+    defer allocator.free(manifest_name);
+
+    const manifest = try Manifest.read(io, allocator, dir, manifest_name);
+    defer if (manifest) |live_manifest| live_manifest.deinit(allocator);
+
+    try journal.reconcile(io, allocator, dir, config.append_filename, manifest);
 }
 
 /// Unwinds `create` in reverse. `_store.deinit()` chains through
@@ -291,6 +316,30 @@ fn writeReplayFixture(io: std.Io, dirname: []const u8, contents: []const u8) !vo
     });
 }
 
+const TestStderrGuard = struct {
+    saved: std.posix.fd_t,
+    devnull: std.posix.fd_t,
+
+    fn silence() !TestStderrGuard {
+        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+        if (devnull < 0) return error.OpenDevNullFailed;
+        errdefer _ = std.c.close(devnull);
+
+        const saved = std.c.dup(std.posix.STDERR_FILENO);
+        if (saved < 0) return error.DupFailed;
+        errdefer _ = std.c.close(saved);
+
+        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
+        return .{ .saved = saved, .devnull = devnull };
+    }
+
+    fn restore(self: TestStderrGuard) void {
+        _ = std.c.dup2(self.saved, std.posix.STDERR_FILENO);
+        _ = std.c.close(self.saved);
+        _ = std.c.close(self.devnull);
+    }
+};
+
 test "replay does not append to the file it is replaying" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();
@@ -336,6 +385,92 @@ test "replay leaves the dirty count at zero" {
     defer server.destroy();
 
     try testing.expectEqual(0, server._change_tracker._dirty.load(.monotonic));
+}
+
+test "failed AOF replay leaves orphaned files untouched" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-failed-replay-keeps-orphans";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+    try writeReplayFixture(
+        testing.io,
+        dirname,
+        "*1\r\n$7\r\nUNKNOWN\r\n",
+    );
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    try dir.writeFile(testing.io, .{
+        .sub_path = "appendonly.aof.2.base",
+        .data = "rewrite evidence",
+    });
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+
+    const stderr_guard = try TestStderrGuard.silence();
+    defer stderr_guard.restore();
+    try testing.expectError(
+        persistence.AofLoader.Error.FailedToInitCommander,
+        Server.create(testing.io, testing.allocator, config),
+    );
+    try dir.access(testing.io, "appendonly.aof.2.base", .{});
+}
+
+test "manifest without incrementals is repaired and server remains writable" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-repair-no-incr";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+    try cwd.createDir(testing.io, dirname, .default_dir);
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    try dir.writeFile(testing.io, .{
+        .sub_path = "appendonly.aof.manifest",
+        .data = "file appendonly.aof.2.base seq 2 type b\n",
+    });
+    try dir.writeFile(testing.io, .{
+        .sub_path = "appendonly.aof.2.base",
+        .data = "",
+    });
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+    config.append_fsync = .always;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    defer server.destroy();
+
+    const repaired_manifest = try Manifest.read(
+        testing.io,
+        testing.allocator,
+        dir,
+        "appendonly.aof.manifest",
+    ) orelse return error.TestUnexpectedResult;
+    defer repaired_manifest.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), repaired_manifest.incrs.len);
+    try testing.expectEqual(@as(u32, 3), repaired_manifest.incrs[0].seq);
+    try testing.expectEqualStrings("appendonly.aof.3.incr", repaired_manifest.incrs[0].name);
+
+    _ = try server._store.set(.{
+        .key = "after-repair",
+        .value = "writable",
+        .condition = null,
+        .expires_at = null,
+        .keepttl = false,
+        .response = null,
+    }, 0);
+
+    const live_file = try dir.openFile(testing.io, "appendonly.aof.3.incr", .{});
+    defer live_file.close(testing.io);
+    try testing.expect((try live_file.length(testing.io)) > 0);
 }
 
 test "writes survive a simulated restart" {

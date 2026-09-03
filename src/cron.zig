@@ -95,6 +95,7 @@ const FinishRewriteJournal = struct {
         .finishRewrite = finishRewrite,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
+        .reconcile = reconcile,
         .deinit = deinit,
     };
 
@@ -115,6 +116,7 @@ const FinishRewriteJournal = struct {
 
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
+    fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) persistence.JournalPersistence.Error!void {}
     fn deinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
 };
 

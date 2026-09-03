@@ -18,7 +18,7 @@ pub const Entry = struct {
 
 pub const Manifest = struct {
     base: ?Entry,
-    incrs: []Entry,
+    incrs: []const Entry,
 
     pub fn format(self: Manifest, writer: *std.Io.Writer) !void {
         if (self.base) |b| try b.format(writer);

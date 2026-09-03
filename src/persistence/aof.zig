@@ -48,6 +48,7 @@ const vtable: Journal.VTable = .{
     .onWrite = onWrite,
     .beginLoading = beginLoading,
     .endLoading = endLoading,
+    .reconcile = reconcile,
 };
 
 pub fn journal(self: *AofBackend) Journal {
@@ -74,6 +75,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     };
 
     const dir = cwd.openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+    defer dir.close(io);
 
     var incr_seq: u32 = 1;
     var base_size: u64 = 0;
@@ -94,6 +96,8 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         const maybe_live_incr = Manifest.liveIncr(manifest);
         if (maybe_live_incr) |live_incr| {
             incr_seq = live_incr.seq;
+        } else {
+            incr_seq = Manifest.nextSeq(manifest);
         }
 
         for (manifest.incrs) |incr| {
@@ -241,6 +245,8 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
         helpers.logStderr(self._io, "aof: failed to rewrite manifest file: {s}\n", .{@errorName(Journal.Error.FailedToWriteManifest)});
         return error.FailedToWriteManifest;
     };
+    // Startup reconciliation deletes generated files absent from the manifest,
+    // so the new incremental must be published before any writes can reach it.
 
     // switch file handle and reset db so that we can start from scratch for new incr file
     const old_file = self._file;
@@ -533,6 +539,130 @@ pub fn endLoading(ptr: *anyopaque) void {
     self._loading = false;
 }
 
+pub fn reconcile(
+    ptr: *anyopaque,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    dir: std.Io.Dir,
+    filename: []const u8,
+    manifest: ?Manifest.Manifest,
+) Journal.Error!void {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    const loaded_manifest = manifest orelse return Journal.Error.FailedToReadManifest;
+
+    const manifest_name = Manifest.manifestName(allocator, filename) catch
+        return Journal.Error.OutOfMemory;
+    defer allocator.free(manifest_name);
+
+    // Safe only because rewrite publishes a newly cut incremental before using
+    // it; therefore every file containing live data is named by this manifest.
+    var referenced = std.StringHashMap(void).init(allocator);
+    defer referenced.deinit();
+
+    if (loaded_manifest.base) |base| {
+        referenced.put(base.name, {}) catch return Journal.Error.OutOfMemory;
+    }
+    for (loaded_manifest.incrs) |incr| {
+        referenced.put(incr.name, {}) catch return Journal.Error.OutOfMemory;
+    }
+
+    var new_incr_name: ?[]u8 = null;
+    defer if (new_incr_name) |name| allocator.free(name);
+
+    // if there are no incrs file stated in manifest, we are going to create one because `bgrewriteaof` commander expects incr file to exist.
+    // it will throw fatal error if incr is not there
+    if (loaded_manifest.incrs.len == 0) {
+        const incr_seq = Manifest.nextSeq(loaded_manifest);
+
+        // The file opened during init must be the same incremental we are about
+        // to publish otherwise the manifest would not describe future writes
+        if (incr_seq != self._incr_seq) return Journal.Error.FailedToReconcileAof;
+
+        const incr_name = Manifest.incrName(allocator, filename, incr_seq) catch
+            return Journal.Error.OutOfMemory;
+        new_incr_name = incr_name;
+
+        // reset existing file related things
+        if (self._file) |file| file.close(io);
+        self._file = null;
+        self._file = dir.createFile(io, incr_name, .{}) catch
+            return Journal.Error.FailedToReconcileAof;
+        self._file_offset = 0;
+        self._incr_bytes = 0;
+        self._encoder.resetDbTracking();
+
+        Manifest.write(
+            io,
+            allocator,
+            dir,
+            manifest_name,
+            .{
+                .base = loaded_manifest.base,
+                .incrs = &[_]Manifest.Entry{.{
+                    .name = incr_name,
+                    .seq = incr_seq,
+                    .kind = .incr,
+                }},
+            },
+        ) catch return Journal.Error.FailedToWriteManifest;
+
+        referenced.put(incr_name, {}) catch return Journal.Error.OutOfMemory;
+    }
+
+    const tmp_manifest_name = std.fmt.allocPrint(
+        allocator,
+        "{s}.tmp",
+        .{manifest_name},
+    ) catch return Journal.Error.OutOfMemory;
+    defer allocator.free(tmp_manifest_name);
+
+    var deleted_count: usize = 0;
+    var iterator = dir.iterate();
+    while (iterator.next(io) catch return Journal.Error.FailedToReconcileAof) |entry| {
+        // NOTE: later if we have nested structure, this can change
+        if (entry.kind != .file) continue;
+
+        const is_stale_manifest = std.mem.eql(u8, entry.name, tmp_manifest_name);
+        const is_orphan_data = isAofDataFilename(entry.name, filename) and
+            !referenced.contains(entry.name);
+        if (!is_stale_manifest and !is_orphan_data) continue;
+
+        dir.deleteFile(io, entry.name) catch return Journal.Error.FailedToReconcileAof;
+        deleted_count += 1;
+    }
+
+    if (deleted_count > 0) {
+        helpers.logStderr(io, "aof: removed {d} unreferenced file(s)\n", .{deleted_count});
+    }
+}
+
+// <append_filename>.<seq>.base => true
+// <append_filename>.<seq>.incr => true
+// everything else => false
+fn isAofDataFilename(name: []const u8, append_filename: []const u8) bool {
+    if (!std.mem.startsWith(u8, name, append_filename)) return false;
+
+    const remainder = name[append_filename.len..];
+    if (remainder.len == 0 or remainder[0] != '.') return false;
+
+    const suffix = if (std.mem.endsWith(u8, remainder, ".base"))
+        ".base"
+    else if (std.mem.endsWith(u8, remainder, ".incr"))
+        ".incr"
+    else
+        return false;
+
+    // + 1 for "."
+    if (remainder.len <= 1 + suffix.len) return false;
+
+    const seq = remainder[1 .. remainder.len - suffix.len];
+    if (seq.len == 0) return false;
+    for (seq) |char| {
+        if (!std.ascii.isDigit(char)) return false;
+    }
+    return true;
+}
+
 pub fn deinit(ptr: *anyopaque) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     // stderr instead of propagating since close is the last gate for aof
@@ -598,7 +728,7 @@ fn withScratchDir(comptime name: []const u8, comptime testFn: fn (std.Io, std.Io
     defer cwd.deleteTree(io, name) catch {};
 
     try cwd.createDir(io, name, .default_dir);
-    var dir = try cwd.openDir(io, name, .{});
+    var dir = try cwd.openDir(io, name, .{ .iterate = true });
     defer dir.close(io);
 
     try testFn(io, dir);
@@ -938,6 +1068,87 @@ test "failed finishRewrite removes the orphan base and preserves the cut manifes
             try testing.expectError(error.FileNotFound, dir.openFile(io, "appendonly.aof.2.base", .{}));
             try testing.expect(backend._pending_base_seq == null);
             try testing.expect(backend._last_rewrite_attempt_ms.? > 1);
+        }
+    }.run);
+}
+
+test "reconcile removes stale and orphaned AOF files only" {
+    try withScratchDir("scratch-aof-reconcile", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-reconcile" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+
+            var incrs = [_]Manifest.Entry{
+                .{ .name = "appendonly.aof.1.incr", .seq = 1, .kind = .incr },
+                .{ .name = "appendonly.aof.3.incr", .seq = 3, .kind = .incr },
+            };
+            const live_manifest: Manifest.Manifest = .{
+                .base = .{ .name = "appendonly.aof.2.base", .seq = 2, .kind = .base },
+                .incrs = &incrs,
+            };
+
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.base", .data = "base" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = "live" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.4.base", .data = "partial" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.5.incr", .data = "old" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.manifest.tmp", .data = "stale" });
+            try dir.writeFile(io, .{ .sub_path = "operator-backup", .data = "keep" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.backup", .data = "keep" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof..base", .data = "keep" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.x.incr", .data = "keep" });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.manifest", .data = "keep" });
+
+            const stderr_guard = try TestStderrGuard.silence();
+            defer stderr_guard.restore();
+            try backend.journal().reconcile(
+                io,
+                testing.allocator,
+                dir,
+                config.append_filename,
+                live_manifest,
+            );
+
+            try dir.access(io, "appendonly.aof.1.incr", .{});
+            try dir.access(io, "appendonly.aof.2.base", .{});
+            try dir.access(io, "appendonly.aof.3.incr", .{});
+            try dir.access(io, "operator-backup", .{});
+            try dir.access(io, "appendonly.aof.backup", .{});
+            try dir.access(io, "appendonly.aof..base", .{});
+            try dir.access(io, "appendonly.aof.x.incr", .{});
+            try dir.access(io, "appendonly.aof.1.manifest", .{});
+            try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.4.base", .{}));
+            try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.5.incr", .{}));
+            try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.manifest.tmp", .{}));
+        }
+    }.run);
+}
+
+test "reconcile refuses to delete files without an authoritative manifest" {
+    try withScratchDir("scratch-aof-reconcile-no-manifest", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-reconcile-no-manifest" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.base", .data = "evidence" });
+
+            try testing.expectError(
+                Journal.Error.FailedToReadManifest,
+                backend.journal().reconcile(
+                    io,
+                    testing.allocator,
+                    dir,
+                    config.append_filename,
+                    null,
+                ),
+            );
+            try dir.access(io, "appendonly.aof.2.base", .{});
         }
     }.run);
 }
