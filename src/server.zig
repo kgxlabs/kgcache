@@ -138,7 +138,12 @@ fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, con
     var dir = try cwd.openDir(io, config.append_dirname, .{ .iterate = true });
     defer dir.close(io);
 
-    const manifest = try Manifest.read(io, allocator, dir, config.append_filename);
+    const manifest_name = try Manifest.manifestName(allocator, config.append_filename);
+    defer allocator.free(manifest_name);
+
+    const manifest = try Manifest.read(io, allocator, dir, manifest_name);
+    defer if (manifest) |live_manifest| live_manifest.deinit(allocator);
+
     try journal.reconcile(io, allocator, dir, config.append_filename, manifest);
 }
 
