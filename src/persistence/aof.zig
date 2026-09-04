@@ -37,7 +37,7 @@ _base_encoder: ?AofEncoder = null,
 _base_size: u64,
 _pending_base_seq: ?u32 = null,
 _last_rewrite_attempt_ms: ?time.UnixMs = null,
-// TODO(step 14): initialize and update this when everysec fsync succeeds.
+// Last successful everysec fsync; null means the next flush must sync.
 _last_fsync_ms: ?time.UnixMs = null,
 _last_write_failed: bool = false,
 _loading: bool = false,
@@ -188,7 +188,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
 
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
-    try flushLocked(self);
+    try flushLocked(self, time.nowMs(self._io));
 
     const cwd = std.Io.Dir.cwd();
     cwd.createDir(self._io, self._config.append_dirname, .default_dir) catch |err| switch (err) {
@@ -543,7 +543,7 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     if (delete_failed) return Journal.Error.FailedToRewriteAof;
 }
 
-pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
+pub fn flush(ptr: *anyopaque, now_ms: i64) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     errdefer |err| {
         self._last_write_failed = true;
@@ -552,7 +552,7 @@ pub fn flush(ptr: *anyopaque, _: i64) Journal.Error!void {
 
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
-    try flushLocked(self);
+    try flushLocked(self, now_ms);
 }
 
 pub fn beginLoading(ptr: *anyopaque) void {
@@ -706,7 +706,7 @@ pub fn deinit(ptr: *anyopaque) Journal.Error!void {
 
 // TODO: this flush locked itself does not claim append lock but remind callers to claim it
 // Naming is confusing. Improve it.
-fn flushLocked(self: *AofBackend) Journal.Error!void {
+fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) Journal.Error!void {
     const file = self._file orelse return Journal.Error.FailedToWriteIncrFile;
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
@@ -715,7 +715,18 @@ fn flushLocked(self: *AofBackend) Journal.Error!void {
     file_writer.interface.writeAll(self._buffer.items) catch return Journal.Error.FailedToWriteIncrFile;
     file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
 
-    try syncByPolicy(self, file);
+    const should_fsync = switch (self._config.append_fsync) {
+        .always => true,
+        .everysec => if (self._last_fsync_ms) |last_fsync_ms|
+            now_ms >= last_fsync_ms and now_ms - last_fsync_ms >= 1000
+        else
+            true,
+        .no => false,
+    };
+    if (should_fsync) {
+        file.sync(self._io) catch return Journal.Error.FailedToWriteIncrFile;
+        self._last_fsync_ms = now_ms;
+    }
 
     self._incr_bytes += self._buffer.items.len;
     self._file_offset += self._buffer.items.len;
