@@ -11,7 +11,7 @@
 # value that doesn't fit the directive's type all fail the server at
 # startup with a message on stderr, rather than being silently ignored.
 #
-# Run with: ./zig-out/bin/main path/to/kgcache.conf
+# Run with: ./zig-out/bin/kgcache path/to/kgcache.conf
 
 # Address the TCP server binds to.
 # bind 127.0.0.1
@@ -39,9 +39,9 @@
 # instead of a home-directory shorthand.
 # snapshot-path dump.kgc
 
-# How often, in milliseconds, the active-expiration worker sweeps for
-# expired keys across all databases.
-# active-expire-interval-ms 100
+# How often, in milliseconds, background work runs. This includes active
+# expiration, AOF flushing, save checks, and child-process cleanup.
+# cron-interval-ms 100
 
 # Time budget, in milliseconds, the active-expiration worker spends per
 # sweep before yielding, regardless of how many databases still have
@@ -56,6 +56,10 @@
 # run another batch on the same database instead of moving on.
 # active-expire-threshold-percent 25
 
+# Prevent BGSAVE and BGREWRITEAOF from running at the same time. Keeping
+# this on lowers memory use while a background child is running.
+# exclusive-bg-persistence yes
+
 # One or more rules for automatically triggering a background save
 # (equivalent to BGSAVE) when enough writes have happened recently.
 # Format: save <seconds> <changes> -- trigger if at least <changes>
@@ -67,3 +71,28 @@
 # save 3600 1
 # save 300 100
 # save 60 10000
+
+# Write each data change to an append-only file. yes or no.
+# appendonly no
+
+# AOF fsync policy: always, everysec, or no.
+# appendfsync everysec
+
+# Directory that holds AOF files. It is relative to the process working
+# directory. kgcache owns this directory; do not store other files in it.
+# append-dirname appendonlydir
+
+# Base name used to build AOF data and manifest file names.
+# append-filename appendonly.aof
+
+# Rewrite the AOF after incremental data grows by this percentage.
+# Set 0 to turn off automatic rewrites. Manual BGREWRITEAOF still works.
+# auto-aof-rewrite-percentage 100
+
+# Do not start an automatic rewrite until the total AOF size reaches this
+# many bytes. Values such as "64mb" are not accepted.
+# auto-aof-rewrite-min-size 67108864
+
+# If the last incremental file ends with an incomplete command, remove
+# that command and continue loading. yes or no.
+# aof-load-truncated yes

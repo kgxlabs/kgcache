@@ -13,7 +13,7 @@
 | Runtime | Zig 0.16.0+ |
 | Data model | Process-local string keys and values |
 | Commands | See [Commands](docs/COMMANDS.md) |
-| Persistence | Snapshot to a `.kgc` file via `SAVE` (blocking) or `BGSAVE` (forks, non-blocking), automatically or on demand — see `save` in [Configuration](docs/CONFIGURATION.md); AOF journal is in-memory only, not yet durable to disk |
+| Persistence | `.kgc` snapshots and an optional disk-backed AOF journal; see [Persistence](docs/PERSISTENCE.md) and [AOF](docs/AOF.md) |
 
 ## Quick start
 
@@ -40,7 +40,14 @@ OK
 (integer) 1
 ```
 
-The default build installs the executable at `zig-out/bin/main`. To run with a config file: `./zig-out/bin/main path/to/kgcache.conf` — see [Configuration](docs/CONFIGURATION.md).
+The default build installs the executable at `zig-out/bin/kgcache`. To run
+with a config file:
+
+```bash
+./zig-out/bin/kgcache path/to/kgcache.conf
+```
+
+See [Configuration](docs/CONFIGURATION.md) for all settings.
 
 ## Documentation
 
@@ -49,7 +56,9 @@ The default build installs the executable at `zig-out/bin/main`. To run with a c
 | [Commands](docs/COMMANDS.md) | Supported commands and `SET` option families |
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
 | [Architecture](docs/ARCHITECTURE.md) | Request flow, design direction, concurrency trade-offs, repository layout |
-| [Persistence](docs/PERSISTENCE.md) | `SAVE`/`BGSAVE` fork mechanics, reaping, and automatic condition-based saving |
+| [Persistence](docs/PERSISTENCE.md) | Short comparison of snapshots and AOF |
+| [Snapshots](docs/SNAPSHOTS.md) | `SAVE`, `BGSAVE`, child cleanup, and automatic saving |
+| [Append-only file](docs/AOF.md) | AOF setup, fsync policies, file layout, startup, and rewrite flow |
 | [Expiration](docs/EXPIRATION.md) | TTL bookkeeping layout, memory cost, and the planned redesign |
 
 ## Development
@@ -60,7 +69,8 @@ Run the unit test suite:
 zig build test
 ```
 
-The tests cover RESP parsing and serialization, command dispatch, `DBSIZE`, storage sizing, expiration-index maintenance, and in-memory store behavior.
+The tests cover RESP parsing, command dispatch, storage, expiration,
+snapshots, AOF loading, fsync policies, and AOF rewrites.
 
 Useful commands:
 

@@ -23,7 +23,11 @@ Concurrency is similarly a deliberate trade-off. The server currently uses detac
 
 ## Persistence
 
-Snapshots to a `.kgc` file happen three ways: `SAVE` (blocking), `BGSAVE` (forked, non-blocking), or automatically once a configured `save <seconds> <changes>` rule is met. All three converge on the same on-disk format and the same in-progress guard, so only one save is ever writing at a time. See [Persistence](PERSISTENCE.md) for the fork/copy-on-write mechanics `BGSAVE` relies on, how a forked child gets reaped without blocking the parent, and how automatic triggering counts writes and decides when to fire.
+Snapshots use `SAVE`, `BGSAVE`, or automatic `save` rules. AOF records each
+write and can rewrite the growing log in a background child. See
+[Persistence](PERSISTENCE.md) for a comparison,
+[Snapshots](SNAPSHOTS.md) for snapshot details, and
+[Append-only file](AOF.md) for AOF.
 
 ## Repository map
 
@@ -53,7 +57,9 @@ Snapshots to a `.kgc` file happen three ways: `SAVE` (blocking), `BGSAVE` (forke
 │   ├── CONFIGURATION.md
 │   ├── COMMANDS.md
 │   ├── ARCHITECTURE.md          # This file — overview, design direction, repo map
-│   ├── PERSISTENCE.md           # BGSAVE fork/COW mechanics, reaping, automatic triggering
+│   ├── PERSISTENCE.md           # Snapshot and AOF overview
+│   ├── SNAPSHOTS.md             # SAVE, BGSAVE, and automatic saving
+│   ├── AOF.md                   # AOF setup, fsync, loading, and rewrites
 │   └── EXPIRATION.md            # TTL bookkeeping layout, memory cost, planned redesign
 └── README.md
 ```

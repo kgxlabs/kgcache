@@ -17,7 +17,7 @@ pub fn init(io: std.Io) ChangeTracker {
     };
 }
 
-/// Called from NotifierStorage on every put/remove.
+/// Called after a put, remove, or expiry-driven removal.
 pub fn recordChange(self: *ChangeTracker) void {
     _ = self._dirty.fetchAdd(1, .monotonic);
 }
