@@ -17,12 +17,15 @@ pub fn run(
     data_store: *store.Store,
     maybe_aof: ?persistence.JournalPersistence,
     config: Config,
+    stop_requested: *const std.atomic.Value(bool),
 ) !void {
     const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
     var start: usize = 0;
 
-    while (true) {
+    while (!stop_requested.load(.acquire)) {
         try io.sleep(round_duration, .awake);
+        if (stop_requested.load(.acquire)) return;
+
         start = try expiration.runRound(io, allocator, data_storages, start, config);
 
         // clean up forked child processes if any
@@ -32,12 +35,20 @@ pub fn run(
         }
         // clean up forked child processes and register for auto rewrite
         if (maybe_aof) |aof| {
+            flushAofIfDue(io, aof);
             finishAofIfCompleted(io, aof, persistence_state.reapAof());
             triggerRewriteIfDue(io, aof, data_storages, config);
         }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
     }
+}
+
+fn flushAofIfDue(io: std.Io, aof: persistence.JournalPersistence) void {
+    aof.flush(time.nowMs(io)) catch {
+        const message = "kgcache: failed to flush AOF\n";
+        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+    };
 }
 
 fn finishAofIfCompleted(
@@ -106,6 +117,9 @@ const FinishRewriteJournal = struct {
     calls: usize = 0,
     last_result: ?PersistenceState.ReapResult = null,
     fail: bool = false,
+    flush_calls: usize = 0,
+    last_flush_ms: ?i64 = null,
+    fail_flush: bool = false,
 
     const vtable: persistence.JournalPersistence.VTable = .{
         .onWrite = onWrite,
@@ -124,7 +138,12 @@ const FinishRewriteJournal = struct {
     }
 
     fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
-    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
+    fn flush(ptr: *anyopaque, now_ms: i64) persistence.JournalPersistence.Error!void {
+        const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
+        self.flush_calls += 1;
+        self.last_flush_ms = now_ms;
+        if (self.fail_flush) return error.FailedToWriteIncrFile;
+    }
     fn bgRewrite(_: *anyopaque, _: []const storage.Interface) persistence.JournalPersistence.Error!void {}
     fn dueForRewrite(_: *anyopaque, _: Config) bool {
         return false;
@@ -142,6 +161,81 @@ const FinishRewriteJournal = struct {
     fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) persistence.JournalPersistence.Error!void {}
     fn deinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
 };
+
+test "cron flushes the AOF and swallows flush errors" {
+    const testing = std.testing;
+    var backend = FinishRewriteJournal{};
+
+    flushAofIfDue(testing.io, backend.journal());
+    try testing.expectEqual(@as(usize, 1), backend.flush_calls);
+    try testing.expect(backend.last_flush_ms != null);
+
+    backend.fail_flush = true;
+    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+    if (devnull < 0) return error.OpenDevNullFailed;
+    defer _ = std.c.close(devnull);
+
+    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+    if (saved_stderr < 0) return error.DupFailed;
+    defer {
+        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+        _ = std.c.close(saved_stderr);
+    }
+    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+    flushAofIfDue(testing.io, backend.journal());
+    try testing.expectEqual(@as(usize, 2), backend.flush_calls);
+}
+
+test "everysec cron flush drains buffered commands" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-cron-flush-everysec";
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var state = PersistenceState.init(testing.io, false);
+    const config: Config = .{
+        .append_dirname = dirname,
+        .append_fsync = .everysec,
+    };
+    var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
+    defer backend.journal().deinit() catch {};
+
+    try backend.journal().onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    flushAofIfDue(testing.io, backend.journal());
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    const contents = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+    defer testing.allocator.free(contents);
+    try testing.expect(std.mem.indexOf(u8, contents, "DEL") != null);
+}
+
+test "no cron flush drains buffered commands" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-cron-flush-no";
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var state = PersistenceState.init(testing.io, false);
+    const config: Config = .{
+        .append_dirname = dirname,
+        .append_fsync = .no,
+    };
+    var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
+    defer backend.journal().deinit() catch {};
+
+    try backend.journal().onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    flushAofIfDue(testing.io, backend.journal());
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    const contents = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+    defer testing.allocator.free(contents);
+    try testing.expect(std.mem.indexOf(u8, contents, "DEL") != null);
+}
 
 test "cron forwards failed AOF completion and ignores a running child" {
     const testing = std.testing;
