@@ -29,6 +29,8 @@ _mem_store: store.MemoryStore,
 _store: store.Store,
 
 _listener: ?std.Io.net.Server = null,
+_cron_stop_requested: std.atomic.Value(bool) = .init(false),
+_cron_thread: ?std.Thread = null,
 
 /// Builds the whole object graph on the heap and returns a stable `*Server`.
 /// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`, and
@@ -48,6 +50,8 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     self._allocator = allocator;
     self._config = config;
     self._listener = null;
+    self._cron_stop_requested = .init(false);
+    self._cron_thread = null;
     self._aof = null;
 
     self._default_storages = try allocator.alloc(storage.DefaultStorage, num_databases);
@@ -152,7 +156,7 @@ fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, con
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
 pub fn destroy(self: *Server) void {
-    stopCronBeforeDestroy(self);
+    self.stopCron();
 
     // flush out buffered datas and clear it before tearning down store
     if (self._aof) |*aof| {
@@ -169,10 +173,29 @@ pub fn destroy(self: *Server) void {
     self._allocator.destroy(self);
 }
 
-fn stopCronBeforeDestroy(self: *Server) void {
-    // TODO(step 14): signal the cron loop, retain its thread handle, and join
-    // it here before any state reachable by cron is freed.
-    _ = self;
+fn startCron(self: *Server) !void {
+    std.debug.assert(self._cron_thread == null);
+    self._cron_stop_requested.store(false, .release);
+
+    const aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
+    self._cron_thread = try std.Thread.spawn(.{}, cron.run, .{
+        self._io,
+        self._allocator,
+        self._data_storages,
+        &self._persistence_state,
+        &self._change_tracker,
+        &self._store,
+        aof_journal,
+        self._config,
+        &self._cron_stop_requested,
+    });
+}
+
+fn stopCron(self: *Server) void {
+    const thread = self._cron_thread orelse return;
+    self._cron_stop_requested.store(true, .release);
+    thread.join();
+    self._cron_thread = null;
 }
 
 /// The listener is bound here rather than in `create` so `create` can be
@@ -185,18 +208,8 @@ pub fn run(self: *Server) !void {
     });
     defer self._listener.?.deinit(self._io);
 
-    const aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
-    const cron_thread = try std.Thread.spawn(.{}, cron.run, .{
-        self._io,
-        self._allocator,
-        self._data_storages,
-        &self._persistence_state,
-        &self._change_tracker,
-        &self._store,
-        aof_journal,
-        self._config,
-    });
-    cron_thread.detach();
+    try self.startCron();
+    defer self.stopCron();
 
     try connection.acceptLoop(self._io, &self._listener.?, &self._store, self._allocator, self._config);
 }
@@ -206,6 +219,22 @@ test "create builds the full object graph and destroy leaks nothing" {
 
     const server = try Server.create(testing.io, testing.allocator, Config.default());
     server.destroy();
+}
+
+test "server owns and joins the cron thread" {
+    const testing = std.testing;
+    var config = Config.default();
+    config.cron_interval_ms = 1;
+
+    const server = try Server.create(testing.io, testing.allocator, config);
+    defer server.destroy();
+
+    try server.startCron();
+    try testing.expect(server._cron_thread != null);
+
+    server.stopCron();
+    try testing.expect(server._cron_thread == null);
+    try testing.expect(server._cron_stop_requested.load(.acquire));
 }
 
 fn writeKgcSnapshotWithFooBar(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {

@@ -17,12 +17,15 @@ pub fn run(
     data_store: *store.Store,
     maybe_aof: ?persistence.JournalPersistence,
     config: Config,
+    stop_requested: *const std.atomic.Value(bool),
 ) !void {
     const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
     var start: usize = 0;
 
-    while (true) {
+    while (!stop_requested.load(.acquire)) {
         try io.sleep(round_duration, .awake);
+        if (stop_requested.load(.acquire)) return;
+
         start = try expiration.runRound(io, allocator, data_storages, start, config);
 
         // clean up forked child processes if any
@@ -42,10 +45,10 @@ pub fn run(
 }
 
 fn flushAofIfDue(io: std.Io, aof: persistence.JournalPersistence) void {
-    // TODO: call aof.flush(now_ms), log failures, and preserve the
-    // cron loop. Kept as a no-op until policy-aware flush is implemented.
-    _ = io;
-    _ = aof;
+    aof.flush(time.nowMs(io)) catch {
+        const message = "kgcache: failed to flush AOF\n";
+        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+    };
 }
 
 fn finishAofIfCompleted(
@@ -114,6 +117,9 @@ const FinishRewriteJournal = struct {
     calls: usize = 0,
     last_result: ?PersistenceState.ReapResult = null,
     fail: bool = false,
+    flush_calls: usize = 0,
+    last_flush_ms: ?i64 = null,
+    fail_flush: bool = false,
 
     const vtable: persistence.JournalPersistence.VTable = .{
         .onWrite = onWrite,
@@ -132,7 +138,12 @@ const FinishRewriteJournal = struct {
     }
 
     fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
-    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
+    fn flush(ptr: *anyopaque, now_ms: i64) persistence.JournalPersistence.Error!void {
+        const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
+        self.flush_calls += 1;
+        self.last_flush_ms = now_ms;
+        if (self.fail_flush) return error.FailedToWriteIncrFile;
+    }
     fn bgRewrite(_: *anyopaque, _: []const storage.Interface) persistence.JournalPersistence.Error!void {}
     fn dueForRewrite(_: *anyopaque, _: Config) bool {
         return false;
@@ -150,6 +161,31 @@ const FinishRewriteJournal = struct {
     fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) persistence.JournalPersistence.Error!void {}
     fn deinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
 };
+
+test "cron flushes the AOF and swallows flush errors" {
+    const testing = std.testing;
+    var backend = FinishRewriteJournal{};
+
+    flushAofIfDue(testing.io, backend.journal());
+    try testing.expectEqual(@as(usize, 1), backend.flush_calls);
+    try testing.expect(backend.last_flush_ms != null);
+
+    backend.fail_flush = true;
+    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+    if (devnull < 0) return error.OpenDevNullFailed;
+    defer _ = std.c.close(devnull);
+
+    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+    if (saved_stderr < 0) return error.DupFailed;
+    defer {
+        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+        _ = std.c.close(saved_stderr);
+    }
+    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+    flushAofIfDue(testing.io, backend.journal());
+    try testing.expectEqual(@as(usize, 2), backend.flush_calls);
+}
 
 test "cron forwards failed AOF completion and ignores a running child" {
     const testing = std.testing;
