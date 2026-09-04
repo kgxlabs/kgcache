@@ -30,9 +30,10 @@ pub fn run(
         if (kg_result != .running) {
             change_tracker.markSaved(time.nowMs(io));
         }
-
+        // clean up forked child processes and register for auto rewrite
         if (maybe_aof) |aof| {
             finishAofIfCompleted(io, aof, persistence_state.reapAof());
+            triggerRewriteIfDue(io, aof, data_storages, config);
         }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
@@ -68,6 +69,24 @@ fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *sto
     };
 }
 
+fn triggerRewriteIfDue(
+    io: std.Io,
+    aof: persistence.JournalPersistence,
+    data_storages: []const storage.Interface,
+    config: Config,
+) void {
+    if (!aof.dueForRewrite(config)) return;
+
+    aof.bgRewrite(data_storages) catch |err| {
+        // A manual client command rewrite can come in after due check and before bgRewrite call and can win the race.
+        // client command takes the highest priority so that refusal is expected and must not produce one log per cron tick.
+        if (err != error.RewriteAlreadyInProgress) {
+            const message = "kgcache: failed to trigger automatic AOF rewrite\n";
+            std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+        }
+    };
+}
+
 // One write through the real Store: DefaultStorage wrapped by NotifierStorage
 // (same wiring as Server.create), so `data_store.set()` reaches
 // `change_tracker.recordChange()` exactly the way a real client write would,
@@ -92,6 +111,7 @@ const FinishRewriteJournal = struct {
         .onWrite = onWrite,
         .flush = flush,
         .bgRewrite = bgRewrite,
+        .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
@@ -106,6 +126,9 @@ const FinishRewriteJournal = struct {
     fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque, _: []const storage.Interface) persistence.JournalPersistence.Error!void {}
+    fn dueForRewrite(_: *anyopaque, _: Config) bool {
+        return false;
+    }
 
     fn finishRewrite(ptr: *anyopaque, result: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
@@ -153,6 +176,88 @@ test "cron swallows finishRewrite errors" {
 
     try testing.expectEqual(@as(usize, 1), backend.calls);
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, backend.last_result.?);
+}
+
+test "triggerRewriteIfDue starts a rewrite when the rule is met" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-cron-aof-trigger";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var state = PersistenceState.init(testing.io, false);
+    const config: Config = .{
+        .append_only = true,
+        .append_dirname = dirname,
+        .auto_aof_rewrite_min_size = 0,
+    };
+    var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
+    defer backend.journal().deinit() catch {};
+    const journal = backend.journal();
+
+    triggerRewriteIfDue(testing.io, journal, &.{}, config);
+
+    try testing.expect(state._aof_in_progress);
+    try testing.expect(state._aof_pid != null);
+
+    var result: PersistenceState.ReapResult = .running;
+    var tries: usize = 0;
+    while (result == .running) {
+        result = state.reapAof();
+        tries += 1;
+        if (tries > 100_000) return error.ChildNeverReaped;
+    }
+    try journal.finishRewrite(result);
+}
+
+test "triggerRewriteIfDue does nothing when a rewrite is already running" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-cron-aof-running";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var state = PersistenceState.init(testing.io, false);
+    const config: Config = .{
+        .append_only = true,
+        .append_dirname = dirname,
+        .auto_aof_rewrite_min_size = 0,
+    };
+    var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
+    defer backend.journal().deinit() catch {};
+
+    try testing.expect(state.tryStartAof());
+    defer state.finishAof();
+
+    triggerRewriteIfDue(testing.io, backend.journal(), &.{}, config);
+
+    try testing.expect(state._aof_pid == null);
+}
+
+test "a failed rewrite is not retried immediately and wait for delay" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-cron-aof-backoff";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var state = PersistenceState.init(testing.io, false);
+    const config: Config = .{
+        .append_only = true,
+        .append_dirname = dirname,
+        .auto_aof_rewrite_min_size = 0,
+    };
+    var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
+    defer backend.journal().deinit() catch {};
+    backend._last_rewrite_attempt_ms = time.nowMs(testing.io);
+
+    triggerRewriteIfDue(testing.io, backend.journal(), &.{}, config);
+
+    try testing.expect(!state._aof_in_progress);
+    try testing.expect(state._aof_pid == null);
 }
 
 test "a completed background save resets the change tracker once reaped, not before" {

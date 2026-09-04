@@ -10,6 +10,7 @@ const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
 
 const AofBackend = @This();
+const rewrite_retry_delay_ms: time.UnixMs = 60_000;
 
 _mutex: std.Io.Mutex = .init,
 _io: std.Io,
@@ -46,6 +47,7 @@ const vtable: Journal.VTable = .{
     .finishRewrite = finishRewrite,
     .flush = flush,
     .onWrite = onWrite,
+    .dueForRewrite = dueForRewrite,
     .beginLoading = beginLoading,
     .endLoading = endLoading,
     .reconcile = reconcile,
@@ -173,13 +175,14 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
 
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    errdefer |err| {
-        self._last_write_failed = true;
-        helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
-    }
 
     if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
+    var child_started = false;
+    errdefer |err| {
+        if (!child_started) self._persistence_state.finishAof();
+        helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
+    }
 
     self._mutex.lockUncancelable(self._io);
     defer self._mutex.unlock(self._io);
@@ -260,14 +263,8 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
-        .AGAIN, .NOMEM => {
-            self._persistence_state.finishAof();
-            return error.FailedToRewriteAof;
-        },
-        else => {
-            self._persistence_state.finishAof();
-            return error.FailedToRewriteAof;
-        },
+        .AGAIN, .NOMEM => return error.FailedToRewriteAof,
+        else => return error.FailedToRewriteAof,
     };
 
     if (pid == 0) {
@@ -293,6 +290,33 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
 
     self._pending_base_seq = base_seq;
     self._persistence_state.setAofPid(pid);
+    child_started = true;
+}
+
+pub fn dueForRewrite(ptr: *anyopaque, config: Config) bool {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+
+    if (!config.append_only or config.auto_aof_rewrite_percentage == 0) return false;
+    if (self._persistence_state.aofInProgress()) return false;
+
+    if (self._last_rewrite_attempt_ms) |last_attempt_ms| {
+        const now_ms = time.nowMs(self._io);
+        // NOTE: normally now_ms is always greater than the last attempt ms
+        // now_ms < last_attempt_ms is to protect against NTP correction, manual clock adjustment, VM time changes, or suspend/resume behavio
+        if (now_ms < last_attempt_ms or now_ms - last_attempt_ms < rewrite_retry_delay_ms) {
+            return false;
+        }
+    }
+
+    const current_size: u128 = @as(u128, self._base_size) + self._incr_bytes;
+    if (current_size < config.auto_aof_rewrite_min_size) return false;
+
+    // Before the first rewrite there is no base file, so growth has no
+    // meaningful denominator and the minimum size becomes the only guard.
+    if (self._base_size == 0) return true;
+
+    const growth_percentage = @as(u128, self._incr_bytes) * 100 / self._base_size;
+    return growth_percentage >= config.auto_aof_rewrite_percentage;
 }
 
 const BaseEntryVisitor = struct {
@@ -757,6 +781,143 @@ const TestStderrGuard = struct {
         _ = std.c.close(self.devnull);
     }
 };
+
+test "dueForRewrite is false below the min size even after huge growth" {
+    try withScratchDir("scratch-aof-rewrite-below-min", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_only = true,
+                .append_dirname = "scratch-aof-rewrite-below-min",
+                .auto_aof_rewrite_percentage = 100,
+                .auto_aof_rewrite_min_size = 1_000,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            backend._base_size = 1;
+            backend._incr_bytes = 998;
+
+            try testing.expect(!backend.journal().dueForRewrite(config));
+        }
+    }.run);
+}
+
+test "dueForRewrite is true once growth and min size are both met" {
+    try withScratchDir("scratch-aof-rewrite-due", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_only = true,
+                .append_dirname = "scratch-aof-rewrite-due",
+                .auto_aof_rewrite_percentage = 100,
+                .auto_aof_rewrite_min_size = 200,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            backend._base_size = 100;
+            backend._incr_bytes = 100;
+
+            try testing.expect(backend.journal().dueForRewrite(config));
+        }
+    }.run);
+}
+
+test "dueForRewrite treats a zero base size as reduce-to-min-size-only" {
+    try withScratchDir("scratch-aof-rewrite-zero-base", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_only = true,
+                .append_dirname = "scratch-aof-rewrite-zero-base",
+                .auto_aof_rewrite_percentage = std.math.maxInt(u32),
+                .auto_aof_rewrite_min_size = 100,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            backend._base_size = 0;
+            backend._incr_bytes = 100;
+
+            try testing.expect(backend.journal().dueForRewrite(config));
+        }
+    }.run);
+}
+
+test "dueForRewrite is false when the percentage is zero" {
+    try withScratchDir("scratch-aof-rewrite-disabled", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_only = true,
+                .append_dirname = "scratch-aof-rewrite-disabled",
+                .auto_aof_rewrite_percentage = 0,
+                .auto_aof_rewrite_min_size = 1,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            backend._base_size = 1;
+            backend._incr_bytes = 1_000;
+
+            try testing.expect(!backend.journal().dueForRewrite(config));
+        }
+    }.run);
+}
+
+test "dueForRewrite is false while a rewrite is already running" {
+    try withScratchDir("scratch-aof-rewrite-running", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_only = true,
+                .append_dirname = "scratch-aof-rewrite-running",
+                .auto_aof_rewrite_min_size = 1,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            backend._base_size = 0;
+            backend._incr_bytes = 1;
+
+            try testing.expect(state.tryStartAof());
+            defer state.finishAof();
+
+            try testing.expect(!backend.journal().dueForRewrite(config));
+        }
+    }.run);
+}
+
+test "dueForRewrite backs off after a failed rewrite attempt" {
+    try withScratchDir("scratch-aof-rewrite-backoff", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_only = true,
+                .append_dirname = "scratch-aof-rewrite-backoff",
+                .auto_aof_rewrite_min_size = 1,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            backend._base_size = 0;
+            backend._incr_bytes = 1;
+            backend._last_rewrite_attempt_ms = time.nowMs(io);
+
+            try testing.expect(!backend.journal().dueForRewrite(config));
+
+            backend._last_rewrite_attempt_ms.? -= rewrite_retry_delay_ms;
+            try testing.expect(backend.journal().dueForRewrite(config));
+        }
+    }.run);
+}
 
 test "init creates the append directory and a seq-1 manifest on first boot" {
     try withScratchDir("scratch-aof-init-first-boot", struct {

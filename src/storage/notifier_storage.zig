@@ -11,6 +11,7 @@ const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
 const PersistenceState = @import("../persistence_state.zig");
 const ChangeTracker = @import("../change_tracker.zig");
+const Config = @import("../config.zig");
 const DefaultStorage = @import("default_storage.zig");
 
 const NotifierStorage = @This();
@@ -256,6 +257,7 @@ const FailingJournal = struct {
         .onWrite = onWrite,
         .flush = flush,
         .bgRewrite = bgRewrite,
+        .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
@@ -273,6 +275,9 @@ const FailingJournal = struct {
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
+    fn dueForRewrite(_: *anyopaque, _: Config) bool {
+        return false;
+    }
     fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
@@ -335,6 +340,7 @@ const RecordingJournal = struct {
         .onWrite = onWrite,
         .flush = flush,
         .bgRewrite = bgRewrite,
+        .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
@@ -353,6 +359,9 @@ const RecordingJournal = struct {
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
+    fn dueForRewrite(_: *anyopaque, _: Config) bool {
+        return false;
+    }
     fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
