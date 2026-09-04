@@ -11,12 +11,7 @@ pub fn main(init: std.process.Init) !void {
     const server = try Server.create(init.io, gpa.allocator(), config);
     defer server.destroy();
 
-    installShutdownHandlers(server);
+    // TODO: install SIGINT/SIGTERM shutdown handling after acceptLoop can be
+    // woken and active connection threads can be drained safely.
     try server.run();
-}
-
-fn installShutdownHandlers(server: *Server) void {
-    // TODO: route SIGINT/SIGTERM through Server.run's orderly
-    // listener, cron, and AOF shutdown sequence.
-    _ = server;
 }
