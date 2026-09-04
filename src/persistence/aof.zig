@@ -992,6 +992,118 @@ test "onWrite followed by flush puts the encoded command in the incr file" {
     }.run);
 }
 
+test "always writes and fsyncs before onWrite returns" {
+    try withScratchDir("scratch-aof-fsync-always", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_dirname = "scratch-aof-fsync-always",
+                .append_fsync = .always,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            try backend.journal().onWrite(sampleEvent());
+
+            try testing.expect(backend._last_fsync_ms != null);
+            const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(contents);
+            try testing.expect(std.mem.indexOf(u8, contents, "SET") != null);
+        }
+    }.run);
+}
+
+test "everysec does not fsync more than once per second" {
+    try withScratchDir("scratch-aof-fsync-everysec", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            _ = dir;
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_dirname = "scratch-aof-fsync-everysec",
+                .append_fsync = .everysec,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            backend._last_fsync_ms = 1000;
+
+            try backend.journal().onWrite(sampleEvent());
+            try backend.journal().flush(1999);
+            try testing.expectEqual(@as(?time.UnixMs, 1000), backend._last_fsync_ms);
+
+            try backend.journal().flush(2000);
+            try testing.expectEqual(@as(?time.UnixMs, 2000), backend._last_fsync_ms);
+        }
+    }.run);
+}
+
+test "everysec retries after a failed flush" {
+    try withScratchDir("scratch-aof-fsync-retry", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            _ = dir;
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_dirname = "scratch-aof-fsync-retry",
+                .append_fsync = .everysec,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            const j = backend.journal();
+            backend._last_fsync_ms = 0;
+            try j.onWrite(sampleEvent());
+
+            const file = backend._file.?;
+            backend._file = null;
+
+            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+            if (devnull < 0) return error.OpenDevNullFailed;
+            defer _ = std.c.close(devnull);
+            const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+            if (saved_stderr < 0) return error.DupFailed;
+            defer {
+                _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+                _ = std.c.close(saved_stderr);
+            }
+            _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+            try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(1000));
+            try testing.expectEqual(@as(?time.UnixMs, 0), backend._last_fsync_ms);
+
+            backend._file = file;
+            try j.flush(1000);
+            try testing.expectEqual(@as(?time.UnixMs, 1000), backend._last_fsync_ms);
+            try testing.expect(!backend._last_write_failed);
+            try j.deinit();
+        }
+    }.run);
+}
+
+test "no policy flushes without fsync" {
+    try withScratchDir("scratch-aof-fsync-no", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{
+                .append_dirname = "scratch-aof-fsync-no",
+                .append_fsync = .no,
+            };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            try backend.journal().onWrite(sampleEvent());
+            try backend.journal().flush(5000);
+
+            try testing.expect(backend._last_fsync_ms == null);
+            const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(contents);
+            try testing.expect(std.mem.indexOf(u8, contents, "SET") != null);
+        }
+    }.run);
+}
+
 test "onWrite alone leaves the file untouched" {
     try withScratchDir("scratch-aof-onwrite-buffers", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {

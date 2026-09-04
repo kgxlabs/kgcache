@@ -187,6 +187,56 @@ test "cron flushes the AOF and swallows flush errors" {
     try testing.expectEqual(@as(usize, 2), backend.flush_calls);
 }
 
+test "everysec cron flush drains buffered commands" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-cron-flush-everysec";
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var state = PersistenceState.init(testing.io, false);
+    const config: Config = .{
+        .append_dirname = dirname,
+        .append_fsync = .everysec,
+    };
+    var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
+    defer backend.journal().deinit() catch {};
+
+    try backend.journal().onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    flushAofIfDue(testing.io, backend.journal());
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    const contents = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+    defer testing.allocator.free(contents);
+    try testing.expect(std.mem.indexOf(u8, contents, "DEL") != null);
+}
+
+test "no cron flush drains buffered commands" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-cron-flush-no";
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var state = PersistenceState.init(testing.io, false);
+    const config: Config = .{
+        .append_dirname = dirname,
+        .append_fsync = .no,
+    };
+    var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
+    defer backend.journal().deinit() catch {};
+
+    try backend.journal().onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    flushAofIfDue(testing.io, backend.journal());
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    const contents = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+    defer testing.allocator.free(contents);
+    try testing.expect(std.mem.indexOf(u8, contents, "DEL") != null);
+}
+
 test "cron forwards failed AOF completion and ignores a running child" {
     const testing = std.testing;
     var backend = FinishRewriteJournal{};
