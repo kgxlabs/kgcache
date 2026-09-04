@@ -152,6 +152,8 @@ fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, con
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
 pub fn destroy(self: *Server) void {
+    stopCronBeforeDestroy(self);
+
     // flush out buffered datas and clear it before tearning down store
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {
@@ -165,6 +167,12 @@ pub fn destroy(self: *Server) void {
     self._allocator.free(self._notifier_storages);
     self._allocator.free(self._default_storages);
     self._allocator.destroy(self);
+}
+
+fn stopCronBeforeDestroy(self: *Server) void {
+    // TODO(step 14): signal the cron loop, retain its thread handle, and join
+    // it here before any state reachable by cron is freed.
+    _ = self;
 }
 
 /// The listener is bound here rather than in `create` so `create` can be

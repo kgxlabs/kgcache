@@ -37,6 +37,8 @@ _base_encoder: ?AofEncoder = null,
 _base_size: u64,
 _pending_base_seq: ?u32 = null,
 _last_rewrite_attempt_ms: ?time.UnixMs = null,
+// TODO(step 14): initialize and update this when everysec fsync succeeds.
+_last_fsync_ms: ?time.UnixMs = null,
 _last_write_failed: bool = false,
 _loading: bool = false,
 _buffer: std.ArrayList(u8) = .empty,
@@ -713,14 +715,20 @@ fn flushLocked(self: *AofBackend) Journal.Error!void {
     file_writer.interface.writeAll(self._buffer.items) catch return Journal.Error.FailedToWriteIncrFile;
     file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
 
-    if (self._config.append_fsync == .always) {
-        file.sync(self._io) catch return Journal.Error.FailedToWriteIncrFile;
-    }
+    try syncByPolicy(self, file);
 
     self._incr_bytes += self._buffer.items.len;
     self._file_offset += self._buffer.items.len;
     self._buffer.clearRetainingCapacity();
     self._last_write_failed = false;
+}
+
+fn syncByPolicy(self: *AofBackend, file: std.Io.File) Journal.Error!void {
+    // TODO: accept now_ms and implement everysec/no policy decisions.
+    // Preserve the existing always behavior until the policy work lands.
+    if (self._config.append_fsync == .always) {
+        file.sync(self._io) catch return Journal.Error.FailedToWriteIncrFile;
+    }
 }
 
 fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void {

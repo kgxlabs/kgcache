@@ -32,12 +32,20 @@ pub fn run(
         }
         // clean up forked child processes and register for auto rewrite
         if (maybe_aof) |aof| {
+            flushAofIfDue(io, aof);
             finishAofIfCompleted(io, aof, persistence_state.reapAof());
             triggerRewriteIfDue(io, aof, data_storages, config);
         }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
     }
+}
+
+fn flushAofIfDue(io: std.Io, aof: persistence.JournalPersistence) void {
+    // TODO: call aof.flush(now_ms), log failures, and preserve the
+    // cron loop. Kept as a no-op until policy-aware flush is implemented.
+    _ = io;
+    _ = aof;
 }
 
 fn finishAofIfCompleted(
