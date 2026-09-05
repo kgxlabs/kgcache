@@ -1,6 +1,13 @@
-// NOTE: This is a wrapper around real storage backend
-// This storage is only responsible for notifying the persistence backends when a operation happens
-// There should be no actual storage logic in this file
+// NOTE: ============================================================================
+// AOF WRITE SAFETY RULES
+// ============================================================================
+// AOF-backed changes must follow one flow:
+// 1. The AOF record must be prepared before storage changes.
+// 2. The record must be aborted if the storage change fails.
+// 3. The record must be published after the storage change succeeds.
+// Preparation must reserve everything needed by publish.
+// A failed flush must keep the published record for retry.
+// ============================================================================
 
 const std = @import("std");
 const persistence = @import("../persistence.zig");
