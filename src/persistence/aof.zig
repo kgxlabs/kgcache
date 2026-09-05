@@ -176,8 +176,8 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     }
 }
 
-pub fn prepareRecord(_: *anyopaque, _: Journal.WriteEvent) Journal.Error!Journal.Record {
-    return .{};
+pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!Journal.Record {
+    return Journal.Record.init(ptr, event, onWrite);
 }
 
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {

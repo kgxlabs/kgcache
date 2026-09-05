@@ -101,22 +101,32 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
 
 pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    const result = try self._inner.put(key, value, options);
-    self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
-        const maybe_exp = try self._inner.getExp(key);
-        const expires_at: ?time.UnixMs = if (maybe_exp) |exp| exp.expires_at else null;
+        // Use the explicit expiration, or preserve the current one for KEEPTTL.
+        const expires_at: ?time.UnixMs = if (options.expires_at) |exp|
+            exp
+        else if (options.keepttl) blk: {
+            const maybe_exp = try self._inner.getExp(key);
+            break :blk if (maybe_exp) |exp| exp.expires_at else null;
+        } else null;
 
-        // TODO: improve error mapping after error map design imp
-        aof.onWrite(.{ .put = .{
+        var record = aof.prepareRecord(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
             .value = value,
             .expires_at = expires_at,
         } }) catch return Storage.Error.UnableToRecordWrite;
+        errdefer record.abort();
+
+        const result = try self._inner.put(key, value, options);
+        self._change_tracker.recordChange();
+        record.publish() catch return Storage.Error.UnableToRecordWrite;
+        return result;
     }
 
+    const result = try self._inner.put(key, value, options);
+    self._change_tracker.recordChange();
     return result;
 }
 
@@ -274,8 +284,8 @@ const FailingJournal = struct {
         return error.UnableToRecordWrite;
     }
 
-    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
-        return .{};
+    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+        return persistence.JournalPersistence.Record.init(ptr, event, onWrite);
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
@@ -363,8 +373,8 @@ const RecordingJournal = struct {
         self.last_event = event;
     }
 
-    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
-        return .{};
+    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+        return persistence.JournalPersistence.Record.init(ptr, event, onWrite);
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}

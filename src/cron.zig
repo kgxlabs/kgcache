@@ -139,8 +139,8 @@ const FinishRewriteJournal = struct {
     }
 
     fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
-    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
-        return .{};
+    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+        return persistence.JournalPersistence.Record.init(ptr, event, onWrite);
     }
     fn flush(ptr: *anyopaque, now_ms: i64) persistence.JournalPersistence.Error!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
