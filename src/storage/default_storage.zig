@@ -35,6 +35,7 @@ const vtable: Storage.VTable = .{
     .clearExp = clearExp,
     .removeIfExpired = removeIfExpired,
     .getExpirableCount = getExpirableCount,
+    .sampleExpirableKey = sampleExpirableKey,
     .tryExpireRandom = tryExpireRandom,
     .deinit = deinit,
     .size = size,
@@ -225,6 +226,20 @@ pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry
 
 pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
+    const owned_key = try sampleExpirableKey(ptr) orelse return null;
+    errdefer self._allocator.free(owned_key);
+
+    const was_removed = self.removeByKey(owned_key, .expired_only);
+    if (!was_removed) {
+        self._allocator.free(owned_key);
+        return null;
+    }
+
+    return owned_key;
+}
+
+pub fn sampleExpirableKey(ptr: *anyopaque) Storage.Error!?[]const u8 {
+    const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     if (self._expirables.items.len == 0) {
         return null;
     }
@@ -238,21 +253,7 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
         return Storage.Error.InvalidIndex;
     }
 
-    const key = self._expirables.items[random_index].key;
-
-    // `removeByKey` frees the map's copy of `key` on removal, so we must dupe
-    // it *before* calling `removeByKey`, or the slice we'd return would be
-    // dangling. Caller owns and must free `owned_key`.
-    const owned_key = try self._allocator.dupe(u8, key);
-    errdefer self._allocator.free(owned_key);
-
-    const was_removed = self.removeByKey(key, .expired_only);
-    if (!was_removed) {
-        self._allocator.free(owned_key);
-        return null;
-    }
-
-    return owned_key;
+    return try self._allocator.dupe(u8, self._expirables.items[random_index].key);
 }
 
 pub fn getExpirableCount(ptr: *anyopaque) u32 {

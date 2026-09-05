@@ -48,12 +48,17 @@ const vtable: Journal.VTable = .{
     .deinit = deinit,
     .finishRewrite = finishRewrite,
     .flush = flush,
-    .onWrite = onWrite,
     .prepareRecord = prepareRecord,
     .dueForRewrite = dueForRewrite,
     .beginLoading = beginLoading,
     .endLoading = endLoading,
     .reconcile = reconcile,
+};
+
+const PreparedRecord = struct {
+    backend: *AofBackend,
+    bytes: []const u8,
+    db_index: u32,
 };
 
 pub fn journal(self: *AofBackend) Journal {
@@ -163,21 +168,31 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     };
 }
 
-pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
+pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!Journal.Record {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
-    if (self._loading) return;
+    if (self._loading) return Journal.Record.init(ptr, event, ignoreWrite, ignoreAbort);
+
+    const prepared = self._allocator.create(PreparedRecord) catch return Journal.Error.OutOfMemory;
+    errdefer self._allocator.destroy(prepared);
+
+    self._mutex.lockUncancelable(self._io);
+    errdefer self._mutex.unlock(self._io);
 
     if (self._last_write_failed) return Journal.Error.UnableToRecordWrite;
 
-    try appendEvent(self, event);
-    if (self._config.append_fsync == .always) {
-        try flush(ptr, time.nowMs(self._io));
-    }
-}
+    const encoded = self._encoder.encodeWriteEvent(self._allocator, event) catch return Journal.Error.OutOfMemory;
+    errdefer self._encoder.deinit(self._allocator, encoded.bytes);
 
-pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!Journal.Record {
-    return Journal.Record.init(ptr, event, onWrite);
+    self._buffer.ensureUnusedCapacity(self._allocator, encoded.bytes.len) catch return Journal.Error.FailedBufferAppend;
+
+    prepared.* = .{
+        .backend = self,
+        .bytes = encoded.bytes,
+        .db_index = encoded.db_index,
+    };
+
+    return Journal.Record.init(prepared, event, publishPreparedRecord, abortPreparedRecord);
 }
 
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {
@@ -749,16 +764,40 @@ fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) Journal.Error!void {
     self._last_write_failed = false;
 }
 
-fn appendEvent(self: *AofBackend, event: Journal.WriteEvent) Journal.Error!void {
-    self._mutex.lockUncancelable(self._io);
+fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) Journal.Error!void {
+    const prepared: *PreparedRecord = @ptrCast(@alignCast(ptr));
+    const self = prepared.backend;
     defer self._mutex.unlock(self._io);
+    defer self._allocator.destroy(prepared);
+    defer self._encoder.deinit(self._allocator, prepared.bytes);
 
-    const encoded = self._encoder.encodeWriteEvent(self._allocator, event) catch return Journal.Error.OutOfMemory;
-    defer self._encoder.deinit(self._allocator, encoded.bytes);
+    self._buffer.appendSliceAssumeCapacity(prepared.bytes);
+    self._encoder.commitDb(prepared.db_index);
 
-    self._buffer.appendSlice(self._allocator, encoded.bytes) catch return Journal.Error.FailedBufferAppend;
-    // we need to make sure that we only set db after we actaully successfully add the bytes to buffer
-    self._encoder.commitDb(encoded.db_index);
+    if (self._config.append_fsync == .always) {
+        flushLocked(self, time.nowMs(self._io)) catch |err| {
+            self._last_write_failed = true;
+            helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
+            return err;
+        };
+    }
+}
+
+fn abortPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) void {
+    const prepared: *PreparedRecord = @ptrCast(@alignCast(ptr));
+    const self = prepared.backend;
+
+    self._encoder.deinit(self._allocator, prepared.bytes);
+    self._allocator.destroy(prepared);
+    self._mutex.unlock(self._io);
+}
+
+fn ignoreWrite(_: *anyopaque, _: Journal.WriteEvent) Journal.Error!void {
+    return;
+}
+
+fn ignoreAbort(_: *anyopaque, _: Journal.WriteEvent) void {
+    return;
 }
 
 fn sampleEvent() Journal.WriteEvent {
@@ -993,6 +1032,34 @@ test "onWrite followed by flush puts the encoded command in the incr file" {
             try testing.expect(std.mem.indexOf(u8, contents, "SET") != null);
             try testing.expect(std.mem.indexOf(u8, contents, "foo") != null);
             try testing.expect(std.mem.indexOf(u8, contents, "bar") != null);
+        }
+    }.run);
+}
+
+test "prepared record is invisible until publish and abort keeps it invisible" {
+    try withScratchDir("scratch-aof-prepare-record", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-prepare-record" };
+
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const j = backend.journal();
+
+            var aborted = try j.prepareRecord(sampleEvent());
+            try testing.expectEqual(0, backend._buffer.items.len);
+            aborted.abort();
+            try testing.expectEqual(0, backend._buffer.items.len);
+
+            var published = try j.prepareRecord(sampleEvent());
+            defer published.abort();
+            try testing.expectEqual(0, backend._buffer.items.len);
+            try published.publish();
+
+            try testing.expect(std.mem.indexOf(u8, backend._buffer.items, "SELECT") != null);
+            try testing.expect(std.mem.indexOf(u8, backend._buffer.items, "SET") != null);
         }
     }.run);
 }

@@ -36,6 +36,7 @@ const vtable: Storage.VTable = .{
     .clearExp = clearExp,
     .removeIfExpired = removeIfExpired,
     .getExpirableCount = getExpirableCount,
+    .sampleExpirableKey = sampleExpirableKey,
     .tryExpireRandom = tryExpireRandom,
     .deinit = deinit,
     .size = size,
@@ -80,22 +81,31 @@ pub fn deinit(ptr: *anyopaque) void {
 
 pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    // NOTE: `get` can silently remove `key` as a side effect (lazy expiration,
-    // below), but that removal is not observable without coupling with the persistence layer
-    // So instead of relying on concrete storage get removal, we are doing that operation in advance
-    // so when concrete `get` checks for removal it will already be removed
-    const is_removed = try self._inner.removeIfExpired(key);
+    if (self._aof) |aof| {
+        const maybe_exp = try self._inner.getExp(key);
+        if (maybe_exp) |exp| {
+            if (time.isPastTime(self._inner._io, exp.expires_at)) {
+                var record = aof.prepareRecord(.{
+                    .remove = .{ .db_index = self._db_index, .key = key },
+                }) catch return Storage.Error.UnableToRecordWrite;
+                errdefer record.abort();
 
-    if (is_removed) {
-        self._change_tracker.recordChange();
-        if (self._aof) |aof| {
-            // TODO: improve error mapping after error map design imp
-            aof.onWrite(.{
-                .remove = .{ .db_index = self._db_index, .key = key },
-            }) catch return Storage.Error.UnableToRecordWrite;
+                const is_removed = try self._inner.removeIfExpired(key);
+                if (is_removed) {
+                    self._change_tracker.recordChange();
+                    record.publish() catch return Storage.Error.UnableToRecordWrite;
+                    return null;
+                }
+
+                record.abort();
+            }
         }
+
+        return self._inner.get(key);
     }
 
+    const is_removed = try self._inner.removeIfExpired(key);
+    if (is_removed) self._change_tracker.recordChange();
     return self._inner.get(key);
 }
 
@@ -135,16 +145,21 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 // TODO: make report whether or not if removed something or not.
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    try self._inner.remove(key);
-    self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
-        // TODO: improve error mapping after error map design imp
-        aof.onWrite(.{ .remove = .{
-            .db_index = self._db_index,
-            .key = key,
-        } }) catch return Storage.Error.UnableToRecordWrite;
+        var record = aof.prepareRecord(.{
+            .remove = .{ .db_index = self._db_index, .key = key },
+        }) catch return Storage.Error.UnableToRecordWrite;
+        errdefer record.abort();
+
+        try self._inner.remove(key);
+        self._change_tracker.recordChange();
+        record.publish() catch return Storage.Error.UnableToRecordWrite;
+        return;
     }
+
+    try self._inner.remove(key);
+    self._change_tracker.recordChange();
 }
 
 pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
@@ -167,26 +182,45 @@ pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error
 
 pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
-    const maybe_key = self._inner.tryExpireRandom() catch return Storage.Error.UnableToExpire;
-    if (maybe_key == null) return null;
-    const key = maybe_key.?;
-
-    self._change_tracker.recordChange();
 
     if (self._aof) |aof| {
-        // TODO: improve error mapping after error map design imp
-        aof.onWrite(.{ .remove = .{
-            .key = key,
-            .db_index = self._db_index,
-        } }) catch return Storage.Error.UnableToRecordWrite;
+        const maybe_key = self._inner.sampleExpirableKey() catch return Storage.Error.UnableToExpire;
+        const key = maybe_key orelse return null;
+        errdefer self._allocator.free(key);
+
+        var record = aof.prepareRecord(.{
+            .remove = .{
+                .key = key,
+                .db_index = self._db_index,
+            },
+        }) catch return Storage.Error.UnableToRecordWrite;
+        errdefer record.abort();
+
+        const is_removed = self._inner.removeIfExpired(key) catch return Storage.Error.UnableToExpire;
+        if (!is_removed) {
+            record.abort();
+            self._allocator.free(key);
+            return null;
+        }
+
+        self._change_tracker.recordChange();
+        record.publish() catch return Storage.Error.UnableToRecordWrite;
+        return key;
     }
 
-    return key;
+    const maybe_key = self._inner.tryExpireRandom() catch return Storage.Error.UnableToExpire;
+    if (maybe_key != null) self._change_tracker.recordChange();
+    return maybe_key;
 }
 
 pub fn getExpirableCount(ptr: *anyopaque) u32 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.getExpirableCount();
+}
+
+pub fn sampleExpirableKey(ptr: *anyopaque) Storage.Error!?[]const u8 {
+    const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
+    return self._inner.sampleExpirableKey();
 }
 
 // TODO: same gap as setExp. PERSIST will need to journal from here.
@@ -264,7 +298,6 @@ test "a lazy-expiration removal during get increments the change tracker's dirty
 
 const FailingJournal = struct {
     const journal_vtable: persistence.JournalPersistence.VTable = .{
-        .onWrite = onWrite,
         .prepareRecord = prepareRecord,
         .flush = flush,
         .bgRewrite = bgRewrite,
@@ -280,12 +313,8 @@ const FailingJournal = struct {
         return .{ .ptr = self, .vtable = &journal_vtable };
     }
 
-    fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
+    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
         return error.UnableToRecordWrite;
-    }
-
-    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
-        return persistence.JournalPersistence.Record.init(ptr, event, onWrite);
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
@@ -320,6 +349,145 @@ test "a journal that fails to record a write fails the put" {
     defer tx.end();
 
     try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null }));
+    try testing.expect(try wrapped.get("foo") == null);
+    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+}
+
+test "a journal preparation failure leaves a removed key unchanged" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var inner = backend.storage();
+    {
+        var tx = try inner.begin();
+        defer tx.end();
+        _ = try inner.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
+    }
+
+    var tracker = ChangeTracker.init(testing.io);
+    var failing_journal = FailingJournal{};
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.remove("foo"));
+    try testing.expect((try wrapped.get("foo")) != null);
+    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+}
+
+test "a journal preparation failure leaves a lazy-expired key stored" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var inner = backend.storage();
+    {
+        var tx = try inner.begin();
+        defer tx.end();
+        _ = try inner.put("expired", .{ .string = "value" }, .{
+            .expires_at = time.nowMs(testing.io) - 1,
+        });
+    }
+
+    var tracker = ChangeTracker.init(testing.io);
+    var failing_journal = FailingJournal{};
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.get("expired"));
+    try testing.expectEqual(1, wrapped.size());
+    try testing.expectEqual(1, wrapped.getExpirableCount());
+    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+}
+
+test "a journal preparation failure leaves an active-expiration key stored" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var inner = backend.storage();
+    {
+        var tx = try inner.begin();
+        defer tx.end();
+        _ = try inner.put("expired", .{ .string = "value" }, .{
+            .expires_at = time.nowMs(testing.io) - 1,
+        });
+    }
+
+    var tracker = ChangeTracker.init(testing.io);
+    var failing_journal = FailingJournal{};
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.tryExpireRandom());
+    try testing.expectEqual(1, wrapped.size());
+    try testing.expectEqual(1, wrapped.getExpirableCount());
+    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+}
+
+test "a journal preparation failure leaves a lazily expired key unchanged" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var inner = backend.storage();
+    {
+        var tx = try inner.begin();
+        defer tx.end();
+        _ = try inner.put("expired", .{ .string = "value" }, .{
+            .expires_at = time.nowMs(testing.io) - 1,
+        });
+    }
+
+    var tracker = ChangeTracker.init(testing.io);
+    var failing_journal = FailingJournal{};
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.get("expired"));
+    try testing.expectEqual(1, wrapped.size());
+    try testing.expectEqual(1, wrapped.getExpirableCount());
+    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+}
+
+test "a journal preparation failure leaves an actively expired key unchanged" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var inner = backend.storage();
+    {
+        var tx = try inner.begin();
+        defer tx.end();
+        _ = try inner.put("expired", .{ .string = "value" }, .{
+            .expires_at = time.nowMs(testing.io) - 1,
+        });
+    }
+
+    var tracker = ChangeTracker.init(testing.io);
+    var failing_journal = FailingJournal{};
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var wrapped = notifier.storage();
+    defer wrapped.deinit();
+
+    var tx = try wrapped.begin();
+    defer tx.end();
+
+    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.tryExpireRandom());
+    try testing.expectEqual(1, wrapped.size());
+    try testing.expectEqual(1, wrapped.getExpirableCount());
+    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
 }
 
 test "a read that finds no expired key does not increment the dirty count" {
@@ -352,7 +520,6 @@ const RecordingJournal = struct {
     last_event: ?persistence.JournalPersistence.WriteEvent = null,
 
     const journal_vtable: persistence.JournalPersistence.VTable = .{
-        .onWrite = onWrite,
         .prepareRecord = prepareRecord,
         .flush = flush,
         .bgRewrite = bgRewrite,
@@ -368,14 +535,16 @@ const RecordingJournal = struct {
         return .{ .ptr = self, .vtable = &journal_vtable };
     }
 
-    fn onWrite(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
+    fn publishRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
         const self: *RecordingJournal = @ptrCast(@alignCast(ptr));
         self.last_event = event;
     }
 
     fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
-        return persistence.JournalPersistence.Record.init(ptr, event, onWrite);
+        return persistence.JournalPersistence.Record.init(ptr, event, publishRecord, abortRecord);
     }
+
+    fn abortRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
     fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
