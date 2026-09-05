@@ -1,6 +1,6 @@
 # Configuration
 
-kgcache runs entirely off built-in defaults — mirroring `redis-server` — until you hand it a config file as the first argument:
+kgcache runs entirely off built-in defaults, mirroring `redis-server`, until you hand it a config file as the first argument:
 
 ```bash
 ./zig-out/bin/kgcache path/to/kgcache.conf
@@ -15,7 +15,7 @@ port 7000
 num-databases 4
 ```
 
-Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup: an unrecognized directive, a directive with no value, or a value that doesn't fit its type all fail the process with a message on stderr rather than being silently ignored — the same fail-fast-on-bad-config behavior as `redis-server`.
+Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup: an unrecognized directive, a directive with no value, or a value that doesn't fit its type all fail the process with a message on stderr rather than being silently ignored: the same fail-fast-on-bad-config behavior as `redis-server`.
 
 ## Directives
 
@@ -47,7 +47,7 @@ See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every dire
 
 - Must end in `.kgc`.
 - A relative path resolves against the server's current working directory, not the config file's location.
-- The parent directory must already exist — it is not created automatically.
+- The parent directory must already exist: it is not created automatically.
 - `~` is not expanded, since that's a shell feature rather than something the config parser does; use an absolute path like `/Users/you/dump.kgc` instead of `~/dump.kgc`.
 
 ## `exclusive-bg-persistence` recommendation
@@ -112,4 +112,4 @@ flow, and failure behavior.
 
 ## Not yet configurable
 
-- Memory/eviction limits — no `maxmemory` support yet.
+- Memory/eviction limits: no `maxmemory` support yet.

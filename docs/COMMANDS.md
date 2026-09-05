@@ -1,5 +1,7 @@
 # Commands
 
+This reference describes the currently implemented command subset. Full Redis compatibility is a development goal; support for RESP2 does not imply that all Redis clients or workloads are supported. Known command deviations are recorded below. For connection behavior and other server limitations, see [Current status and compatibility](../README.md#current-status-and-compatibility).
+
 | Command | Behavior |
 | --- | --- |
 | `PING` | Returns `PONG`. Arguments are currently ignored. |
@@ -9,7 +11,7 @@
 | `SELECT <index>` | Switches the connection's active database. Returns an error if `index` is out of range. |
 | `DBSIZE` | Returns the number of stored keys as an RESP integer. |
 | `SAVE` | Writes a `.kgc` snapshot of all databases to disk (see [Configuration](CONFIGURATION.md) for `snapshot-path`), and blocks the calling connection until the write finishes. Returns an error if the write fails or a save is already in progress. |
-| `BGSAVE` | Same snapshot as `SAVE`, but returns `OK` immediately and does the actual write in a forked background process, so the connection that issued it isn't blocked. Returns an error immediately, without forking, if a save is already in progress. Also triggered automatically by the background housekeeping loop when a configured `save` rule is met — see [Configuration](CONFIGURATION.md#automatic-background-saving-save). See [Snapshots](SNAPSHOTS.md#background-saving-bgsave) for how this works and what it guards against. |
+| `BGSAVE` | Same snapshot as `SAVE`, but returns `OK` immediately and does the actual write in a forked background process, so the connection that issued it isn't blocked. Returns an error immediately, without forking, if a save is already in progress. Also triggered automatically by the background housekeeping loop when a configured `save` rule is met; see [Configuration](CONFIGURATION.md#automatic-background-saving-save). See [Snapshots](SNAPSHOTS.md#background-saving-bgsave) for how this works and what it guards against. |
 | `BGREWRITEAOF` | Starts an AOF rewrite in a forked background process and returns `OK`. Returns an error if AOF is off, another rewrite is running, or the rewrite cannot start. See [Append-only file](AOF.md#rewrite). |
 | `COMMAND <value>` | Placeholder command that returns its first argument; Redis command introspection is not implemented. |
 
