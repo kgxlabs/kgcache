@@ -107,6 +107,25 @@ Expiry times use the absolute `PXAT` form. A relative timeout such as
 `PX 5000` would start a new five-second timer on every restart. An absolute
 time keeps the original expiry time.
 
+## How writes reach AOF
+
+Every AOF-backed data change must follow this order:
+
+1. Prepare the AOF record.
+2. Change storage.
+3. Abort the record if the storage change fails.
+4. Publish the record if the storage change succeeds.
+
+Preparation encodes the command and reserves buffer space before storage is
+changed. It does not publish the command. Publishing then appends the prepared
+bytes without allocating memory.
+
+This flow is used by `PUT`, `REMOVE`, lazy expiration, and active expiration.
+It keeps storage and the AOF buffer in the same command order.
+
+With `appendfsync always`, publishing also tries to flush and sync the buffer
+before returning. With the other policies, cron handles the flush.
+
 ## Startup
 
 With `appendonly yes`, startup follows this order:
@@ -198,8 +217,20 @@ rewrite, kgcache waits 60 seconds before trying another automatic rewrite.
 
 ## Write failures
 
-If an AOF write or fsync fails, kgcache records the failure. New client
-writes then fail instead of being accepted without a working journal.
+If preparation fails, the storage change does not run. Memory and AOF stay
+unchanged.
+
+If the storage change fails, the prepared record is aborted. AOF stays
+unchanged.
+
+After preparation succeeds, publishing to the AOF buffer does not allocate and
+must not fail. With `appendfsync always`, the following flush can still fail.
+At that point, memory and the AOF buffer contain the change, but the disk state
+is uncertain. The client currently receives an error even though the live value
+changed.
+
+kgcache records a flush failure. New writes then fail during preparation, so no
+more data changes are accepted while the journal is in the failed state.
 
 Cron keeps trying to flush. A later successful flush clears the failure, so
 the server can recover after a short problem such as a full disk that was
