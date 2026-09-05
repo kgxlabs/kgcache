@@ -110,7 +110,7 @@ pub fn deinit(ptr: *anyopaque) void {
 pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
 
-    const is_removed = removeByKey(self, key, .expired_only) catch return Storage.Error.UnableToExpire;
+    const is_removed = removeByKey(self, key, .expired_only);
     if (is_removed) {
         return null;
     }
@@ -135,7 +135,7 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
         // no expiration set and no existing expiration
         // only update if keepttl is false
         if (options.expires_at == null and existing.exp_index != null and !options.keepttl) {
-            try swapRemoveExpiration(self, existing);
+            swapRemoveExpiration(self, existing);
             existing.exp_index = null;
         }
 
@@ -200,13 +200,13 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 
 pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    _ = try removeByKey(self, key, .unconditional);
+    _ = removeByKey(self, key, .unconditional);
     return;
 }
 
 pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    return try removeByKey(self, key, .expired_only);
+    return removeByKey(self, key, .expired_only);
 }
 
 pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpiration {
@@ -246,7 +246,7 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     const owned_key = try self._allocator.dupe(u8, key);
     errdefer self._allocator.free(owned_key);
 
-    const was_removed = try self.removeByKey(key, .expired_only);
+    const was_removed = self.removeByKey(key, .expired_only);
     if (!was_removed) {
         self._allocator.free(owned_key);
         return null;
@@ -295,40 +295,32 @@ pub fn size(ptr: *anyopaque) u32 {
 
 // TODO: The only reason we return bool from this function is to support get method
 // Find a way to support get method without exposing bool
-fn removeByKey(self: *DefaultStorage, key: []const u8, mode: Storage.RemovalMode) !bool {
-    if (self._entry_map.getPtr(key)) |entry_object| {
-        if (entry_object.exp_index) |exp_index| {
-            const index = exp_index;
-            const last_index = self._expirables.items.len - 1;
+fn removeByKey(self: *DefaultStorage, key: []const u8, mode: Storage.RemovalMode) bool {
+    const entry_object = self._entry_map.getPtr(key) orelse return false;
 
-            if (index < 0 or index > last_index) unreachable;
+    if (mode == .expired_only) {
+        const exp_index = entry_object.exp_index orelse return false;
+        if (exp_index >= self._expirables.items.len) unreachable;
 
-            const expirable = self._expirables.items[index];
-
-            const is_expired = time.isPastTime(self._io, expirable.expires_at);
-            const force_remove = mode == .unconditional;
-
-            if (is_expired or force_remove) {
-                try swapRemoveExpiration(self, entry_object);
-
-                const removed = self._entry_map.fetchRemove(key) orelse unreachable;
-                self._allocator.free(removed.key);
-
-                switch (removed.value.value) {
-                    .string => |str| self._allocator.free(str),
-                }
-
-                return true;
-            }
-        }
+        const expirable = self._expirables.items[exp_index];
+        if (!time.isPastTime(self._io, expirable.expires_at)) return false;
     }
 
-    return false;
+    swapRemoveExpiration(self, entry_object);
+
+    const removed = self._entry_map.fetchRemove(key) orelse unreachable;
+    self._allocator.free(removed.key);
+
+    switch (removed.value.value) {
+        .string => |str| self._allocator.free(str),
+    }
+
+    return true;
 }
 
 // Move the last item to index and overwrite it and then pop the last item hole
 // NOTE: This is not a actual swap but rather make the hole and pop it
-fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) !void {
+fn swapRemoveExpiration(self: *DefaultStorage, entry_object: *entry.Object) void {
     const index = entry_object.exp_index orelse return;
     const last_index = self._expirables.items.len - 1;
 
@@ -397,6 +389,24 @@ test "size counts all stored entries, not just expirable ones" {
     });
 
     try testing.expectEqual(2, backend_storage.size());
+}
+
+test "unconditional removal deletes a persistent entry" {
+    const testing = std.testing;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var backend_storage = backend.storage();
+    defer backend_storage.deinit();
+
+    var tx = try backend_storage.begin();
+    defer tx.end();
+
+    _ = try backend_storage.put("persistent", .{ .string = "value" }, .{ .expires_at = null });
+    try backend_storage.remove("persistent");
+
+    try testing.expect(try backend_storage.get("persistent") == null);
+    try testing.expectEqual(0, backend_storage.size());
+    try testing.expectEqual(0, backend_storage.getExpirableCount());
 }
 
 test "removing an expiration keeps the moved entry index valid" {
