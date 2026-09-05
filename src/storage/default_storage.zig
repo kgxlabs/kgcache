@@ -103,7 +103,7 @@ pub fn deinit(ptr: *anyopaque) void {
 // below), but that removal is not observable from this function's return
 // value alone. Any future wrapper that needs to observe every mutation
 // (e.g. a persistence layer notifying KGC/AOF listeners) must not call this
-// `get` directly for that purpose — it should route through the
+// `get` directly for that purpose: it should route through the
 // already-observable `removeIfExpired` first, then delegate the plain
 // lookup to this `get`, so the lazy-expiration delete goes through the same
 // notification path a `DEL` would.

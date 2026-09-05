@@ -1,6 +1,12 @@
 # Architecture
 
-## Overview
+## Role within kgx
+
+kgcache is being developed as the cache component of the kgx infrastructure stack, with standalone operation and Redis compatibility as design goals. The broader platform vision and roadmap are owned by the [kgxlabs organization](https://github.com/kgxlabs).
+
+The intended boundary is that kgcache owns the cache protocol, command semantics, in-memory storage, expiration, and optional persistence. The future kgx platform will coordinate service provisioning, networking, credentials, and deployment lifecycle. That platform integration is a goal, not a capability of the current server.
+
+## Current implementation
 
 ```text
 RESP client
@@ -15,7 +21,7 @@ RESP client
 
 The TCP server runs one detached thread per connection. The storage backend owns its copied keys and string values, and protects operations with a mutex-backed transaction boundary.
 
-## Design direction
+## Storage and concurrency trade-offs
 
 The default backend is intentionally straightforward today: a `StringHashMap` stores values, an `ArrayList` holds TTL bookkeeping, and each expiring entry keeps an index into that list for O(1) updates. Full layout, memory cost, and the planned redesign toward larger keyspaces are in [Expiration bookkeeping](EXPIRATION.md).
 
@@ -56,7 +62,7 @@ write and can rewrite the growing log in a background child. See
 ├── docs/                        # Configuration, commands, and architecture reference
 │   ├── CONFIGURATION.md
 │   ├── COMMANDS.md
-│   ├── ARCHITECTURE.md          # This file — overview, design direction, repo map
+│   ├── ARCHITECTURE.md          # This file: overview, design direction, repo map
 │   ├── PERSISTENCE.md           # Snapshot and AOF overview
 │   ├── SNAPSHOTS.md             # SAVE, BGSAVE, and automatic saving
 │   ├── AOF.md                   # AOF setup, fsync, loading, and rewrites

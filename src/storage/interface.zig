@@ -51,7 +51,7 @@ pub const VTable = struct {
     setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
     getExpirableCount: *const fn (*anyopaque) u32,
     // Returns the key that was expired and removed, or `null` if nothing was
-    // removed. The returned slice is a fresh allocation owned by the caller —
+    // removed. The returned slice is a fresh allocation owned by the caller;
     // the caller must free it (see `tryExpireRandom` below).
     tryExpireRandom: *const fn (*anyopaque) Error!?[]const u8,
     clearExp: *const fn (*anyopaque, []const u8) Error!void,

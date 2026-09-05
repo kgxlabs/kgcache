@@ -17,7 +17,7 @@ StringHashMap(key → Entry)                Expirables: ArrayList(ObjectExpirati
 └─────┴──────────────────────┘            └───────────────┴───────────────┴───┘
 ```
 
-To locate expiration metadata, the backend first finds the key's entry in the hash map, reads its `exp_index`, and then indexes directly into the expiration array — no scan required either way.
+To locate expiration metadata, the backend first finds the key's entry in the hash map, reads its `exp_index`, and then indexes directly into the expiration array; no scan required either way.
 
 Removing an expiration uses swap-remove: the final record fills the freed slot, and the moved key's `exp_index` is updated before the list is popped, so no gap is ever left mid-array.
 

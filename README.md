@@ -1,15 +1,19 @@
 # kgcache
 
-> A compact, Redis-protocol-compatible in-memory cache server, built in Zig.
+> An in-memory cache server built in Zig, evolving toward a drop-in Redis replacement.
 
-`kgcache` is an early-stage member of the [kgx](https://github.com/kgxlabs) family. It speaks RESP2 over TCP, keeps string values in memory, and is deliberately small enough to read end-to-end. The project is a practical playground for cache-server fundamentals: command dispatch, protocol handling, ownership, TTL bookkeeping, and concurrent access.
+`kgcache` is the cache component of the infrastructure stack being developed at [kgxlabs](https://github.com/kgxlabs). Its design goals are standalone operation with existing Redis clients and native integration into the future kgx application deployment platform.
+
+Today, kgcache supports a subset of Redis functionality over RESP2, including string storage, expiration, snapshots, and append-only persistence. It is under active development and is not yet a drop-in Redis replacement. See [Current status and compatibility](#current-status-and-compatibility) for known limitations.
+
+The platform vision and roadmap belong at the [kgxlabs organization](https://github.com/kgxlabs). This repository documents the cache component, its implementation, and current compatibility.
 
 ## At a glance
 
 | | |
 | --- | --- |
 | Protocol | RESP2 over TCP |
-| Address | `127.0.0.1:6379` by default — see [Configuration](docs/CONFIGURATION.md) |
+| Address | `127.0.0.1:6379` by default; see [Configuration](docs/CONFIGURATION.md) |
 | Runtime | Zig 0.16.0+ |
 | Data model | Process-local string keys and values |
 | Commands | See [Commands](docs/COMMANDS.md) |
@@ -23,7 +27,7 @@ Build and start the server:
 zig build run
 ```
 
-Then connect from another terminal with any RESP-compatible client. `redis-cli` is convenient:
+Then connect from another terminal with `redis-cli`:
 
 ```console
 $ redis-cli
@@ -49,13 +53,31 @@ with a config file:
 
 See [Configuration](docs/CONFIGURATION.md) for all settings.
 
+To run `kgcache` from any directory, add a shell alias to `~/.zshrc` (or
+`~/.bashrc` for Bash), adjusting the path to your checkout:
+
+```bash
+alias kgcache='"/absolute/path/to/kgcache/zig-out/bin/kgcache"'
+```
+
+After changing or pulling code, run `zig build` from the repository root to
+update the executable used by the `kgcache` alias. Restart any running kgcache
+server to use the rebuilt executable.
+
+Open a new terminal or reload your shell configuration with `source ~/.zshrc`
+(or `source ~/.bashrc`), then run:
+
+```bash
+kgcache /absolute/path/to/kgcache.conf
+```
+
 ## Documentation
 
 | Doc | Covers |
 | --- | --- |
-| [Commands](docs/COMMANDS.md) | Supported commands and `SET` option families |
+| [Commands](docs/COMMANDS.md) | Supported commands, `SET` options, and compatibility notes |
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
-| [Architecture](docs/ARCHITECTURE.md) | Request flow, design direction, concurrency trade-offs, repository layout |
+| [Architecture](docs/ARCHITECTURE.md) | Role within kgx, request flow, design trade-offs, repository layout |
 | [Persistence](docs/PERSISTENCE.md) | Short comparison of snapshots and AOF |
 | [Snapshots](docs/SNAPSHOTS.md) | `SAVE`, `BGSAVE`, child cleanup, and automatic saving |
 | [Append-only file](docs/AOF.md) | AOF setup, fsync policies, file layout, startup, and rewrite flow |
@@ -81,7 +103,7 @@ zig build run
 zig build test
 ```
 
-## Scope and current limitations
+## Current status and compatibility
 
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, transactions, or RESP3.
 - The server processes one parsed request per connection read, into a per-connection buffer (1 KiB by default, configurable). Pipelining and requests split across reads are not supported.

@@ -41,7 +41,7 @@ pub fn deinit(self: *KgcEncoder) void {
 }
 
 /// Bytes accumulated so far. Only meaningful to persist once `writeFooter`
-/// has run — before that the checksum it contains isn't final.
+/// has run: before that the checksum it contains isn't final.
 pub fn bytes(self: *const KgcEncoder) []const u8 {
     return self._buffer.items;
 }
@@ -69,7 +69,7 @@ pub fn writeFooter(self: *KgcEncoder) !void {
     try self.writeRaw(&[_]u8{@intFromEnum(Opcode.eof)});
 
     // The checksum digests everything up to and including the EOF marker,
-    // so it can't digest itself — these final bytes go straight to the
+    // so it can't digest itself: these final bytes go straight to the
     // buffer rather than through `writeRaw`.
     const checksum = self._checksum.final();
     try self._buffer.appendSlice(self._allocator, std.mem.asBytes(&checksum));
