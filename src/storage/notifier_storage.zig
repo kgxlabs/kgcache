@@ -255,6 +255,7 @@ test "a lazy-expiration removal during get increments the change tracker's dirty
 const FailingJournal = struct {
     const journal_vtable: persistence.JournalPersistence.VTable = .{
         .onWrite = onWrite,
+        .prepareRecord = prepareRecord,
         .flush = flush,
         .bgRewrite = bgRewrite,
         .dueForRewrite = dueForRewrite,
@@ -271,6 +272,10 @@ const FailingJournal = struct {
 
     fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
         return error.UnableToRecordWrite;
+    }
+
+    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+        return .{};
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
@@ -338,6 +343,7 @@ const RecordingJournal = struct {
 
     const journal_vtable: persistence.JournalPersistence.VTable = .{
         .onWrite = onWrite,
+        .prepareRecord = prepareRecord,
         .flush = flush,
         .bgRewrite = bgRewrite,
         .dueForRewrite = dueForRewrite,
@@ -355,6 +361,10 @@ const RecordingJournal = struct {
     fn onWrite(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
         const self: *RecordingJournal = @ptrCast(@alignCast(ptr));
         self.last_event = event;
+    }
+
+    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+        return .{};
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}

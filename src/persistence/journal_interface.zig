@@ -35,8 +35,18 @@ pub const WriteEvent = union(enum) {
     remove: struct { db_index: u32, key: []const u8 },
 };
 
+pub const Record = struct {
+    pub fn publish(_: *Record) void {
+        return;
+    }
+    pub fn abort(_: *Record) void {
+        return;
+    }
+};
+
 pub const VTable = struct {
     onWrite: *const fn (*anyopaque, WriteEvent) Error!void,
+    prepareRecord: *const fn (*anyopaque, WriteEvent) Error!Record,
     flush: *const fn (*anyopaque, i64) Error!void,
     bgRewrite: *const fn (*anyopaque, []const Storage) Error!void,
     dueForRewrite: *const fn (*anyopaque, Config) bool,
@@ -49,6 +59,10 @@ pub const VTable = struct {
 
 pub fn onWrite(self: JournalPersistence, event: WriteEvent) Error!void {
     return self.vtable.onWrite(self.ptr, event);
+}
+
+pub fn prepareRecord(self: JournalPersistence, event: WriteEvent) Error!Record {
+    return self.vtable.prepareRecord(self.ptr, event);
 }
 
 pub fn flush(self: JournalPersistence, now_ms: i64) Error!void {

@@ -49,6 +49,7 @@ const vtable: Journal.VTable = .{
     .finishRewrite = finishRewrite,
     .flush = flush,
     .onWrite = onWrite,
+    .prepareRecord = prepareRecord,
     .dueForRewrite = dueForRewrite,
     .beginLoading = beginLoading,
     .endLoading = endLoading,
@@ -173,6 +174,10 @@ pub fn onWrite(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!void {
     if (self._config.append_fsync == .always) {
         try flush(ptr, time.nowMs(self._io));
     }
+}
+
+pub fn prepareRecord(_: *anyopaque, _: Journal.WriteEvent) Journal.Error!Journal.Record {
+    return .{};
 }
 
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {

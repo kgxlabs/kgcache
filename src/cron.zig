@@ -123,6 +123,7 @@ const FinishRewriteJournal = struct {
 
     const vtable: persistence.JournalPersistence.VTable = .{
         .onWrite = onWrite,
+        .prepareRecord = prepareRecord,
         .flush = flush,
         .bgRewrite = bgRewrite,
         .dueForRewrite = dueForRewrite,
@@ -138,6 +139,9 @@ const FinishRewriteJournal = struct {
     }
 
     fn onWrite(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
+    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+        return .{};
+    }
     fn flush(ptr: *anyopaque, now_ms: i64) persistence.JournalPersistence.Error!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
         self.flush_calls += 1;
