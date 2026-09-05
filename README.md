@@ -53,6 +53,24 @@ with a config file:
 
 See [Configuration](docs/CONFIGURATION.md) for all settings.
 
+To run `kgcache` from any directory, add a shell alias to `~/.zshrc` (or
+`~/.bashrc` for Bash), adjusting the path to your checkout:
+
+```bash
+alias kgcache='"/absolute/path/to/kgcache/zig-out/bin/kgcache"'
+```
+
+After changing or pulling code, run `zig build` from the repository root to
+update the executable used by the `kgcache` alias. Restart any running kgcache
+server to use the rebuilt executable.
+
+Open a new terminal or reload your shell configuration with `source ~/.zshrc`
+(or `source ~/.bashrc`), then run:
+
+```bash
+kgcache /absolute/path/to/kgcache.conf
+```
+
 ## Documentation
 
 | Doc | Covers |
