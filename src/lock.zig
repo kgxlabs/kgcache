@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 
 const Lock = @This();
 
@@ -16,7 +17,6 @@ pub fn init(io: std.Io) Lock {
 pub fn begin(self: *Lock) std.Io.Cancelable!Tx {
     try self._mutex.lock(self._io);
     return Tx{
-        ._io = self._io,
         ._owner = self,
     };
 }
@@ -24,7 +24,6 @@ pub fn begin(self: *Lock) std.Io.Cancelable!Tx {
 pub fn beginUncancelable(self: *Lock) Tx {
     self._mutex.lockUncancelable(self._io);
     return .{
-        ._io = self._io,
         ._owner = self,
     };
 }
@@ -34,19 +33,42 @@ pub fn tryBegin(self: *Lock) ?Tx {
     if (!success) return null;
 
     return Tx{
-        ._io = self._io,
         ._owner = self,
     };
 }
 
 pub const Tx = struct {
-    _io: std.Io,
     _owner: *Lock,
-    _active: bool = false,
 
     pub fn end(self: *Tx) void {
-        std.debug.assert(self._active);
-        self._active = false;
-        self._owner._mutex.unlock(self._io);
+        self._owner._mutex.unlock(self._owner._io);
     }
 };
+
+test "begin and end allow another session" {
+    var lock = Lock.init(testing.io);
+    var first = try lock.begin();
+    first.end();
+
+    var second = try lock.begin();
+    second.end();
+}
+
+test "tryBegin reports an active session as busy" {
+    var lock = Lock.init(testing.io);
+    var first = try lock.begin();
+    try testing.expect(lock.tryBegin() == null);
+    first.end();
+
+    var second = lock.tryBegin() orelse return error.ExpectedLockSession;
+    second.end();
+}
+
+test "beginUncancelable returns a usable session" {
+    var lock = Lock.init(testing.io);
+    var first = lock.beginUncancelable();
+    first.end();
+
+    var second = try lock.begin();
+    second.end();
+}
