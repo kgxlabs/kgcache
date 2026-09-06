@@ -214,6 +214,8 @@ test "load does nothing when no .kgc file exists yet" {
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "missing-on-purpose.kgc");
     try backend_instance.snapshot().load(&.{backend_storage});
 
+    var tx = try backend_storage.begin();
+    defer tx.end();
     try testing.expectEqual(0, backend_storage.size());
 }
 
@@ -302,6 +304,8 @@ test "bgsave forks without blocking and the child writes a loadable snapshot" {
 
     try backend_instance.snapshot().load(&.{fresh_storage});
 
+    var tx = try fresh_storage.begin();
+    defer tx.end();
     const loaded = try fresh_storage.get("foo") orelse return error.TestUnexpectedResult;
     switch (loaded.value) {
         .string => |str| try testing.expectEqualStrings("bar", str),

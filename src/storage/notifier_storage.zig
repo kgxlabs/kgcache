@@ -55,7 +55,7 @@ pub fn storage(self: *NotifierStorage) Storage {
         .ptr = self,
         .vtable = &vtable,
         ._io = self._inner._io,
-        ._mutex = self._inner._mutex,
+        ._lock = self._inner._lock,
     };
 }
 

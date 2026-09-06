@@ -26,8 +26,13 @@ pub fn runRound(
     round: for (0..data_storages.len) |offset| {
         const db_storage = data_storages[(start + offset) % data_storages.len];
 
-        if (db_storage.getExpirableCount() == 0) {
-            continue :round;
+        {
+            var tx = try db_storage.begin();
+            defer tx.end();
+
+            if (db_storage.getExpirableCount() == 0) {
+                continue :round;
+            }
         }
 
         // batch starts
@@ -85,16 +90,32 @@ test "runRound visits every db in a round, not just the first" {
 
     const data_storages = [_]storage.Interface{ backend_zero.storage(), backend_one.storage() };
 
-    _ = try data_storages[0].put("expiring-zero", .{ .string = "value" }, .{
-        .expires_at = time.nowMs(testing.io) - 1,
-    });
-    _ = try data_storages[1].put("expiring-one", .{ .string = "value" }, .{
-        .expires_at = time.nowMs(testing.io) - 1,
-    });
+    {
+        var tx = try data_storages[0].begin();
+        defer tx.end();
+        _ = try data_storages[0].put("expiring-zero", .{ .string = "value" }, .{
+            .expires_at = time.nowMs(testing.io) - 1,
+        });
+    }
+    {
+        var tx = try data_storages[1].begin();
+        defer tx.end();
+        _ = try data_storages[1].put("expiring-one", .{ .string = "value" }, .{
+            .expires_at = time.nowMs(testing.io) - 1,
+        });
+    }
 
     const next_start = try runRound(testing.io, testing.allocator, &data_storages, 0, Config.default());
 
-    try testing.expectEqual(0, data_storages[0].getExpirableCount());
-    try testing.expectEqual(0, data_storages[1].getExpirableCount());
+    {
+        var tx = try data_storages[0].begin();
+        defer tx.end();
+        try testing.expectEqual(0, data_storages[0].getExpirableCount());
+    }
+    {
+        var tx = try data_storages[1].begin();
+        defer tx.end();
+        try testing.expectEqual(0, data_storages[1].getExpirableCount());
+    }
     try testing.expectEqual(1, next_start);
 }

@@ -552,6 +552,9 @@ test "writes survive a simulated restart" {
     try testing.expectEqualStrings("one", persistent.string);
     const expiring = try second._store.get("expiring", 1) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("two", expiring.string);
+
+    var tx = try second._data_storages[1].begin();
+    defer tx.end();
     const expiration = try second._data_storages[1].getExp("expiring") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(expires_at, expiration.expires_at);
 }

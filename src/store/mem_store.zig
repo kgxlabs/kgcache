@@ -110,9 +110,14 @@ pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!bool 
     return existed != null;
 }
 
-pub fn dbsize(ptr: *anyopaque, db_index: u32) u32 {
+pub fn dbsize(ptr: *anyopaque, db_index: u32) Store.Error!u32 {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    return self._storages[db_index].size();
+    const storage = self._storages[db_index];
+
+    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    defer tx.end();
+
+    return storage.size();
 }
 
 pub fn numDatabases(ptr: *anyopaque) u32 {
@@ -408,12 +413,19 @@ test "save then load round-trips across databases" {
 
     try kgc_backend.snapshot().load(&.{ fresh_zero_storage, fresh_one_storage });
 
-    const loaded_foo = try fresh_zero_storage.get("foo") orelse return error.TestUnexpectedResult;
-    try expectObjectString(loaded_foo.value, "bar");
-
-    const loaded_baz = try fresh_one_storage.get("baz") orelse return error.TestUnexpectedResult;
-    try expectObjectString(loaded_baz.value, "qux");
-    try testing.expectEqual(1, fresh_one_storage.getExpirableCount());
+    {
+        var tx = try fresh_zero_storage.begin();
+        defer tx.end();
+        const loaded_foo = try fresh_zero_storage.get("foo") orelse return error.TestUnexpectedResult;
+        try expectObjectString(loaded_foo.value, "bar");
+    }
+    {
+        var tx = try fresh_one_storage.begin();
+        defer tx.end();
+        const loaded_baz = try fresh_one_storage.get("baz") orelse return error.TestUnexpectedResult;
+        try expectObjectString(loaded_baz.value, "qux");
+        try testing.expectEqual(1, fresh_one_storage.getExpirableCount());
+    }
 }
 
 test "save resets the change tracker's dirty count" {

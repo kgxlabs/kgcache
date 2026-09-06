@@ -22,7 +22,8 @@ fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *
         return .{ .simple_error = "Wrong number of arguments" };
     }
 
-    return .{ .integer = @intCast(data_store.dbsize(client_state.db_index)) };
+    const size = data_store.dbsize(client_state.db_index) catch return Commander.Error.SomethingWentWrong;
+    return .{ .integer = @intCast(size) };
 }
 
 fn deinit(ptr: *anyopaque) void {

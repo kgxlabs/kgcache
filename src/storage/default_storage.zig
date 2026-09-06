@@ -4,6 +4,7 @@ const entry = @import("../entry.zig");
 const object = @import("../object.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
+const Lock = @import("../lock.zig");
 
 const DefaultStorage = @This();
 
@@ -21,7 +22,9 @@ const Expirables = std.ArrayList(entry.ObjectExpiration);
 
 _allocator: std.mem.Allocator,
 _io: std.Io,
-_mutex: std.Io.Mutex = .init,
+// NOTE: Multi-db callers must acquire in ascending index order:
+// databases[1].begin(), then databases[3].begin().
+_lock: Lock,
 _entry_map: EntryObjectMap,
 _expirables: Expirables,
 
@@ -47,7 +50,7 @@ pub fn storage(self: *DefaultStorage) Storage {
         .ptr = self,
         .vtable = &vtable,
         ._io = self._io,
-        ._mutex = &self._mutex,
+        ._lock = &self._lock,
     };
 }
 
@@ -58,6 +61,7 @@ pub fn init(
     return .{
         ._allocator = allocator,
         ._io = io,
+        ._lock = Lock.init(io),
         ._entry_map = EntryObjectMap.init(allocator),
         ._expirables = .empty,
     };
@@ -65,23 +69,11 @@ pub fn init(
 
 pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
     var self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    self._mutex.lock(self._io) catch return Storage.Error.TxCancelled;
-
-    return Storage.Tx{
-        ._io = self._io,
-        ._mutex = &self._mutex,
-    };
+    return self._lock.begin() catch return Storage.Error.TxCancelled;
 }
 
 pub fn deinit(ptr: *anyopaque) void {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    // This is the only place in storage that will directly use lock
-    // We are locking the entire duration of all the items
-    // This is fine since deinit onlly triggers when a storage is shutting down and
-    // we wont be accepting anymore instructions at that point anyway
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     var iterator = self._entry_map.iterator();
 
     while (iterator.next()) |item| {
@@ -452,7 +444,7 @@ test "expired entries are removed when read and no longer counted" {
     try testing.expectEqual(0, backend_storage.getExpirableCount());
 }
 
-test "transactions release the storage mutex" {
+test "ending a storage session allows another session to begin" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
@@ -460,9 +452,12 @@ test "transactions release the storage mutex" {
     defer backend_storage.deinit();
 
     var first = try backend_storage.begin();
+    _ = try backend_storage.put("key", .{ .string = "value" }, .{ .expires_at = null });
     first.end();
 
     var second = try backend_storage.begin();
+    const stored = try backend_storage.get("key") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("value", stored.value.string);
     second.end();
 }
 
@@ -520,7 +515,7 @@ fn visitCollectExp(ctx: *anyopaque, key: []const u8, _: object.Object, exp: ?tim
     try seen.put(key, exp);
 }
 
-test "active expiration sampling releases the storage mutex" {
+test "active expiration releases its storage session on success" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
@@ -529,7 +524,7 @@ test "active expiration sampling releases the storage mutex" {
 
     var put_tx = try backend_storage.begin();
     _ = try backend_storage.put("expiring", .{ .string = "value" }, .{
-        .expires_at = time.nowMs(testing.io) + 1_000,
+        .expires_at = time.nowMs(testing.io) - 1,
     });
     put_tx.end();
 
@@ -538,5 +533,6 @@ test "active expiration sampling releases the storage mutex" {
     expiration_tx.end();
 
     var next_tx = try backend_storage.begin();
+    try testing.expect(try backend_storage.get("expiring") == null);
     next_tx.end();
 }

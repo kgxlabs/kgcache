@@ -22,7 +22,7 @@ pub const VTable = struct {
     get: *const fn (*anyopaque, []const u8, u32) Error!?object.Object,
     set: *const fn (*anyopaque, Request.SetRequest, u32) Error!?object.Object,
     remove: *const fn (*anyopaque, []const u8, u32) Error!bool,
-    dbsize: *const fn (*anyopaque, u32) u32,
+    dbsize: *const fn (*anyopaque, u32) Error!u32,
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque, i64) Error!void,
     bgsave: *const fn (*anyopaque) Error!void,
@@ -42,7 +42,7 @@ pub fn remove(self: Store, key: []const u8, db_index: u32) Error!bool {
     return self.vtable.remove(self.ptr, key, db_index);
 }
 
-pub fn dbsize(self: Store, db_index: u32) u32 {
+pub fn dbsize(self: Store, db_index: u32) Error!u32 {
     return self.vtable.dbsize(self.ptr, db_index);
 }
 
