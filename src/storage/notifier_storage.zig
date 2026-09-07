@@ -93,6 +93,9 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
         const maybe_exp = try self._inner.getExp(key);
         if (maybe_exp) |exp| {
             if (time.isPastTime(self._inner._io, exp.expires_at)) {
+                var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+                defer aof_tx.end();
+
                 var record = aof.prepareRecord(.{
                     .remove = .{ .db_index = self._db_index, .key = key },
                 }) catch return Storage.Error.UnableToRecordWrite;
@@ -129,6 +132,9 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
             break :blk if (maybe_exp) |exp| exp.expires_at else null;
         } else null;
 
+        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        defer aof_tx.end();
+
         var record = aof.prepareRecord(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
@@ -155,6 +161,9 @@ pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
 
     if (self._aof) |aof| {
+        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        defer aof_tx.end();
+
         var record = aof.prepareRecord(.{
             .remove = .{ .db_index = self._db_index, .key = key },
         }) catch return Storage.Error.UnableToRecordWrite;
@@ -195,6 +204,9 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
         const maybe_key = self._inner.sampleExpirableKey() catch return Storage.Error.UnableToExpire;
         const key = maybe_key orelse return null;
         errdefer self._allocator.free(key);
+
+        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        defer aof_tx.end();
 
         var record = aof.prepareRecord(.{
             .remove = .{

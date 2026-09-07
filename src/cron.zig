@@ -46,6 +46,9 @@ pub fn run(
 }
 
 fn flushAofIfDue(io: std.Io, aof: persistence.JournalPersistence) void {
+    var tx = aof.begin() catch return;
+    defer tx.end();
+
     aof.flush(time.nowMs(io)) catch {
         const message = "kgcache: failed to flush AOF\n";
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
@@ -58,6 +61,9 @@ fn finishAofIfCompleted(
     reap_result: PersistenceState.ReapResult,
 ) void {
     if (reap_result == .running) return;
+
+    var tx = aof.begin() catch return;
+    defer tx.end();
 
     aof.finishRewrite(reap_result) catch |err| {
         var buf: [160]u8 = undefined;
@@ -87,6 +93,9 @@ fn triggerRewriteIfDue(
     data_storages: []const storage.Interface,
     config: Config,
 ) void {
+    var tx = aof.begin() catch return;
+    defer tx.end();
+
     if (!aof.dueForRewrite(config)) return;
 
     aof.bgRewrite(data_storages) catch |err| {
@@ -212,7 +221,12 @@ test "everysec cron flush drains buffered commands" {
     var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
     defer backend.journal().deinit() catch {};
 
-    try backend.journal().onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    const journal = backend.journal();
+    {
+        var tx = try journal.begin();
+        defer tx.end();
+        try journal.onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    }
     flushAofIfDue(testing.io, backend.journal());
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
@@ -237,7 +251,12 @@ test "no cron flush drains buffered commands" {
     var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
     defer backend.journal().deinit() catch {};
 
-    try backend.journal().onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    const journal = backend.journal();
+    {
+        var tx = try journal.begin();
+        defer tx.end();
+        try journal.onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
+    }
     flushAofIfDue(testing.io, backend.journal());
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
@@ -313,6 +332,8 @@ test "triggerRewriteIfDue starts a rewrite when the rule is met" {
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
+    var tx = try journal.begin();
+    defer tx.end();
     try journal.finishRewrite(result);
 }
 
