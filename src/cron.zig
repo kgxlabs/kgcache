@@ -7,6 +7,7 @@ const ChangeTracker = @import("change_tracker.zig");
 const Config = @import("config.zig");
 const expiration = @import("expiration.zig");
 const time = @import("time.zig");
+const Lock = @import("lock.zig");
 
 pub fn run(
     io: std.Io,
@@ -114,12 +115,17 @@ fn writeOneKey(data_store: *store.Store) !void {
 }
 
 const FinishRewriteJournal = struct {
+    lock: Lock,
     calls: usize = 0,
     last_result: ?PersistenceState.ReapResult = null,
     fail: bool = false,
     flush_calls: usize = 0,
     last_flush_ms: ?i64 = null,
     fail_flush: bool = false,
+
+    fn init(io: std.Io) FinishRewriteJournal {
+        return .{ .lock = Lock.init(io) };
+    }
 
     const vtable: persistence.JournalPersistence.VTable = .{
         .prepareRecord = prepareRecord,
@@ -134,7 +140,7 @@ const FinishRewriteJournal = struct {
     };
 
     fn journal(self: *FinishRewriteJournal) persistence.JournalPersistence {
-        return .{ .ptr = self, .vtable = &vtable };
+        return .{ .ptr = self, .vtable = &vtable, ._lock = &self.lock };
     }
 
     fn publishRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
@@ -168,7 +174,7 @@ const FinishRewriteJournal = struct {
 
 test "cron flushes the AOF and swallows flush errors" {
     const testing = std.testing;
-    var backend = FinishRewriteJournal{};
+    var backend = FinishRewriteJournal.init(testing.io);
 
     flushAofIfDue(testing.io, backend.journal());
     try testing.expectEqual(@as(usize, 1), backend.flush_calls);
@@ -243,7 +249,7 @@ test "no cron flush drains buffered commands" {
 
 test "cron forwards failed AOF completion and ignores a running child" {
     const testing = std.testing;
-    var backend = FinishRewriteJournal{};
+    var backend = FinishRewriteJournal.init(testing.io);
     const journal = backend.journal();
 
     finishAofIfCompleted(testing.io, journal, .running);
@@ -256,7 +262,8 @@ test "cron forwards failed AOF completion and ignores a running child" {
 
 test "cron swallows finishRewrite errors" {
     const testing = std.testing;
-    var backend = FinishRewriteJournal{ .fail = true };
+    var backend = FinishRewriteJournal.init(testing.io);
+    backend.fail = true;
 
     const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
     if (devnull < 0) return error.OpenDevNullFailed;

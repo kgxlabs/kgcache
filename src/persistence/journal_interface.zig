@@ -1,3 +1,8 @@
+// AOF state operations require a caller-held Journal session.
+// Acquire Storage sessions in ascending database order before Journal.
+// Record publish and abort do not manage the session.
+// Loading and reconciliation are startup-only; deinit is shutdown-only.
+
 const std = @import("std");
 const object = @import("../object.zig");
 const Storage = @import("../storage/interface.zig");
@@ -5,11 +10,13 @@ const PersistenceState = @import("../persistence_state.zig");
 const Manifest = @import("./manifest.zig");
 const Config = @import("../config.zig");
 const time = @import("../time.zig");
+const Lock = @import("../lock.zig");
 
 const JournalPersistence = @This();
 
 ptr: *anyopaque,
 vtable: *const VTable,
+_lock: *Lock,
 
 pub const Error = error{
     OutOfMemory,
@@ -28,7 +35,10 @@ pub const Error = error{
     FailedToCloseAof,
     FailedToRewriteAof,
     FailedToReconcileAof,
+    TxCancelled,
 };
+
+pub const Tx = Lock.Tx;
 
 pub const WriteEvent = union(enum) {
     put: struct { db_index: u32, key: []const u8, value: object.Object, expires_at: ?time.UnixMs },
@@ -80,6 +90,10 @@ pub const VTable = struct {
     reconcile: *const fn (*anyopaque, std.Io, std.mem.Allocator, std.Io.Dir, []const u8, ?Manifest.Manifest) Error!void,
     deinit: *const fn (*anyopaque) Error!void,
 };
+
+pub fn begin(self: JournalPersistence) Error!Tx {
+    return self._lock.begin() catch return Error.TxCancelled;
+}
 
 pub fn onWrite(self: JournalPersistence, event: WriteEvent) Error!void {
     var record = try self.prepareRecord(event);

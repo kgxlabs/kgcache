@@ -8,11 +8,14 @@ const PersistenceState = @import("../persistence_state.zig");
 const Config = @import("../config.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
+const Lock = @import("../lock.zig");
 
 const AofBackend = @This();
 const rewrite_retry_delay_ms: time.UnixMs = 60_000;
 
+// Compatibility synchronization remains active until the step 9 cutover.
 _mutex: std.Io.Mutex = .init,
+_lock: Lock,
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
@@ -65,6 +68,7 @@ pub fn journal(self: *AofBackend) Journal {
     return .{
         .ptr = self,
         .vtable = &vtable,
+        ._lock = &self._lock,
     };
 }
 
@@ -155,6 +159,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     const file_offset = file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
 
     return .{
+        ._lock = Lock.init(io),
         ._io = io,
         ._allocator = allocator,
         ._encoder = AofEncoder.init(),
@@ -846,6 +851,60 @@ const TestStderrGuard = struct {
         _ = std.c.close(self.devnull);
     }
 };
+
+test "ending a journal session allows another session to begin" {
+    try withScratchDir("scratch-aof-journal-session-reentry", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-journal-session-reentry" };
+            var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+
+            var first = try journal_handle.begin();
+            first.end();
+
+            var second = try journal_handle.begin();
+            second.end();
+        }
+    }.run);
+}
+
+test "journal begin serializes two concurrent callers" {
+    try withScratchDir("scratch-aof-journal-session-serialization", struct {
+        const Context = struct {
+            journal: Journal,
+            attempting: std.atomic.Value(bool) = .init(false),
+            entered: std.atomic.Value(bool) = .init(false),
+        };
+
+        fn worker(context: *Context) void {
+            context.attempting.store(true, .release);
+            var tx = context.journal.begin() catch unreachable;
+            context.entered.store(true, .release);
+            tx.end();
+        }
+
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-journal-session-serialization" };
+            var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+
+            var first = try journal_handle.begin();
+            var context: Context = .{ .journal = journal_handle };
+            const thread = try std.Thread.spawn(.{}, worker, .{&context});
+
+            while (!context.attempting.load(.acquire)) std.atomic.spinLoopHint();
+            try std.testing.expect(!context.entered.load(.acquire));
+
+            first.end();
+            thread.join();
+            try std.testing.expect(context.entered.load(.acquire));
+        }
+    }.run);
+}
 
 test "dueForRewrite is false below the min size even after huge growth" {
     try withScratchDir("scratch-aof-rewrite-below-min", struct {
