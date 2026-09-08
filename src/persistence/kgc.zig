@@ -267,7 +267,7 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
     try testing.expect(persistence_state._kgc_pid == null);
 }
 
-test "bgsave forks without blocking and the child writes a loadable snapshot" {
+test "background save returns before completion and produces a loadable snapshot" {
     const testing = std.testing;
     const DefaultStorage = @import("../storage/default_storage.zig");
 
@@ -285,18 +285,17 @@ test "bgsave forks without blocking and the child writes a loadable snapshot" {
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "scratch-bgsave.kgc");
 
     try backend_instance.snapshot().bgsave(&.{backend_storage});
+    try testing.expect(persistence_state.kgcInProgress());
 
-    // the parent returns immediately -- the flag is still set and a child
-    // pid is recorded, proving the caller was never blocked on the dump.
-    try testing.expect(persistence_state._kgc_in_progress);
-    try testing.expect(persistence_state._kgc_pid != null);
-
+    var result: PersistenceState.ReapResult = .running;
     var tries: usize = 0;
-    while (persistence_state._kgc_in_progress) {
-        _ = persistence_state.reapKgc();
+    while (result == .running) {
+        result = persistence_state.reapKgc();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
+    try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
+    try testing.expect(!persistence_state.kgcInProgress());
 
     var fresh = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_storage = fresh.storage();

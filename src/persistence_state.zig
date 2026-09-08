@@ -1,4 +1,5 @@
 const std = @import("std");
+const Lock = @import("lock.zig");
 
 const PersistenceState = @This();
 
@@ -9,6 +10,7 @@ pub const ReapResult = enum {
 };
 
 _io: std.Io,
+_lock: Lock,
 _mutex: std.Io.Mutex = .init,
 _kgc_in_progress: bool = false,
 _aof_in_progress: bool = false,
@@ -19,8 +21,13 @@ _aof_pid: ?std.posix.pid_t = null,
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
         ._io = io,
+        ._lock = Lock.init(io),
         ._mutual_exclusive = mutual_exclusive,
     };
+}
+
+pub fn begin(self: *PersistenceState) std.Io.Cancelable!Lock.Tx {
+    return self._lock.begin();
 }
 
 pub fn tryStartKgc(self: *PersistenceState) bool {
@@ -77,6 +84,13 @@ pub fn aofInProgress(self: *PersistenceState) bool {
     return self._aof_in_progress;
 }
 
+pub fn kgcInProgress(self: *PersistenceState) bool {
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
+
+    return self._kgc_in_progress;
+}
+
 pub fn reapKgc(self: *PersistenceState) ReapResult {
     return self.reapPid("kgc", &self._kgc_pid, &self._kgc_in_progress);
 }
@@ -124,6 +138,45 @@ fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid
     }
 
     return .succeeded;
+}
+
+test "ending a PersistenceState session allows another session to begin" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    var first = try state.begin();
+    first.end();
+
+    var second = try state.begin();
+    second.end();
+}
+
+test "PersistenceState begin serializes two concurrent callers" {
+    const testing = std.testing;
+    const Context = struct {
+        state: *PersistenceState,
+        attempting: std.atomic.Value(bool) = .init(false),
+        entered: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.attempting.store(true, .release);
+            var tx = self.state.begin() catch unreachable;
+            self.entered.store(true, .release);
+            tx.end();
+        }
+    };
+
+    var state = PersistenceState.init(testing.io, false);
+    var first = try state.begin();
+    var context: Context = .{ .state = &state };
+    const thread = try std.Thread.spawn(.{}, Context.run, .{&context});
+
+    while (!context.attempting.load(.acquire)) std.atomic.spinLoopHint();
+    try testing.expect(!context.entered.load(.acquire));
+
+    first.end();
+    thread.join();
+    try testing.expect(context.entered.load(.acquire));
 }
 
 test "tryStartKgc blocks a second start until finishKgc releases it" {

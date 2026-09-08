@@ -466,6 +466,70 @@ test "bgrewriteaof returns AofDisabled when no journal is configured" {
     try testing.expectError(Store.Error.AofDisabled, data_store.bgrewriteaof());
 }
 
+test "AOF rewrite reports progress until completion and replays writes" {
+    const Config = @import("../config.zig");
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-mem-store-aof-rewrite-progress";
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
+    var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
+    const journal = aof_backend.journal();
+    var change_tracker = ChangeTracker.init(testing.io);
+    var memory_store = MemoryStore.init(&.{backend.storage()}, kgc_backend.snapshot(), journal, &change_tracker);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+    defer journal.deinit() catch {};
+
+    _ = try data_store.set(.{
+        .key = "foo",
+        .value = "bar",
+        .condition = null,
+        .expires_at = null,
+        .keepttl = false,
+        .response = null,
+    }, 0);
+
+    try data_store.bgrewriteaof();
+    try testing.expect(persistence_state.aofInProgress());
+
+    var result: PersistenceState.ReapResult = .running;
+    var tries: usize = 0;
+    while (result == .running) {
+        result = persistence_state.reapAof();
+        tries += 1;
+        if (tries > 100_000) return error.ChildNeverReaped;
+    }
+    try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
+    try testing.expect(!persistence_state.aofInProgress());
+
+    {
+        var tx = try journal.begin();
+        defer tx.end();
+        try journal.finishRewrite(result);
+    }
+
+    var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
+    var fresh_state = PersistenceState.init(testing.io, false);
+    var fresh_kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &fresh_state, "test.kgc");
+    var fresh_tracker = ChangeTracker.init(testing.io);
+    var fresh_memory_store = MemoryStore.init(&.{fresh_backend.storage()}, fresh_kgc.snapshot(), null, &fresh_tracker);
+    var fresh_store = fresh_memory_store.store();
+    defer fresh_store.deinit();
+
+    _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config);
+    const value = try fresh_store.get("foo", 0);
+    try expectObjectString(value, "bar");
+}
+
 fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {
     const value = maybe_value orelse return error.Null;
 
