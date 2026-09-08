@@ -198,11 +198,19 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!J
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
-    if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
+    {
+        var state_tx = self._persistence_state.begin() catch return error.FailedToRewriteAof;
+        defer state_tx.end();
+        if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
+    }
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
     var child_started = false;
     errdefer |err| {
-        if (!child_started) self._persistence_state.finishAof();
+        if (!child_started) {
+            var state_tx = self._persistence_state.begin() catch unreachable;
+            self._persistence_state.finishAof();
+            state_tx.end();
+        }
         helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
     }
 
@@ -309,6 +317,8 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     }
 
     self._pending_base_seq = base_seq;
+    var state_tx = self._persistence_state.begin() catch unreachable;
+    defer state_tx.end();
     self._persistence_state.setAofPid(pid);
     child_started = true;
 }
@@ -317,7 +327,11 @@ pub fn dueForRewrite(ptr: *anyopaque, config: Config) bool {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     if (!config.append_only or config.auto_aof_rewrite_percentage == 0) return false;
-    if (self._persistence_state.aofInProgress()) return false;
+    {
+        var state_tx = self._persistence_state.begin() catch return false;
+        defer state_tx.end();
+        if (self._persistence_state.aofInProgress()) return false;
+    }
 
     if (self._last_rewrite_attempt_ms) |last_attempt_ms| {
         const now_ms = time.nowMs(self._io);
@@ -1008,8 +1022,16 @@ test "dueForRewrite is false while a rewrite is already running" {
             backend._base_size = 0;
             backend._incr_bytes = 1;
 
-            try testing.expect(state.tryStartAof());
-            defer state.finishAof();
+            {
+                var state_tx = try state.begin();
+                defer state_tx.end();
+                try testing.expect(state.tryStartAof());
+            }
+            defer {
+                var state_tx = state.begin() catch unreachable;
+                defer state_tx.end();
+                state.finishAof();
+            }
 
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
@@ -1465,7 +1487,9 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
             var reap_result: PersistenceState.ReapResult = .running;
             var tries: usize = 0;
             while (reap_result == .running) {
+                var state_tx = try state.begin();
                 reap_result = state.reapAof();
+                state_tx.end();
                 tries += 1;
                 if (tries > 100_000) return error.ChildNeverReaped;
             }

@@ -18,6 +18,7 @@ test {
     _ = @import("config.zig");
     _ = @import("config_parser.zig");
     _ = @import("persistence/manifest.zig");
+    _ = @import("persistence_state.zig");
     _ = @import("persistence/kgc.zig");
     _ = @import("persistence/aof.zig");
     _ = @import("persistence/aof_loader.zig");

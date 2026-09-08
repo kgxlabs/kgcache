@@ -45,30 +45,49 @@ pub fn snapshot(self: *KgcBackend) Snapshot {
     };
 }
 
+// only hold short lock session so we dont hold the lock while I/O
 pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
-    if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
-    defer self._persistence_state.finishKgc();
+    {
+        var state_tx = self._persistence_state.begin() catch return Snapshot.Error.UnableToSave;
+        defer state_tx.end();
+        if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+    }
+
+    defer {
+        var state_tx = self._persistence_state.begin() catch unreachable;
+        defer state_tx.end();
+        self._persistence_state.finishKgc();
+    }
 
     try self.dump(storages);
 }
 
+// only hold short lock session so we dont hold the lock while fork
 // Finishing this does not mean, saving succeeded.
 // It just means forking completed
 pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
-    if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+    {
+        var state_tx = self._persistence_state.begin() catch return Snapshot.Error.UnableToSave;
+        defer state_tx.end();
+        if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+    }
 
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
         .AGAIN, .NOMEM => {
+            var state_tx = self._persistence_state.begin() catch unreachable;
+            defer state_tx.end();
             self._persistence_state.finishKgc();
             return Snapshot.Error.UnableToSave;
         },
         else => |err| {
+            var state_tx = self._persistence_state.begin() catch unreachable;
+            defer state_tx.end();
             self._persistence_state.finishKgc();
             return std.posix.unexpectedErrno(err) catch Snapshot.Error.UnableToSave;
         },
@@ -99,6 +118,8 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
         std.c._exit(0);
     }
 
+    var state_tx = self._persistence_state.begin() catch unreachable;
+    defer state_tx.end();
     self._persistence_state.setKgcPid(pid);
 }
 
@@ -247,8 +268,16 @@ test "save returns SaveAlreadyInProgress when a save is already claimed" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-save.kgc");
 
-    try testing.expect(persistence_state.tryStartKgc());
-    defer persistence_state.finishKgc();
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(persistence_state.tryStartKgc());
+    }
+    defer {
+        var state_tx = persistence_state.begin() catch unreachable;
+        defer state_tx.end();
+        persistence_state.finishKgc();
+    }
 
     try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().save(&.{}));
 }
@@ -258,13 +287,23 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
     var persistence_state = PersistenceState.init(testing.io, false);
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-bgsave.kgc");
 
-    try testing.expect(persistence_state.tryStartKgc());
-    defer persistence_state.finishKgc();
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(persistence_state.tryStartKgc());
+    }
+    defer {
+        var state_tx = persistence_state.begin() catch unreachable;
+        defer state_tx.end();
+        persistence_state.finishKgc();
+    }
 
     try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}));
 
     // no fork should have happened -- no pid was ever recorded
-    try testing.expect(persistence_state._kgc_pid == null);
+    var state_tx = try persistence_state.begin();
+    defer state_tx.end();
+    try testing.expectEqual(PersistenceState.ReapResult.running, persistence_state.reapKgc());
 }
 
 test "background save returns before completion and produces a loadable snapshot" {
@@ -284,18 +323,32 @@ test "background save returns before completion and produces a loadable snapshot
     var persistence_state = PersistenceState.init(testing.io, false);
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "scratch-bgsave.kgc");
 
-    try backend_instance.snapshot().bgsave(&.{backend_storage});
-    try testing.expect(persistence_state.kgcInProgress());
+    {
+        var tx = try backend_storage.begin();
+        defer tx.end();
+        try backend_instance.snapshot().bgsave(&.{backend_storage});
+    }
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(persistence_state.kgcInProgress());
+    }
 
     var result: PersistenceState.ReapResult = .running;
     var tries: usize = 0;
     while (result == .running) {
+        var state_tx = try persistence_state.begin();
         result = persistence_state.reapKgc();
+        state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
-    try testing.expect(!persistence_state.kgcInProgress());
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(!persistence_state.kgcInProgress());
+    }
 
     var fresh = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_storage = fresh.storage();

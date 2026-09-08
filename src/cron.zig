@@ -30,15 +30,25 @@ pub fn run(
         start = try expiration.runRound(io, allocator, data_storages, start, config);
 
         // clean up forked child processes if any
-        const kg_result = persistence_state.reapKgc();
+        const kg_result = blk: {
+            var state_tx = try persistence_state.begin();
+            defer state_tx.end();
+            break :blk persistence_state.reapKgc();
+        };
         if (kg_result != .running) {
             change_tracker.markSaved(time.nowMs(io));
         }
+
         // clean up forked child processes and register for auto rewrite
         if (maybe_aof) |aof| {
             flushAofIfDue(io, aof);
-            finishAofIfCompleted(io, aof, persistence_state.reapAof());
-            triggerRewriteIfDue(io, aof, data_storages, config);
+            const aof_result = blk: {
+                var state_tx = try persistence_state.begin();
+                defer state_tx.end();
+                break :blk persistence_state.reapAof();
+            };
+            finishAofIfCompleted(io, aof, aof_result);
+            triggerRewriteIfDue(io, aof, persistence_state, data_store, config);
         }
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
@@ -90,18 +100,25 @@ fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *sto
 fn triggerRewriteIfDue(
     io: std.Io,
     aof: persistence.JournalPersistence,
-    data_storages: []const storage.Interface,
+    persistence_state: *PersistenceState,
+    data_store: *store.Store,
     config: Config,
 ) void {
-    var tx = aof.begin() catch return;
-    defer tx.end();
+    {
+        var tx = aof.begin() catch return;
+        defer tx.end();
+        if (!aof.dueForRewrite(config)) return;
+    }
 
-    if (!aof.dueForRewrite(config)) return;
-
-    aof.bgRewrite(data_storages) catch |err| {
+    data_store.bgrewriteaof() catch {
         // A manual client command rewrite can come in after due check and before bgRewrite call and can win the race.
         // client command takes the highest priority so that refusal is expected and must not produce one log per cron tick.
-        if (err != error.RewriteAlreadyInProgress) {
+        const rewrite_running = blk: {
+            var state_tx = persistence_state.begin() catch break :blk false;
+            defer state_tx.end();
+            break :blk persistence_state.aofInProgress();
+        };
+        if (!rewrite_running) {
             const message = "kgcache: failed to trigger automatic AOF rewrite\n";
             std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
         }
@@ -319,16 +336,26 @@ test "triggerRewriteIfDue starts a rewrite when the rule is met" {
     var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
     defer backend.journal().deinit() catch {};
     const journal = backend.journal();
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &state, "test.kgc");
+    var change_tracker = ChangeTracker.init(testing.io);
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{}, kgc_backend.snapshot(), journal, &change_tracker);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
 
-    triggerRewriteIfDue(testing.io, journal, &.{}, config);
+    triggerRewriteIfDue(testing.io, journal, &state, &data_store, config);
 
-    try testing.expect(state._aof_in_progress);
-    try testing.expect(state._aof_pid != null);
+    {
+        var state_tx = try state.begin();
+        defer state_tx.end();
+        try testing.expect(state.aofInProgress());
+    }
 
     var result: PersistenceState.ReapResult = .running;
     var tries: usize = 0;
     while (result == .running) {
+        var state_tx = try state.begin();
         result = state.reapAof();
+        state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
@@ -353,13 +380,25 @@ test "triggerRewriteIfDue does nothing when a rewrite is already running" {
     };
     var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
     defer backend.journal().deinit() catch {};
+    var mock_store = store.MockStore.init();
+    var data_store = mock_store.store();
 
-    try testing.expect(state.tryStartAof());
-    defer state.finishAof();
+    {
+        var state_tx = try state.begin();
+        defer state_tx.end();
+        try testing.expect(state.tryStartAof());
+    }
+    defer {
+        var state_tx = state.begin() catch unreachable;
+        defer state_tx.end();
+        state.finishAof();
+    }
 
-    triggerRewriteIfDue(testing.io, backend.journal(), &.{}, config);
+    triggerRewriteIfDue(testing.io, backend.journal(), &state, &data_store, config);
 
-    try testing.expect(state._aof_pid == null);
+    var state_tx = try state.begin();
+    defer state_tx.end();
+    try testing.expectEqual(PersistenceState.ReapResult.running, state.reapAof());
 }
 
 test "a failed rewrite is not retried immediately and wait for delay" {
@@ -379,11 +418,15 @@ test "a failed rewrite is not retried immediately and wait for delay" {
     var backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, config);
     defer backend.journal().deinit() catch {};
     backend._last_rewrite_attempt_ms = time.nowMs(testing.io);
+    var mock_store = store.MockStore.init();
+    var data_store = mock_store.store();
 
-    triggerRewriteIfDue(testing.io, backend.journal(), &.{}, config);
+    triggerRewriteIfDue(testing.io, backend.journal(), &state, &data_store, config);
 
-    try testing.expect(!state._aof_in_progress);
-    try testing.expect(state._aof_pid == null);
+    var state_tx = try state.begin();
+    defer state_tx.end();
+    try testing.expect(!state.aofInProgress());
+    try testing.expectEqual(PersistenceState.ReapResult.running, state.reapAof());
 }
 
 test "a completed background save resets the change tracker once reaped, not before" {
@@ -399,7 +442,7 @@ test "a completed background save resets the change tracker once reaped, not bef
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-reap-reset.kgc");
-    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -410,14 +453,21 @@ test "a completed background save resets the change tracker once reaped, not bef
 
     // the parent returns immediately -- reapKgc() hasn't been called yet at
     // this point, so the dirty count from the write above must still stand.
-    try testing.expect(persistence_state._kgc_in_progress);
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(persistence_state.kgcInProgress());
+    }
     try testing.expect(change_tracker._dirty.load(.monotonic) > 0);
 
     // Same check run()'s loop body does after reapKgc(): only reset once a
     // child has actually been observed to exit, not at bgsave()'s call site.
+    var reap_result: PersistenceState.ReapResult = .running;
     var tries: usize = 0;
-    while (persistence_state._kgc_in_progress) {
-        const reap_result = persistence_state.reapKgc();
+    while (reap_result == .running) {
+        var state_tx = try persistence_state.begin();
+        reap_result = persistence_state.reapKgc();
+        state_tx.end();
         if (reap_result != .running) {
             change_tracker.markSaved(time.nowMs(testing.io));
         }
@@ -435,7 +485,11 @@ test "a failed background save still resets the change tracker" {
     var change_tracker = ChangeTracker.init(testing.io);
     change_tracker.recordChange();
 
-    try testing.expect(persistence_state.tryStartKgc());
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(persistence_state.tryStartKgc());
+    }
 
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
@@ -448,7 +502,11 @@ test "a failed background save still resets the change tracker" {
         _ = std.c.close(std.posix.STDOUT_FILENO);
         std.c._exit(7);
     }
-    persistence_state.setKgcPid(pid);
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        persistence_state.setKgcPid(pid);
+    }
 
     // reapKgc logs to the real stderr when it observes this non-zero exit --
     // exactly what this test exercises. Redirect it for the reap loop, then
@@ -466,9 +524,12 @@ test "a failed background save still resets the change tracker" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
+    var reap_result: PersistenceState.ReapResult = .running;
     var tries: usize = 0;
-    while (persistence_state._kgc_in_progress) {
-        const reap_result = persistence_state.reapKgc();
+    while (reap_result == .running) {
+        var state_tx = try persistence_state.begin();
+        reap_result = persistence_state.reapKgc();
+        state_tx.end();
         if (reap_result != .running) {
             change_tracker.markSaved(time.nowMs(testing.io));
         }
@@ -494,7 +555,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-trigger.kgc");
-    var memory_store = store.MemoryStore.init(&.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{notified_storage}, kgc_backend.snapshot(), null, &change_tracker);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -506,11 +567,18 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
 
     // the parent returns immediately -- the flag being set proves the
     // rule match actually reached bgsave() rather than being a no-op.
-    try testing.expect(persistence_state._kgc_in_progress);
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(persistence_state.kgcInProgress());
+    }
 
+    var reap_result: PersistenceState.ReapResult = .running;
     var tries: usize = 0;
-    while (persistence_state._kgc_in_progress) {
-        _ = persistence_state.reapKgc();
+    while (reap_result == .running) {
+        var state_tx = try persistence_state.begin();
+        reap_result = persistence_state.reapKgc();
+        state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
@@ -530,6 +598,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-trigger.kgc");
     var memory_store = store.MemoryStore.init(
+        testing.allocator,
         &.{notified_storage},
         kgc_backend.snapshot(),
         null,
@@ -545,7 +614,9 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
 
     triggerSaveIfDue(testing.io, &change_tracker, &data_store, config);
 
-    try testing.expect(!persistence_state._kgc_in_progress);
+    var state_tx = try persistence_state.begin();
+    defer state_tx.end();
+    try testing.expect(!persistence_state.kgcInProgress());
 }
 
 test "triggerSaveIfDue does nothing when no save rules are configured" {
@@ -562,6 +633,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-rules.kgc");
     var memory_store = store.MemoryStore.init(
+        testing.allocator,
         &.{notified_storage},
         kgc_backend.snapshot(),
         null,
@@ -574,5 +646,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
 
     triggerSaveIfDue(testing.io, &change_tracker, &data_store, Config.default());
 
-    try testing.expect(!persistence_state._kgc_in_progress);
+    var state_tx = try persistence_state.begin();
+    defer state_tx.end();
+    try testing.expect(!persistence_state.kgcInProgress());
 }
