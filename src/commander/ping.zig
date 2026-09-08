@@ -39,6 +39,7 @@ test "execute ping command" {
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var change_tracker = ChangeTracker.init(testing.io);
     var memory_store = store.MemoryStore.init(
+        testing.allocator,
         &.{default_storage.storage()},
         kgc_backend.snapshot(),
         null,

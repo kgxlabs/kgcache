@@ -8,11 +8,12 @@ const PersistenceState = @import("../persistence_state.zig");
 const Config = @import("../config.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
+const Lock = @import("../lock.zig");
 
 const AofBackend = @This();
 const rewrite_retry_delay_ms: time.UnixMs = 60_000;
 
-_mutex: std.Io.Mutex = .init,
+_lock: Lock,
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
@@ -65,6 +66,7 @@ pub fn journal(self: *AofBackend) Journal {
     return .{
         .ptr = self,
         .vtable = &vtable,
+        ._lock = &self._lock,
     };
 }
 
@@ -155,6 +157,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     const file_offset = file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
 
     return .{
+        ._lock = Lock.init(io),
         ._io = io,
         ._allocator = allocator,
         ._encoder = AofEncoder.init(),
@@ -176,9 +179,6 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!J
     const prepared = self._allocator.create(PreparedRecord) catch return Journal.Error.OutOfMemory;
     errdefer self._allocator.destroy(prepared);
 
-    self._mutex.lockUncancelable(self._io);
-    errdefer self._mutex.unlock(self._io);
-
     if (self._last_write_failed) return Journal.Error.UnableToRecordWrite;
 
     const encoded = self._encoder.encodeWriteEvent(self._allocator, event) catch return Journal.Error.OutOfMemory;
@@ -198,16 +198,22 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!J
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
-    if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
+    {
+        var state_tx = self._persistence_state.begin() catch return error.FailedToRewriteAof;
+        defer state_tx.end();
+        if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
+    }
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
     var child_started = false;
     errdefer |err| {
-        if (!child_started) self._persistence_state.finishAof();
+        if (!child_started) {
+            var state_tx = self._persistence_state.begin() catch unreachable;
+            self._persistence_state.finishAof();
+            state_tx.end();
+        }
         helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
     }
 
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
     try flushLocked(self, time.nowMs(self._io));
 
     const cwd = std.Io.Dir.cwd();
@@ -311,6 +317,8 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     }
 
     self._pending_base_seq = base_seq;
+    var state_tx = self._persistence_state.begin() catch unreachable;
+    defer state_tx.end();
     self._persistence_state.setAofPid(pid);
     child_started = true;
 }
@@ -319,7 +327,11 @@ pub fn dueForRewrite(ptr: *anyopaque, config: Config) bool {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     if (!config.append_only or config.auto_aof_rewrite_percentage == 0) return false;
-    if (self._persistence_state.aofInProgress()) return false;
+    {
+        var state_tx = self._persistence_state.begin() catch return false;
+        defer state_tx.end();
+        if (self._persistence_state.aofInProgress()) return false;
+    }
 
     if (self._last_rewrite_attempt_ms) |last_attempt_ms| {
         const now_ms = time.nowMs(self._io);
@@ -455,9 +467,6 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     if (reap_result == .running) return Journal.Error.FailedToRewriteAof;
 
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     const base_seq = self._pending_base_seq orelse return Journal.Error.FailedToRewriteAof;
     defer self._pending_base_seq = null;
 
@@ -570,8 +579,6 @@ pub fn flush(ptr: *anyopaque, now_ms: i64) Journal.Error!void {
         helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
     }
 
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
     try flushLocked(self, now_ms);
 }
 
@@ -767,7 +774,6 @@ fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) Journal.Error!void {
 fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) Journal.Error!void {
     const prepared: *PreparedRecord = @ptrCast(@alignCast(ptr));
     const self = prepared.backend;
-    defer self._mutex.unlock(self._io);
     defer self._allocator.destroy(prepared);
     defer self._encoder.deinit(self._allocator, prepared.bytes);
 
@@ -789,7 +795,6 @@ fn abortPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) void {
 
     self._encoder.deinit(self._allocator, prepared.bytes);
     self._allocator.destroy(prepared);
-    self._mutex.unlock(self._io);
 }
 
 fn ignoreWrite(_: *anyopaque, _: Journal.WriteEvent) Journal.Error!void {
@@ -847,6 +852,60 @@ const TestStderrGuard = struct {
     }
 };
 
+test "ending a journal session allows another session to begin" {
+    try withScratchDir("scratch-aof-journal-session-reentry", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-journal-session-reentry" };
+            var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+
+            var first = try journal_handle.begin();
+            first.end();
+
+            var second = try journal_handle.begin();
+            second.end();
+        }
+    }.run);
+}
+
+test "journal begin serializes two concurrent callers" {
+    try withScratchDir("scratch-aof-journal-session-serialization", struct {
+        const Context = struct {
+            journal: Journal,
+            attempting: std.atomic.Value(bool) = .init(false),
+            entered: std.atomic.Value(bool) = .init(false),
+        };
+
+        fn worker(context: *Context) void {
+            context.attempting.store(true, .release);
+            var tx = context.journal.begin() catch unreachable;
+            context.entered.store(true, .release);
+            tx.end();
+        }
+
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            var state = PersistenceState.init(io, false);
+            const config: Config = .{ .append_dirname = "scratch-aof-journal-session-serialization" };
+            var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+
+            var first = try journal_handle.begin();
+            var context: Context = .{ .journal = journal_handle };
+            const thread = try std.Thread.spawn(.{}, worker, .{&context});
+
+            while (!context.attempting.load(.acquire)) std.atomic.spinLoopHint();
+            try std.testing.expect(!context.entered.load(.acquire));
+
+            first.end();
+            thread.join();
+            try std.testing.expect(context.entered.load(.acquire));
+        }
+    }.run);
+}
+
 test "dueForRewrite is false below the min size even after huge growth" {
     try withScratchDir("scratch-aof-rewrite-below-min", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
@@ -864,7 +923,10 @@ test "dueForRewrite is false below the min size even after huge growth" {
             backend._base_size = 1;
             backend._incr_bytes = 998;
 
-            try testing.expect(!backend.journal().dueForRewrite(config));
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try testing.expect(!journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -886,7 +948,10 @@ test "dueForRewrite is true once growth and min size are both met" {
             backend._base_size = 100;
             backend._incr_bytes = 100;
 
-            try testing.expect(backend.journal().dueForRewrite(config));
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try testing.expect(journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -908,7 +973,10 @@ test "dueForRewrite treats a zero base size as reduce-to-min-size-only" {
             backend._base_size = 0;
             backend._incr_bytes = 100;
 
-            try testing.expect(backend.journal().dueForRewrite(config));
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try testing.expect(journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -930,7 +998,10 @@ test "dueForRewrite is false when the percentage is zero" {
             backend._base_size = 1;
             backend._incr_bytes = 1_000;
 
-            try testing.expect(!backend.journal().dueForRewrite(config));
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try testing.expect(!journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -951,10 +1022,21 @@ test "dueForRewrite is false while a rewrite is already running" {
             backend._base_size = 0;
             backend._incr_bytes = 1;
 
-            try testing.expect(state.tryStartAof());
-            defer state.finishAof();
+            {
+                var state_tx = try state.begin();
+                defer state_tx.end();
+                try testing.expect(state.tryStartAof());
+            }
+            defer {
+                var state_tx = state.begin() catch unreachable;
+                defer state_tx.end();
+                state.finishAof();
+            }
 
-            try testing.expect(!backend.journal().dueForRewrite(config));
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try testing.expect(!journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -976,10 +1058,13 @@ test "dueForRewrite backs off after a failed rewrite attempt" {
             backend._incr_bytes = 1;
             backend._last_rewrite_attempt_ms = time.nowMs(io);
 
-            try testing.expect(!backend.journal().dueForRewrite(config));
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try testing.expect(!journal_handle.dueForRewrite(config));
 
             backend._last_rewrite_attempt_ms.? -= rewrite_retry_delay_ms;
-            try testing.expect(backend.journal().dueForRewrite(config));
+            try testing.expect(journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -1022,6 +1107,8 @@ test "onWrite followed by flush puts the encoded command in the incr file" {
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
             const j = backend.journal();
+            var tx = try j.begin();
+            defer tx.end();
 
             try j.onWrite(sampleEvent());
             try j.flush(0);
@@ -1047,6 +1134,8 @@ test "prepared record is invisible until publish and abort keeps it invisible" {
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
             const j = backend.journal();
+            var tx = try j.begin();
+            defer tx.end();
 
             var aborted = try j.prepareRecord(sampleEvent());
             try testing.expectEqual(0, backend._buffer.items.len);
@@ -1076,7 +1165,10 @@ test "always writes and fsyncs before onWrite returns" {
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
-            try backend.journal().onWrite(sampleEvent());
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try journal_handle.onWrite(sampleEvent());
 
             try testing.expect(backend._last_fsync_ms != null);
             const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
@@ -1100,12 +1192,15 @@ test "everysec does not fsync more than once per second" {
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
             backend._last_fsync_ms = 1000;
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
 
-            try backend.journal().onWrite(sampleEvent());
-            try backend.journal().flush(1999);
+            try journal_handle.onWrite(sampleEvent());
+            try journal_handle.flush(1999);
             try testing.expectEqual(@as(?time.UnixMs, 1000), backend._last_fsync_ms);
 
-            try backend.journal().flush(2000);
+            try journal_handle.flush(2000);
             try testing.expectEqual(@as(?time.UnixMs, 2000), backend._last_fsync_ms);
         }
     }.run);
@@ -1125,29 +1220,33 @@ test "everysec retries after a failed flush" {
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             const j = backend.journal();
             backend._last_fsync_ms = 0;
-            try j.onWrite(sampleEvent());
+            {
+                var tx = try j.begin();
+                defer tx.end();
+                try j.onWrite(sampleEvent());
 
-            const file = backend._file.?;
-            backend._file = null;
+                const file = backend._file.?;
+                backend._file = null;
 
-            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-            if (devnull < 0) return error.OpenDevNullFailed;
-            defer _ = std.c.close(devnull);
-            const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-            if (saved_stderr < 0) return error.DupFailed;
-            defer {
-                _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-                _ = std.c.close(saved_stderr);
+                const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+                if (devnull < 0) return error.OpenDevNullFailed;
+                defer _ = std.c.close(devnull);
+                const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+                if (saved_stderr < 0) return error.DupFailed;
+                defer {
+                    _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+                    _ = std.c.close(saved_stderr);
+                }
+                _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+                try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(1000));
+                try testing.expectEqual(@as(?time.UnixMs, 0), backend._last_fsync_ms);
+
+                backend._file = file;
+                try j.flush(1000);
+                try testing.expectEqual(@as(?time.UnixMs, 1000), backend._last_fsync_ms);
+                try testing.expect(!backend._last_write_failed);
             }
-            _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
-            try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(1000));
-            try testing.expectEqual(@as(?time.UnixMs, 0), backend._last_fsync_ms);
-
-            backend._file = file;
-            try j.flush(1000);
-            try testing.expectEqual(@as(?time.UnixMs, 1000), backend._last_fsync_ms);
-            try testing.expect(!backend._last_write_failed);
             try j.deinit();
         }
     }.run);
@@ -1165,8 +1264,11 @@ test "no policy flushes without fsync" {
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
-            try backend.journal().onWrite(sampleEvent());
-            try backend.journal().flush(5000);
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try journal_handle.onWrite(sampleEvent());
+            try journal_handle.flush(5000);
 
             try testing.expect(backend._last_fsync_ms == null);
             const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
@@ -1186,8 +1288,11 @@ test "onWrite alone leaves the file untouched" {
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
 
-            try backend.journal().onWrite(sampleEvent());
+            try journal_handle.onWrite(sampleEvent());
 
             const file = try dir.openFile(io, "appendonly.aof.1.incr", .{});
             defer file.close(io);
@@ -1208,7 +1313,12 @@ test "clean shutdown flushes no-policy writes without forcing fsync" {
             };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
-            try backend.journal().onWrite(sampleEvent());
+            const journal_handle = backend.journal();
+            {
+                var tx = try journal_handle.begin();
+                defer tx.end();
+                try journal_handle.onWrite(sampleEvent());
+            }
             try backend.journal().deinit();
 
             try testing.expect(backend._last_fsync_ms == null);
@@ -1234,7 +1344,12 @@ test "clean shutdown forces everysec writes to durable storage" {
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             const future_fsync_ms: time.UnixMs = std.math.maxInt(time.UnixMs);
             backend._last_fsync_ms = future_fsync_ms;
-            try backend.journal().onWrite(sampleEvent());
+            const journal_handle = backend.journal();
+            {
+                var tx = try journal_handle.begin();
+                defer tx.end();
+                try journal_handle.onWrite(sampleEvent());
+            }
             try backend.journal().deinit();
 
             try testing.expect(backend._last_fsync_ms != future_fsync_ms);
@@ -1255,6 +1370,9 @@ test "writeBaseEntry buffers reconstruction commands and commits the selected db
             defer backend.journal().deinit() catch {};
             defer backend._base_buffer.deinit(testing.allocator);
             backend._base_encoder = AofEncoder.init();
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
 
             try backend.writeBaseEntry(3, "first", .{ .string = "one" }, null);
             try backend.writeBaseEntry(3, "second", .{ .string = "two" }, 456);
@@ -1279,8 +1397,13 @@ test "init reopens the existing live incr file and appends after its existing co
             {
                 var state = PersistenceState.init(io, false);
                 var backend = try AofBackend.init(io, testing.allocator, &state, config);
-                try backend.journal().onWrite(sampleEvent());
-                try backend.journal().flush(0);
+                const journal_handle = backend.journal();
+                {
+                    var tx = try journal_handle.begin();
+                    defer tx.end();
+                    try journal_handle.onWrite(sampleEvent());
+                    try journal_handle.flush(0);
+                }
                 try backend.journal().deinit();
             }
 
@@ -1295,8 +1418,11 @@ test "init reopens the existing live incr file and appends after its existing co
             try testing.expectEqual(before.len, backend2._incr_bytes);
             try testing.expectEqual(before.len, backend2._file_offset);
 
-            try backend2.journal().onWrite(sampleEvent());
-            try backend2.journal().flush(0);
+            const journal_handle = backend2.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try journal_handle.onWrite(sampleEvent());
+            try journal_handle.flush(0);
 
             const after = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
             defer testing.allocator.free(after);
@@ -1344,28 +1470,33 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
 
-            try backend.journal().onWrite(sampleEvent());
-            try backend.journal().flush(0);
+            try journal_handle.onWrite(sampleEvent());
+            try journal_handle.flush(0);
             const old_total = backend._incr_bytes;
             try testing.expect(old_total > 0);
             try testing.expectEqual(old_total, backend._file_offset);
 
-            try backend.journal().bgRewrite(&.{});
+            try journal_handle.bgRewrite(&.{});
             try testing.expectEqual(old_total, backend._incr_bytes);
             try testing.expectEqual(0, backend._file_offset);
 
             var reap_result: PersistenceState.ReapResult = .running;
             var tries: usize = 0;
             while (reap_result == .running) {
+                var state_tx = try state.begin();
                 reap_result = state.reapAof();
+                state_tx.end();
                 tries += 1;
                 if (tries > 100_000) return error.ChildNeverReaped;
             }
             try testing.expectEqual(PersistenceState.ReapResult.succeeded, reap_result);
 
-            try backend.journal().onWrite(sampleEvent());
-            try backend.journal().flush(0);
+            try journal_handle.onWrite(sampleEvent());
+            try journal_handle.flush(0);
 
             const new_incr_name = try Manifest.incrName(testing.allocator, config.append_filename, backend._incr_seq);
             defer testing.allocator.free(new_incr_name);
@@ -1388,9 +1519,12 @@ test "successful finishRewrite publishes the new base and removes retired files"
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
 
-            try backend.journal().onWrite(sampleEvent());
-            try backend.journal().flush(0);
+            try journal_handle.onWrite(sampleEvent());
+            try journal_handle.flush(0);
 
             const new_live_file = try dir.createFile(io, "appendonly.aof.3.incr", .{});
             backend._file.?.close(io);
@@ -1411,11 +1545,11 @@ test "successful finishRewrite publishes the new base and removes retired files"
             });
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.base", .data = "base" });
 
-            try backend.journal().onWrite(sampleEvent());
-            try backend.journal().flush(0);
+            try journal_handle.onWrite(sampleEvent());
+            try journal_handle.flush(0);
             const live_size = backend._file_offset;
 
-            try backend.journal().finishRewrite(.succeeded);
+            try journal_handle.finishRewrite(.succeeded);
 
             const manifest = try Manifest.read(
                 io,
@@ -1463,7 +1597,10 @@ test "failed finishRewrite removes the orphan base and preserves the cut manifes
 
             const stderr_guard = try TestStderrGuard.silence();
             defer stderr_guard.restore();
-            try backend.journal().finishRewrite(.failed);
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+            try journal_handle.finishRewrite(.failed);
 
             const manifest = try Manifest.read(
                 io,
@@ -1576,33 +1713,37 @@ test "a flush failure latches, and the next onWrite fails fast" {
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             const j = backend.journal();
+            {
+                var tx = try j.begin();
+                defer tx.end();
 
-            try j.onWrite(sampleEvent());
+                try j.onWrite(sampleEvent());
 
-            const real_file = backend._file.?;
-            backend._file = null;
+                const real_file = backend._file.?;
+                backend._file = null;
 
-            // flush's errdefer logs to the real stderr on failure -- exactly
-            // what this test exercises. Redirect it for the failing call,
-            // then restore it, same as cron.zig's/persistence_state.zig's
-            // own tests that trigger a logged failure path.
-            const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-            if (devnull < 0) return error.OpenDevNullFailed;
-            defer _ = std.c.close(devnull);
+                // flush's errdefer logs to the real stderr on failure -- exactly
+                // what this test exercises. Redirect it for the failing call,
+                // then restore it, same as cron.zig's/persistence_state.zig's
+                // own tests that trigger a logged failure path.
+                const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+                if (devnull < 0) return error.OpenDevNullFailed;
+                defer _ = std.c.close(devnull);
 
-            const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-            if (saved_stderr < 0) return error.DupFailed;
-            defer {
-                _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-                _ = std.c.close(saved_stderr);
+                const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+                if (saved_stderr < 0) return error.DupFailed;
+                defer {
+                    _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+                    _ = std.c.close(saved_stderr);
+                }
+                _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+                try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(0));
+                try testing.expect(backend._last_write_failed);
+                try testing.expectError(Journal.Error.UnableToRecordWrite, j.onWrite(sampleEvent()));
+
+                backend._file = real_file;
             }
-            _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
-            try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(0));
-            try testing.expect(backend._last_write_failed);
-            try testing.expectError(Journal.Error.UnableToRecordWrite, j.onWrite(sampleEvent()));
-
-            backend._file = real_file;
             try j.deinit();
         }
     }.run);
@@ -1637,6 +1778,8 @@ test "concurrent onWrite from several threads loses no bytes" {
             const worker = struct {
                 fn run(worker_journal: Journal) void {
                     for (0..writes_per_thread) |_| {
+                        var tx = worker_journal.begin() catch unreachable;
+                        defer tx.end();
                         worker_journal.onWrite(sampleEvent()) catch unreachable;
                     }
                 }
@@ -1648,7 +1791,11 @@ test "concurrent onWrite from several threads loses no bytes" {
             }
             for (threads) |thread| thread.join();
 
-            try j.flush(0);
+            {
+                var tx = try j.begin();
+                defer tx.end();
+                try j.flush(0);
+            }
 
             const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
             defer testing.allocator.free(contents);

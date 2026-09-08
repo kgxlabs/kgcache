@@ -20,6 +20,7 @@ const PersistenceState = @import("../persistence_state.zig");
 const ChangeTracker = @import("../change_tracker.zig");
 const Config = @import("../config.zig");
 const DefaultStorage = @import("default_storage.zig");
+const Lock = @import("../lock.zig");
 
 const NotifierStorage = @This();
 
@@ -55,7 +56,7 @@ pub fn storage(self: *NotifierStorage) Storage {
         .ptr = self,
         .vtable = &vtable,
         ._io = self._inner._io,
-        ._mutex = self._inner._mutex,
+        ._lock = self._inner._lock,
     };
 }
 
@@ -92,6 +93,9 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
         const maybe_exp = try self._inner.getExp(key);
         if (maybe_exp) |exp| {
             if (time.isPastTime(self._inner._io, exp.expires_at)) {
+                var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+                defer aof_tx.end();
+
                 var record = aof.prepareRecord(.{
                     .remove = .{ .db_index = self._db_index, .key = key },
                 }) catch return Storage.Error.UnableToRecordWrite;
@@ -128,6 +132,9 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
             break :blk if (maybe_exp) |exp| exp.expires_at else null;
         } else null;
 
+        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        defer aof_tx.end();
+
         var record = aof.prepareRecord(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
@@ -154,6 +161,9 @@ pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
 
     if (self._aof) |aof| {
+        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        defer aof_tx.end();
+
         var record = aof.prepareRecord(.{
             .remove = .{ .db_index = self._db_index, .key = key },
         }) catch return Storage.Error.UnableToRecordWrite;
@@ -194,6 +204,9 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
         const maybe_key = self._inner.sampleExpirableKey() catch return Storage.Error.UnableToExpire;
         const key = maybe_key orelse return null;
         errdefer self._allocator.free(key);
+
+        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        defer aof_tx.end();
 
         var record = aof.prepareRecord(.{
             .remove = .{
@@ -304,6 +317,12 @@ test "a lazy-expiration removal during get increments the change tracker's dirty
 }
 
 const FailingJournal = struct {
+    lock: Lock,
+
+    fn init(io: std.Io) FailingJournal {
+        return .{ .lock = Lock.init(io) };
+    }
+
     const journal_vtable: persistence.JournalPersistence.VTable = .{
         .prepareRecord = prepareRecord,
         .flush = flush,
@@ -317,7 +336,7 @@ const FailingJournal = struct {
     };
 
     fn journal(self: *FailingJournal) persistence.JournalPersistence {
-        return .{ .ptr = self, .vtable = &journal_vtable };
+        return .{ .ptr = self, .vtable = &journal_vtable, ._lock = &self.lock };
     }
 
     fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
@@ -341,7 +360,7 @@ test "a journal that fails to record a write fails the put" {
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var tracker = ChangeTracker.init(testing.io);
-    var failing_journal = FailingJournal{};
+    var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
@@ -372,7 +391,7 @@ test "a journal preparation failure leaves a removed key unchanged" {
     }
 
     var tracker = ChangeTracker.init(testing.io);
-    var failing_journal = FailingJournal{};
+    var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -399,7 +418,7 @@ test "a journal preparation failure leaves a lazy-expired key stored" {
     }
 
     var tracker = ChangeTracker.init(testing.io);
-    var failing_journal = FailingJournal{};
+    var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -427,7 +446,7 @@ test "a journal preparation failure leaves an active-expiration key stored" {
     }
 
     var tracker = ChangeTracker.init(testing.io);
-    var failing_journal = FailingJournal{};
+    var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -455,7 +474,7 @@ test "a journal preparation failure leaves a lazily expired key unchanged" {
     }
 
     var tracker = ChangeTracker.init(testing.io);
-    var failing_journal = FailingJournal{};
+    var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -483,7 +502,7 @@ test "a journal preparation failure leaves an actively expired key unchanged" {
     }
 
     var tracker = ChangeTracker.init(testing.io);
-    var failing_journal = FailingJournal{};
+    var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -524,7 +543,12 @@ test "a read that finds no expired key does not increment the dirty count" {
 }
 
 const RecordingJournal = struct {
+    lock: Lock,
     last_event: ?persistence.JournalPersistence.WriteEvent = null,
+
+    fn init(io: std.Io) RecordingJournal {
+        return .{ .lock = Lock.init(io) };
+    }
 
     const journal_vtable: persistence.JournalPersistence.VTable = .{
         .prepareRecord = prepareRecord,
@@ -539,7 +563,7 @@ const RecordingJournal = struct {
     };
 
     fn journal(self: *RecordingJournal) persistence.JournalPersistence {
-        return .{ .ptr = self, .vtable = &journal_vtable };
+        return .{ .ptr = self, .vtable = &journal_vtable, ._lock = &self.lock };
     }
 
     fn publishRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
@@ -570,7 +594,7 @@ test "KEEPTTL over an existing expiry journals the existing absolute expiry" {
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var tracker = ChangeTracker.init(testing.io);
-    var recording_journal = RecordingJournal{};
+    var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
@@ -599,7 +623,7 @@ test "remove journals a DEL" {
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var tracker = ChangeTracker.init(testing.io);
-    var recording_journal = RecordingJournal{};
+    var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
@@ -627,7 +651,7 @@ test "an active-expiration removal journals a DEL and increments the dirty count
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var tracker = ChangeTracker.init(testing.io);
-    var recording_journal = RecordingJournal{};
+    var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
@@ -663,7 +687,7 @@ test "sampling a live key does not increment the dirty count" {
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var tracker = ChangeTracker.init(testing.io);
-    var recording_journal = RecordingJournal{};
+    var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),

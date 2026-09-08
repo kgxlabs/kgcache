@@ -1,4 +1,5 @@
 const std = @import("std");
+const Lock = @import("lock.zig");
 
 const PersistenceState = @This();
 
@@ -9,7 +10,7 @@ pub const ReapResult = enum {
 };
 
 _io: std.Io,
-_mutex: std.Io.Mutex = .init,
+_lock: Lock,
 _kgc_in_progress: bool = false,
 _aof_in_progress: bool = false,
 _mutual_exclusive: bool = false,
@@ -19,14 +20,16 @@ _aof_pid: ?std.posix.pid_t = null,
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
         ._io = io,
+        ._lock = Lock.init(io),
         ._mutual_exclusive = mutual_exclusive,
     };
 }
 
-pub fn tryStartKgc(self: *PersistenceState) bool {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
+pub fn begin(self: *PersistenceState) std.Io.Cancelable!Lock.Tx {
+    return self._lock.begin();
+}
 
+pub fn tryStartKgc(self: *PersistenceState) bool {
     if (self._kgc_in_progress) return false;
     if (self._mutual_exclusive and self._aof_in_progress) return false;
     self._kgc_in_progress = true;
@@ -34,22 +37,14 @@ pub fn tryStartKgc(self: *PersistenceState) bool {
 }
 
 pub fn setKgcPid(self: *PersistenceState, pid: std.posix.pid_t) void {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
     self._kgc_pid = pid;
 }
 
 pub fn finishKgc(self: *PersistenceState) void {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     self._kgc_in_progress = false;
 }
 
 pub fn tryStartAof(self: *PersistenceState) bool {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     if (self._aof_in_progress) return false;
     if (self._mutual_exclusive and self._kgc_in_progress) return false;
     self._aof_in_progress = true;
@@ -57,24 +52,19 @@ pub fn tryStartAof(self: *PersistenceState) bool {
 }
 
 pub fn setAofPid(self: *PersistenceState, pid: std.posix.pid_t) void {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     self._aof_pid = pid;
 }
 
 pub fn finishAof(self: *PersistenceState) void {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     self._aof_in_progress = false;
 }
 
 pub fn aofInProgress(self: *PersistenceState) bool {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     return self._aof_in_progress;
+}
+
+pub fn kgcInProgress(self: *PersistenceState) bool {
+    return self._kgc_in_progress;
 }
 
 pub fn reapKgc(self: *PersistenceState) ReapResult {
@@ -88,9 +78,6 @@ pub fn reapAof(self: *PersistenceState) ReapResult {
 // A completed child is reported exactly once. With no pid there is no
 // completion event, so callers receive .running and do no follow-up work.
 fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) ReapResult {
-    self._mutex.lockUncancelable(self._io);
-    defer self._mutex.unlock(self._io);
-
     // No pid means there is no completion event for the caller to handle.
     const pid = maybe_pid.* orelse return .running;
 
@@ -126,66 +113,182 @@ fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid
     return .succeeded;
 }
 
+test "ending a PersistenceState session allows another session to begin" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    var first = try state.begin();
+    first.end();
+
+    var second = try state.begin();
+    second.end();
+}
+
+test "PersistenceState begin serializes two concurrent callers" {
+    const testing = std.testing;
+    const Context = struct {
+        state: *PersistenceState,
+        attempting: std.atomic.Value(bool) = .init(false),
+        entered: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            self.attempting.store(true, .release);
+            var tx = self.state.begin() catch unreachable;
+            self.entered.store(true, .release);
+            tx.end();
+        }
+    };
+
+    var state = PersistenceState.init(testing.io, false);
+    var first = try state.begin();
+    var context: Context = .{ .state = &state };
+    const thread = try std.Thread.spawn(.{}, Context.run, .{&context});
+
+    while (!context.attempting.load(.acquire)) std.atomic.spinLoopHint();
+    try testing.expect(!context.entered.load(.acquire));
+
+    first.end();
+    thread.join();
+    try testing.expect(context.entered.load(.acquire));
+}
+
 test "tryStartKgc blocks a second start until finishKgc releases it" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, false);
 
-    try testing.expect(state.tryStartKgc());
-    try testing.expect(!state.tryStartKgc());
-
-    state.finishKgc();
-
-    try testing.expect(state.tryStartKgc());
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(!state.tryStartKgc());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        state.finishKgc();
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
 }
 
 test "tryStartAof blocks a second start until finishAof releases it" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, false);
 
-    try testing.expect(state.tryStartAof());
-    try testing.expect(!state.tryStartAof());
-
-    state.finishAof();
-
-    try testing.expect(state.tryStartAof());
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartAof());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(!state.tryStartAof());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        state.finishAof();
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartAof());
+    }
 }
 
 test "mutual exclusion blocks kgc while aof is in progress" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, true);
 
-    try testing.expect(state.tryStartAof());
-    try testing.expect(!state.tryStartKgc());
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartAof());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(!state.tryStartKgc());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        state.finishAof();
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
 
-    state.finishAof();
-
-    try testing.expect(state.tryStartKgc());
+    var final = try state.begin();
+    final.end();
 }
 
 test "mutual exclusion blocks aof while kgc is in progress" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, true);
 
-    try testing.expect(state.tryStartKgc());
-    try testing.expect(!state.tryStartAof());
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(!state.tryStartAof());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        state.finishKgc();
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartAof());
+    }
 
-    state.finishKgc();
-
-    try testing.expect(state.tryStartAof());
+    var final = try state.begin();
+    final.end();
 }
 
 test "without mutual exclusion kgc and aof can be in progress at the same time" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, false);
 
-    try testing.expect(state.tryStartKgc());
-    try testing.expect(state.tryStartAof());
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartAof());
+    }
+
+    var final = try state.begin();
+    final.end();
 }
 
-test "reapKgc leaves state untouched while the child is still running" {
+test "reapKgc reports running until background save completes" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, false);
-    try testing.expect(state.tryStartKgc());
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
 
     // A pipe lets the parent control exactly when the forked child exits,
     // instead of racing a real timing window.
@@ -211,30 +314,47 @@ test "reapKgc leaves state untouched while the child is still running" {
         std.c._exit(0);
     }
     _ = std.c.close(fds[0]);
-    state.setKgcPid(pid);
-
-    try testing.expect(state.reapKgc() == .running);
-    try testing.expect(state._kgc_in_progress);
-    try testing.expect(state._kgc_pid != null);
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        state.setKgcPid(pid);
+    }
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expectEqual(ReapResult.running, state.reapKgc());
+        try testing.expect(state.kgcInProgress());
+    }
 
     var byte: [1]u8 = .{1};
     _ = std.c.write(fds[1], &byte, 1);
     _ = std.c.close(fds[1]);
 
+    var result: ReapResult = .running;
     var tries: usize = 0;
-    while (state._kgc_pid != null) {
-        _ = state.reapKgc();
+    while (result == .running) {
+        var tx = try state.begin();
+        result = state.reapKgc();
+        tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
-
-    try testing.expect(!state._kgc_in_progress);
+    try testing.expectEqual(ReapResult.succeeded, result);
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(!state.kgcInProgress());
+    }
 }
 
-test "reapKgc clears state after the child exits with a failure status" {
+test "reapKgc reports failure and allows a later save" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, false);
-    try testing.expect(state.tryStartKgc());
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
 
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
@@ -247,7 +367,11 @@ test "reapKgc clears state after the child exits with a failure status" {
         _ = std.c.close(std.posix.STDOUT_FILENO);
         std.c._exit(7);
     }
-    state.setKgcPid(pid);
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        state.setKgcPid(pid);
+    }
 
     // reapKgc logs to the real stderr when it observes a non-zero exit --
     // exactly what this test exercises. Left alone, that write lands in the
@@ -267,12 +391,19 @@ test "reapKgc clears state after the child exits with a failure status" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
+    var result: ReapResult = .running;
     var tries: usize = 0;
-    while (state._kgc_pid != null) {
-        _ = state.reapKgc();
+    while (result == .running) {
+        var tx = try state.begin();
+        result = state.reapKgc();
+        tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
-
-    try testing.expect(!state._kgc_in_progress);
+    try testing.expectEqual(ReapResult.failed, result);
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+    }
 }

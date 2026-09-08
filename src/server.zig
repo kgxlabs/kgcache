@@ -100,6 +100,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
     }
 
     self._mem_store = store.MemoryStore.init(
+        allocator,
         self._data_storages,
         kgc_snapshot,
         maybe_aof_journal,
@@ -242,14 +243,11 @@ fn writeKgcSnapshotWithFooBar(io: std.Io, allocator: std.mem.Allocator, path: []
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    {
-        var tx = try backend_storage.begin();
-        defer tx.end();
-        _ = try backend_storage.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
-    }
-
     var persistence_state = PersistenceState.init(io, false);
     var kgc_backend = try persistence.KgcPersistence.init(io, allocator, &persistence_state, path);
+    var tx = try backend_storage.begin();
+    defer tx.end();
+    _ = try backend_storage.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
     try kgc_backend.snapshot().save(&.{backend_storage});
 }
 
@@ -552,6 +550,9 @@ test "writes survive a simulated restart" {
     try testing.expectEqualStrings("one", persistent.string);
     const expiring = try second._store.get("expiring", 1) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("two", expiring.string);
+
+    var tx = try second._data_storages[1].begin();
+    defer tx.end();
     const expiration = try second._data_storages[1].getExp("expiring") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(expires_at, expiration.expires_at);
 }

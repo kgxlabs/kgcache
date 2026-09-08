@@ -1,7 +1,13 @@
+//! Callers hold the session returned by `begin` while reading, mutating,
+//! sizing, or iterating Storage. Those operations do not lock themselves.
+//! `deinit` is shutdown-only and must run after every Storage user stops.
+//! Snapshot loading is lifecycle-exclusive until Storage reaches workers.
+
 const std = @import("std");
 const entry = @import("../entry.zig");
 const object = @import("../object.zig");
 const time = @import("../time.zig");
+const Lock = @import("../lock.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -16,7 +22,7 @@ const Storage = @This();
 ptr: *anyopaque,
 vtable: *const VTable,
 _io: std.Io,
-_mutex: *std.Io.Mutex,
+_lock: *Lock,
 
 pub const PutOptions = struct {
     expires_at: ?time.UnixMs,
@@ -28,14 +34,7 @@ pub const RemovalMode = enum {
     unconditional,
 };
 
-pub const Tx = struct {
-    _io: std.Io,
-    _mutex: *std.Io.Mutex,
-
-    pub fn end(self: *Tx) void {
-        return self._mutex.unlock(self._io);
-    }
-};
+pub const Tx = Lock.Tx;
 
 pub const VTable = struct {
     get: *const fn (*anyopaque, []const u8) Error!?entry.Object,
