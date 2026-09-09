@@ -131,12 +131,13 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
 
 pub fn save(ptr: *anyopaque, now_ms: i64) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    {
-        const sessions = try self.beginStorageSessions();
-        defer self.endStorageSessions(sessions);
-        self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
-    }
-    self._change_tracker.markSaved(now_ms);
+
+    const sessions = try self.beginStorageSessions();
+    defer self.endStorageSessions(sessions);
+
+    const snapshot_change_count = self._change_tracker.captureSnapshotChangeCount();
+    self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
+    self._change_tracker.markSaved(snapshot_change_count, now_ms);
 }
 
 pub fn bgsave(ptr: *anyopaque) Store.Error!void {
@@ -145,7 +146,8 @@ pub fn bgsave(ptr: *anyopaque) Store.Error!void {
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    self._kgc.bgsave(self._storages) catch return Store.Error.UnableToBackgroundSaveKgc;
+    const snapshot_change_count = self._change_tracker.captureSnapshotChangeCount();
+    self._kgc.bgsave(self._storages, snapshot_change_count) catch return Store.Error.UnableToBackgroundSaveKgc;
 }
 
 pub fn bgrewriteaof(ptr: *anyopaque) Store.Error!void {
@@ -783,16 +785,17 @@ test "concurrent KGC snapshot contains one complete submitted value" {
         try setStoreValue(&data_store, "key", if (index % 2 == 0) second else first, 0);
     }
 
-    var result: PersistenceState.ReapResult = .running;
+    var result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
-    while (result == .running) {
+    while (result.status == .running) {
         var state_tx = try persistence_state.begin();
         result = persistence_state.reapKgc();
+        if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
-    try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
+    try testing.expectEqual(PersistenceState.ReapResult.succeeded, result.status);
 
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_storage = fresh_backend.storage();
@@ -942,16 +945,17 @@ test "KGC bgsave waits for active Storage work and preserves all databases" {
     try testing.expect(!returned_early);
     try testing.expect(!context.failed.load(.acquire));
 
-    var result: PersistenceState.ReapResult = .running;
+    var result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
-    while (result == .running) {
+    while (result.status == .running) {
         var state_tx = try persistence_state.begin();
         result = persistence_state.reapKgc();
+        if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
-    try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
+    try testing.expectEqual(PersistenceState.ReapResult.succeeded, result.status);
 
     var fresh_zero = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_one = DefaultStorage.init(testing.io, testing.allocator);

@@ -319,7 +319,10 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     self._pending_base_seq = base_seq;
     var state_tx = self._persistence_state.begin() catch unreachable;
     defer state_tx.end();
-    self._persistence_state.setAofPid(pid);
+    self._persistence_state.setInFlightAofRewrite(.{
+        .pid = pid,
+        .base_seq = base_seq,
+    });
     child_started = true;
 }
 

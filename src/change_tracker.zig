@@ -22,6 +22,13 @@ pub fn recordChange(self: *ChangeTracker) void {
     _ = self._dirty.fetchAdd(1, .monotonic);
 }
 
+/// Captures the number of changes represented by a snapshot. Callers must
+/// hold every storage lock so all mutations included in the snapshot have
+/// already published their change notification.
+pub fn captureSnapshotChangeCount(self: *ChangeTracker) u64 {
+    return self._dirty.load(.monotonic);
+}
+
 /// Returns true if ANY rule's condition is met
 /// rules are OR'd together,
 pub fn dueForSave(self: *ChangeTracker, now_ms: i64, rules: []const Config.SaveRule) bool {
@@ -35,10 +42,11 @@ pub fn dueForSave(self: *ChangeTracker, now_ms: i64, rules: []const Config.SaveR
     return false;
 }
 
-/// Called once a save has actually finished writing to disk
-pub fn markSaved(self: *ChangeTracker, now_ms: i64) void {
-    // swap(0, ...) rather than "read, then separately write 0" -- one indivisible op,
-    _ = self._dirty.swap(0, .monotonic);
+/// Marks only the changes represented by a completed snapshot as saved.
+/// Changes recorded after the snapshot change count was captured remain dirty.
+pub fn markSaved(self: *ChangeTracker, saved_change_count: u64, now_ms: i64) void {
+    const dirty = self._dirty.fetchSub(saved_change_count, .monotonic);
+    std.debug.assert(dirty >= saved_change_count);
     self._last_save_ms.store(now_ms, .monotonic);
 }
 
@@ -108,9 +116,23 @@ test "markSaved resets the dirty count and updates the timestamp, so dueForSave 
     const now_ms = time.nowMs(testing.io) + 300 * 1000;
     try testing.expect(tracker.dueForSave(now_ms, &rules));
 
-    tracker.markSaved(now_ms);
+    const snapshot_change_count = tracker.captureSnapshotChangeCount();
+    tracker.markSaved(snapshot_change_count, now_ms);
 
     try testing.expect(!tracker.dueForSave(now_ms, &rules));
+}
+
+test "markSaved preserves changes recorded after the snapshot change count" {
+    const testing = std.testing;
+    var tracker = ChangeTracker.init(testing.io);
+
+    for (0..3) |_| tracker.recordChange();
+    const snapshot_change_count = tracker.captureSnapshotChangeCount();
+    for (0..2) |_| tracker.recordChange();
+
+    tracker.markSaved(snapshot_change_count, time.nowMs(testing.io));
+
+    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
 }
 
 test "concurrent recordChange calls are never lost" {

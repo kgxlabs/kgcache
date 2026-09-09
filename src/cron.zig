@@ -30,13 +30,11 @@ pub fn run(
         start = try expiration.runRound(io, allocator, data_storages, start, config);
 
         // clean up forked child processes if any
-        const kg_result = blk: {
+        {
             var state_tx = try persistence_state.begin();
             defer state_tx.end();
-            break :blk persistence_state.reapKgc();
-        };
-        if (kg_result != .running) {
-            change_tracker.markSaved(time.nowMs(io));
+            const completed_save = persistence_state.reapKgc();
+            _ = finishKgcIfCompleted(io, change_tracker, persistence_state, completed_save);
         }
 
         // clean up forked child processes and register for auto rewrite
@@ -53,6 +51,23 @@ pub fn run(
 
         triggerSaveIfDue(io, change_tracker, data_store, config);
     }
+}
+
+/// Must be called while holding a PersistenceState session so another save
+/// cannot capture a snapshot change count before this completion is accounted for.
+fn finishKgcIfCompleted(
+    io: std.Io,
+    change_tracker: *ChangeTracker,
+    persistence_state: *PersistenceState,
+    result: PersistenceState.KgcReapResult,
+) bool {
+    if (result.status == .running) return false;
+
+    if (result.status == .succeeded) {
+        change_tracker.markSaved(result.saved_change_count.?, time.nowMs(io));
+    }
+    persistence_state.finishKgc();
+    return true;
 }
 
 fn flushAofIfDue(io: std.Io, aof: persistence.JournalPersistence) void {
@@ -429,7 +444,7 @@ test "a failed rewrite is not retried immediately and wait for delay" {
     try testing.expectEqual(PersistenceState.ReapResult.running, state.reapAof());
 }
 
-test "a completed background save resets the change tracker once reaped, not before" {
+test "a completed background save preserves changes made after its snapshot change count" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const NotifierStorage = @import("storage/notifier_storage.zig");
@@ -451,6 +466,9 @@ test "a completed background save resets the change tracker once reaped, not bef
 
     try data_store.bgsave();
 
+    // This write happens after the child captured its snapshot change count.
+    try writeOneKey(&data_store);
+
     // the parent returns immediately -- reapKgc() hasn't been called yet at
     // this point, so the dirty count from the write above must still stand.
     {
@@ -462,23 +480,21 @@ test "a completed background save resets the change tracker once reaped, not bef
 
     // Same check run()'s loop body does after reapKgc(): only reset once a
     // child has actually been observed to exit, not at bgsave()'s call site.
-    var reap_result: PersistenceState.ReapResult = .running;
+    var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
-    while (reap_result == .running) {
+    while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc();
+        _ = finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
-        if (reap_result != .running) {
-            change_tracker.markSaved(time.nowMs(testing.io));
-        }
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
 
-    try testing.expectEqual(0, change_tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, change_tracker._dirty.load(.monotonic));
 }
 
-test "a failed background save still resets the change tracker" {
+test "a failed background save leaves the change tracker dirty" {
     const testing = std.testing;
 
     var persistence_state = PersistenceState.init(testing.io, false);
@@ -505,7 +521,7 @@ test "a failed background save still resets the change tracker" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        persistence_state.setKgcPid(pid);
+        persistence_state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = change_tracker.captureSnapshotChangeCount() });
     }
 
     // reapKgc logs to the real stderr when it observes this non-zero exit --
@@ -524,22 +540,18 @@ test "a failed background save still resets the change tracker" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
-    var reap_result: PersistenceState.ReapResult = .running;
+    var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
-    while (reap_result == .running) {
+    while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc();
+        _ = finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
-        if (reap_result != .running) {
-            change_tracker.markSaved(time.nowMs(testing.io));
-        }
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
 
-    // triggered but failed -- still reset, so a persistently failing save
-    // retries on the next rule match rather than every single cron tick.
-    try testing.expectEqual(0, change_tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, change_tracker._dirty.load(.monotonic));
 }
 
 test "triggerSaveIfDue starts a background save once writes through the real store meet the configured rule" {
@@ -573,11 +585,12 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
         try testing.expect(persistence_state.kgcInProgress());
     }
 
-    var reap_result: PersistenceState.ReapResult = .running;
+    var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
-    while (reap_result == .running) {
+    while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc();
+        _ = finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
