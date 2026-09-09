@@ -34,7 +34,10 @@ pub fn run(
             var state_tx = try persistence_state.begin();
             defer state_tx.end();
             const completed_save = persistence_state.reapKgc();
-            _ = finishKgcIfCompleted(io, change_tracker, persistence_state, completed_save);
+            _ = finishKgcIfCompleted(io, change_tracker, persistence_state, completed_save) catch {
+                const message = "kgcache: failed to account for completed background save\n";
+                std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+            };
         }
 
         // clean up forked child processes and register for auto rewrite
@@ -60,13 +63,13 @@ fn finishKgcIfCompleted(
     change_tracker: *ChangeTracker,
     persistence_state: *PersistenceState,
     result: PersistenceState.KgcReapResult,
-) bool {
+) ChangeTracker.Error!bool {
     if (result.status == .running) return false;
+    defer persistence_state.finishKgc();
 
     if (result.status == .succeeded) {
-        change_tracker.markSaved(result.saved_change_count.?, time.nowMs(io));
+        try change_tracker.markSaved(result.saved_change_count.?, time.nowMs(io));
     }
-    persistence_state.finishKgc();
     return true;
 }
 
@@ -485,7 +488,7 @@ test "a completed background save preserves changes made after its snapshot chan
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc();
-        _ = finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
+        _ = try finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
@@ -545,7 +548,7 @@ test "a failed background save leaves the change tracker dirty" {
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc();
-        _ = finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
+        _ = try finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
@@ -590,7 +593,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc();
-        _ = finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
+        _ = try finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;

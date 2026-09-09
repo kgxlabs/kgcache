@@ -4,6 +4,8 @@ const Config = @import("config.zig");
 
 const ChangeTracker = @This();
 
+pub const Error = error{InvalidSavedChangeCount};
+
 /// Number of writes (put/remove) since the last save.
 _dirty: std.atomic.Value(u64) = .init(0),
 /// Timestamp of the last save, initialized to "now" at construction (not
@@ -44,9 +46,11 @@ pub fn dueForSave(self: *ChangeTracker, now_ms: i64, rules: []const Config.SaveR
 
 /// Marks only the changes represented by a completed snapshot as saved.
 /// Changes recorded after the snapshot change count was captured remain dirty.
-pub fn markSaved(self: *ChangeTracker, saved_change_count: u64, now_ms: i64) void {
-    const dirty = self._dirty.fetchSub(saved_change_count, .monotonic);
-    std.debug.assert(dirty >= saved_change_count);
+pub fn markSaved(self: *ChangeTracker, saved_change_count: u64, now_ms: i64) Error!void {
+    const dirty = self._dirty.load(.monotonic);
+    if (dirty < saved_change_count) return Error.InvalidSavedChangeCount;
+
+    _ = self._dirty.fetchSub(saved_change_count, .monotonic);
     self._last_save_ms.store(now_ms, .monotonic);
 }
 
@@ -117,7 +121,7 @@ test "markSaved resets the dirty count and updates the timestamp, so dueForSave 
     try testing.expect(tracker.dueForSave(now_ms, &rules));
 
     const snapshot_change_count = tracker.captureSnapshotChangeCount();
-    tracker.markSaved(snapshot_change_count, now_ms);
+    try tracker.markSaved(snapshot_change_count, now_ms);
 
     try testing.expect(!tracker.dueForSave(now_ms, &rules));
 }
@@ -130,9 +134,22 @@ test "markSaved preserves changes recorded after the snapshot change count" {
     const snapshot_change_count = tracker.captureSnapshotChangeCount();
     for (0..2) |_| tracker.recordChange();
 
-    tracker.markSaved(snapshot_change_count, time.nowMs(testing.io));
+    try tracker.markSaved(snapshot_change_count, time.nowMs(testing.io));
 
     try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+}
+
+test "markSaved rejects a count greater than the dirty count" {
+    const testing = std.testing;
+    var tracker = ChangeTracker.init(testing.io);
+
+    tracker.recordChange();
+
+    try testing.expectError(
+        Error.InvalidSavedChangeCount,
+        tracker.markSaved(2, time.nowMs(testing.io)),
+    );
+    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
 }
 
 test "concurrent recordChange calls are never lost" {
