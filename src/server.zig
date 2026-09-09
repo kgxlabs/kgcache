@@ -132,7 +132,7 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
 
     // Replay uses the normal storage path, which increments the dirty count.
     // These changes are already stored in the AOF, so startup begins clean.
-    self._change_tracker.markSaved(time.nowMs(io));
+    self._change_tracker.markSaved(self._change_tracker.captureSnapshotChangeCount(), time.nowMs(io));
 }
 
 fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {

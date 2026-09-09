@@ -13,7 +13,7 @@ pub const Error = error{
 
 pub const VTable = struct {
     save: *const fn (*anyopaque, storages: []const Storage) Error!void,
-    bgsave: *const fn (*anyopaque, storages: []const Storage) Error!void,
+    bgsave: *const fn (*anyopaque, storages: []const Storage, snapshot_change_count: u64) Error!void,
     load: *const fn (*anyopaque, storages: []const Storage) Error!void,
 };
 
@@ -21,8 +21,8 @@ pub fn save(self: SnapshotPersistence, storages: []const Storage) Error!void {
     return self.vtable.save(self.ptr, storages);
 }
 
-pub fn bgsave(self: SnapshotPersistence, storages: []const Storage) Error!void {
-    return self.vtable.bgsave(self.ptr, storages);
+pub fn bgsave(self: SnapshotPersistence, storages: []const Storage, snapshot_change_count: u64) Error!void {
+    return self.vtable.bgsave(self.ptr, storages, snapshot_change_count);
 }
 
 pub fn load(self: SnapshotPersistence, storages: []const Storage) Error!void {

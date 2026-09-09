@@ -91,7 +91,8 @@ Beyond on-demand `SAVE`/`BGSAVE`, kgcache can trigger a `BGSAVE` on its own once
 `ChangeTracker` (`src/change_tracker.zig`) tracks two things: a dirty counter (writes since the last save) and the timestamp of the last save. It's deliberately atomics-only, no mutex:
 
 - Incrementing the counter (`recordChange`) only needs "don't lose concurrent increments": a single-field atomicity guarantee, not a multi-step critical section, so `fetchAdd` is enough.
-- Resetting it (`markSaved`) uses `swap(0, ...)` rather than "read, then separately write 0": one indivisible op, so a concurrent `recordChange()` either lands before the swap (counted, then reset) or after it (preserved for the next round). Nothing is silently dropped, and no lock is required.
+- Starting a snapshot captures its change count while every storage lock is held. This ensures the count includes every mutation represented by the snapshot.
+- Completing a snapshot passes that change count to `markSaved`, which subtracts only the captured count. Changes recorded after the snapshot started remain dirty for the next save.
 
 `recordChange()` is called from `NotifierStorage`, the same vantage point that already sees every write for AOF journaling, on every `put`, `remove`, and lazy-expiration removal during `get` (Redis's own dirty counter counts expiry-driven removals too).
 
@@ -111,13 +112,17 @@ Trigger path (every cron-interval-ms tick):
   ChangeTracker.dueForSave(now, config.save_rules)
     │  any rule: elapsed_seconds ≥ rule.seconds AND dirty ≥ rule.changes ?
     ▼ yes
-  Store.bgsave() ── fork() ── child dumps to disk, exits
+  Store.bgsave() captures snapshot change count
+    │
+    ▼
+  fork() ── child dumps to disk, exits
     │
     ▼ (a later tick)
   PersistenceState.reapKgc() notices the child exited
     │
     ▼
-  ChangeTracker.markSaved(now)   (dirty → 0, last_save → now)
+  ChangeTracker.markSaved(snapshot_change_count, now)
+    (dirty → dirty - snapshot_change_count, last_save → now)
 ```
 
 A failed trigger attempt (`bgsave()` returning an error) is logged to stderr and otherwise ignored: it's just re-evaluated on the next tick, the same as any other transient failure in the cron loop.
@@ -141,4 +146,4 @@ MemoryStore.save()                    Store.bgsave() returns as soon as
                                          bgsave()'s call site
 ```
 
-Reaping a **failed** child (non-zero exit) still calls `markSaved()`. This is a deliberate choice: without it, `dueForSave()` would stay true forever after one failed attempt (e.g. a full disk), and cron would retry a doomed fork on every single tick instead of waiting for the next rule match. Resetting means a persistently failing save is retried once per window, not once per tick: the tradeoff is that a single transient failure delays the next attempt until the counter climbs back up, rather than retrying immediately.
+Reaping a **failed** child (non-zero exit) does not call `markSaved()`, because no snapshot was successfully written. The dirty count and last-save timestamp remain unchanged, so an automatic save that is still due can retry on a later cron tick.

@@ -9,13 +9,28 @@ pub const ReapResult = enum {
     failed,
 };
 
+pub const KgcBackgroundSave = struct {
+    pid: std.posix.pid_t,
+    captured_change_count: u64,
+};
+
+pub const AofBackgroundRewrite = struct {
+    pid: std.posix.pid_t,
+    base_seq: u32,
+};
+
+pub const KgcReapResult = struct {
+    status: ReapResult,
+    saved_change_count: ?u64 = null,
+};
+
 _io: std.Io,
 _lock: Lock,
 _kgc_in_progress: bool = false,
 _aof_in_progress: bool = false,
 _mutual_exclusive: bool = false,
-_kgc_pid: ?std.posix.pid_t = null,
-_aof_pid: ?std.posix.pid_t = null,
+_in_flight_kgc_save: ?KgcBackgroundSave = null,
+_in_flight_aof_rewrite: ?AofBackgroundRewrite = null,
 
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
@@ -36,8 +51,8 @@ pub fn tryStartKgc(self: *PersistenceState) bool {
     return true;
 }
 
-pub fn setKgcPid(self: *PersistenceState, pid: std.posix.pid_t) void {
-    self._kgc_pid = pid;
+pub fn setInFlightKgcSave(self: *PersistenceState, save: KgcBackgroundSave) void {
+    self._in_flight_kgc_save = save;
 }
 
 pub fn finishKgc(self: *PersistenceState) void {
@@ -51,8 +66,8 @@ pub fn tryStartAof(self: *PersistenceState) bool {
     return true;
 }
 
-pub fn setAofPid(self: *PersistenceState, pid: std.posix.pid_t) void {
-    self._aof_pid = pid;
+pub fn setInFlightAofRewrite(self: *PersistenceState, rewrite: AofBackgroundRewrite) void {
+    self._in_flight_aof_rewrite = rewrite;
 }
 
 pub fn finishAof(self: *PersistenceState) void {
@@ -67,26 +82,37 @@ pub fn kgcInProgress(self: *PersistenceState) bool {
     return self._kgc_in_progress;
 }
 
-pub fn reapKgc(self: *PersistenceState) ReapResult {
-    return self.reapPid("kgc", &self._kgc_pid, &self._kgc_in_progress);
+pub fn reapKgc(self: *PersistenceState) KgcReapResult {
+    const save = self._in_flight_kgc_save orelse return .{ .status = .running };
+    const status = self.reapPid("kgc", save.pid);
+    if (status == .running) return .{ .status = .running };
+
+    self._in_flight_kgc_save = null;
+    const saved_change_count = if (status == .succeeded) save.captured_change_count else null;
+
+    return .{
+        .status = status,
+        .saved_change_count = saved_change_count,
+    };
 }
 
 pub fn reapAof(self: *PersistenceState) ReapResult {
-    return self.reapPid("aof", &self._aof_pid, &self._aof_in_progress);
+    const rewrite = self._in_flight_aof_rewrite orelse return .running;
+    const status = self.reapPid("aof", rewrite.pid);
+    if (status == .running) return .running;
+
+    self._in_flight_aof_rewrite = null;
+    self._aof_in_progress = false;
+    return status;
 }
 
 // A completed child is reported exactly once. With no pid there is no
 // completion event, so callers receive .running and do no follow-up work.
-fn reapPid(self: *PersistenceState, name: []const u8, maybe_pid: *?std.posix.pid_t, in_progress: *bool) ReapResult {
-    // No pid means there is no completion event for the caller to handle.
-    const pid = maybe_pid.* orelse return .running;
-
+fn reapPid(self: *PersistenceState, name: []const u8, pid: std.posix.pid_t) ReapResult {
     var status: c_int = undefined;
     const r = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
     // Child porcess is still running
     if (r == 0) return .running;
-    maybe_pid.* = null;
-    in_progress.* = false;
 
     const status_bits: u32 = @bitCast(status);
     // Only a normal zero exit proves the child completed its persistence
@@ -317,12 +343,12 @@ test "reapKgc reports running until background save completes" {
     {
         var tx = try state.begin();
         defer tx.end();
-        state.setKgcPid(pid);
+        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 17 });
     }
     {
         var tx = try state.begin();
         defer tx.end();
-        try testing.expectEqual(ReapResult.running, state.reapKgc());
+        try testing.expectEqual(ReapResult.running, state.reapKgc().status);
         try testing.expect(state.kgcInProgress());
     }
 
@@ -330,16 +356,22 @@ test "reapKgc reports running until background save completes" {
     _ = std.c.write(fds[1], &byte, 1);
     _ = std.c.close(fds[1]);
 
-    var result: ReapResult = .running;
+    var result: KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
-    while (result == .running) {
+    while (result.status == .running) {
         var tx = try state.begin();
         result = state.reapKgc();
+        if (result.status != .running) {
+            try testing.expect(state.kgcInProgress());
+            try testing.expect(!state.tryStartKgc());
+            state.finishKgc();
+        }
         tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
-    try testing.expectEqual(ReapResult.succeeded, result);
+    try testing.expectEqual(ReapResult.succeeded, result.status);
+    try testing.expectEqual(17, result.saved_change_count.?);
     {
         var tx = try state.begin();
         defer tx.end();
@@ -370,7 +402,7 @@ test "reapKgc reports failure and allows a later save" {
     {
         var tx = try state.begin();
         defer tx.end();
-        state.setKgcPid(pid);
+        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 23 });
     }
 
     // reapKgc logs to the real stderr when it observes a non-zero exit --
@@ -391,16 +423,18 @@ test "reapKgc reports failure and allows a later save" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
-    var result: ReapResult = .running;
+    var result: KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
-    while (result == .running) {
+    while (result.status == .running) {
         var tx = try state.begin();
         result = state.reapKgc();
+        if (result.status != .running) state.finishKgc();
         tx.end();
         tries += 1;
         if (tries > 100_000) return error.ChildNeverReaped;
     }
-    try testing.expectEqual(ReapResult.failed, result);
+    try testing.expectEqual(ReapResult.failed, result.status);
+    try testing.expect(result.saved_change_count == null);
     {
         var tx = try state.begin();
         defer tx.end();
