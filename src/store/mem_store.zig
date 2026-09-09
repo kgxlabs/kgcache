@@ -131,11 +131,13 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
 
 pub fn save(ptr: *anyopaque, now_ms: i64) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    {
-        const sessions = try self.beginStorageSessions();
-        defer self.endStorageSessions(sessions);
-        self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
-    }
+
+    const sessions = try self.beginStorageSessions();
+    defer self.endStorageSessions(sessions);
+
+    self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
+    // NOTE: even though change tracker reset is not part of storage's `save` session,
+    // we are bringing inside because there is a samll window new writes can come in before markSaved is executed
     self._change_tracker.markSaved(now_ms);
 }
 
