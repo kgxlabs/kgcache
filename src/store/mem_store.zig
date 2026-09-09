@@ -137,7 +137,7 @@ pub fn save(ptr: *anyopaque, now_ms: i64) Store.Error!void {
 
     const snapshot_change_count = self._change_tracker.captureSnapshotChangeCount();
     self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
-    self._change_tracker.markSaved(snapshot_change_count, now_ms);
+    self._change_tracker.markSaved(snapshot_change_count, now_ms) catch return Store.Error.UnableToSave;
 }
 
 pub fn bgsave(ptr: *anyopaque) Store.Error!void {
