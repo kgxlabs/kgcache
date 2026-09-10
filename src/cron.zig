@@ -33,7 +33,7 @@ pub fn run(
         {
             var state_tx = try persistence_state.begin();
             defer state_tx.end();
-            const completed_save = persistence_state.reapKgc();
+            const completed_save = persistence_state.reapKgc(time.nowMs(io));
             _ = finishKgcIfCompleted(io, change_tracker, persistence_state, completed_save) catch {
                 const message = "kgcache: failed to account for completed background save\n";
                 std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
@@ -516,11 +516,12 @@ test "a completed background save preserves changes made after its snapshot chan
 
     // Same check run()'s loop body does after reapKgc(): only reset once a
     // child has actually been observed to exit, not at bgsave()'s call site.
+    const reap_ms = time.nowMs(testing.io);
     var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
-        reap_result = persistence_state.reapKgc();
+        reap_result = persistence_state.reapKgc(reap_ms);
         _ = try finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
@@ -580,12 +581,12 @@ test "a failed background save leaves the change tracker dirty" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
-    const cooldown_check_ms = time.nowMs(testing.io);
+    const failure_ms = time.nowMs(testing.io);
     var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
-        reap_result = persistence_state.reapKgc();
+        reap_result = persistence_state.reapKgc(failure_ms);
         _ = try finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
@@ -596,7 +597,7 @@ test "a failed background save leaves the change tracker dirty" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(!persistence_state.bgsaveCooldownElapsed(cooldown_check_ms, 5000));
+        try testing.expect(!persistence_state.bgsaveCooldownElapsed(failure_ms, 5000));
     }
 }
 
@@ -631,11 +632,12 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
         try testing.expect(persistence_state.kgcInProgress());
     }
 
+    const reap_ms = time.nowMs(testing.io);
     var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
-        reap_result = persistence_state.reapKgc();
+        reap_result = persistence_state.reapKgc(reap_ms);
         _ = try finishKgcIfCompleted(testing.io, &change_tracker, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
@@ -757,9 +759,10 @@ test "triggerSaveIfDue does not start cooldown for a busy save" {
         .bgsave_retry_delay_ms = 5000,
     };
 
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, time.nowMs(testing.io), config);
+    const now_ms = time.nowMs(testing.io);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, now_ms, config);
     mock_store.bgsave_result = {};
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, time.nowMs(testing.io), config);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, now_ms, config);
 
     try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);
 }

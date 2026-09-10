@@ -790,11 +790,12 @@ test "concurrent KGC snapshot contains one complete submitted value" {
         try setStoreValue(&data_store, "key", if (index % 2 == 0) second else first, 0);
     }
 
+    const reap_ms = time.nowMs(testing.io);
     var result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (result.status == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapKgc();
+        result = persistence_state.reapKgc(reap_ms);
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
@@ -950,11 +951,12 @@ test "KGC bgsave waits for active Storage work and preserves all databases" {
     try testing.expect(!returned_early);
     try testing.expect(!context.failed.load(.acquire));
 
+    const reap_ms = time.nowMs(testing.io);
     var result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (result.status == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapKgc();
+        result = persistence_state.reapKgc(reap_ms);
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;

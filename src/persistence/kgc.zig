@@ -309,7 +309,7 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
     // no fork should have happened -- no pid was ever recorded
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
-    try testing.expectEqual(PersistenceState.ReapResult.running, persistence_state.reapKgc().status);
+    try testing.expectEqual(PersistenceState.ReapResult.running, persistence_state.reapKgc(time.nowMs(testing.io)).status);
 }
 
 test "successful save clears the bgsave cooldown" {
@@ -394,7 +394,7 @@ test "successful automatic background save clears cooldown and produces a loadab
     var tries: usize = 0;
     while (result.status == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapKgc();
+        result = persistence_state.reapKgc(failure_ms);
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;

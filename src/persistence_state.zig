@@ -102,14 +102,14 @@ pub fn kgcInProgress(self: *PersistenceState) bool {
     return self._kgc_in_progress;
 }
 
-pub fn reapKgc(self: *PersistenceState) KgcReapResult {
+pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
     const save = self._in_flight_kgc_save orelse return .{ .status = .running };
     const status = self.reapPid("kgc", save.pid);
     if (status == .running) return .{ .status = .running };
 
     // only start cooldown if failed and started by cron
     if (status == .failed and save.origin == .automatic) {
-        self.startBgsaveCooldown(time.nowMs(self._io));
+        self.startBgsaveCooldown(now_ms);
     } else if (status == .succeeded) {
         self.clearBgsaveCooldown();
     }
@@ -397,7 +397,7 @@ test "reapKgc reports running until background save completes" {
     {
         var tx = try state.begin();
         defer tx.end();
-        try testing.expectEqual(ReapResult.running, state.reapKgc().status);
+        try testing.expectEqual(ReapResult.running, state.reapKgc(failure_ms).status);
         try testing.expect(state.kgcInProgress());
     }
 
@@ -409,7 +409,7 @@ test "reapKgc reports running until background save completes" {
     var tries: usize = 0;
     while (result.status == .running) {
         var tx = try state.begin();
-        result = state.reapKgc();
+        result = state.reapKgc(failure_ms);
         if (result.status != .running) {
             try testing.expect(state.kgcInProgress());
             try testing.expect(!state.tryStartKgc());
@@ -476,11 +476,12 @@ test "failed manual background save preserves cooldown and allows a later save" 
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
+    const reap_ms = failure_ms + 100;
     var result: KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (result.status == .running) {
         var tx = try state.begin();
-        result = state.reapKgc();
+        result = state.reapKgc(reap_ms);
         if (result.status != .running) state.finishKgc();
         tx.end();
         tries += 1;
