@@ -6,6 +6,7 @@ const time = @import("../time.zig");
 const KgcEncoder = @import("../codec/kgc_encoder.zig");
 const KgcDecoder = @import("../codec/kgc_decoder.zig");
 const PersistenceState = @import("../persistence_state.zig");
+const Store = @import("../store/interface.zig");
 
 const KgcBackend = @This();
 
@@ -67,7 +68,7 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
 // only hold short lock session so we dont hold the lock while fork
 // Finishing this does not mean, saving succeeded.
 // It just means forking completed
-pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count: u64) Snapshot.Error!void {
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count: u64, origin: Store.TriggerOrigin) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
     {
@@ -120,9 +121,11 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
 
     var state_tx = self._persistence_state.begin() catch unreachable;
     defer state_tx.end();
+
     self._persistence_state.setInFlightKgcSave(.{
         .pid = pid,
         .captured_change_count = snapshot_change_count,
+        .origin = origin,
     });
 }
 
@@ -301,7 +304,7 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
         persistence_state.finishKgc();
     }
 
-    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, 0));
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, 0, .manual));
 
     // no fork should have happened -- no pid was ever recorded
     var state_tx = try persistence_state.begin();
@@ -329,7 +332,7 @@ test "background save returns before completion and produces a loadable snapshot
     {
         var tx = try backend_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{backend_storage}, 0);
+        try backend_instance.snapshot().bgsave(&.{backend_storage}, 0, .manual);
     }
     {
         var state_tx = try persistence_state.begin();

@@ -19,7 +19,7 @@ const vtable = Commander.VTable{
 };
 
 fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
-    data_store.bgrewriteaof() catch return Commander.Error.UnableRewriteAof;
+    data_store.bgrewriteaof(.manual) catch return Commander.Error.UnableRewriteAof;
     return .{ .simple_string = "OK" };
 }
 

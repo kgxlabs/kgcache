@@ -3,6 +3,11 @@ const object = @import("../object.zig");
 const Storage = @import("../storage/interface.zig");
 const Request = @import("../commander/request.zig");
 
+pub const TriggerOrigin = enum {
+    manual,
+    automatic,
+};
+
 pub const Error = std.mem.Allocator.Error || error{
     UnsupportedCondition,
     SomethingWentWrong,
@@ -25,8 +30,8 @@ pub const VTable = struct {
     dbsize: *const fn (*anyopaque, u32) Error!u32,
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque, i64) Error!void,
-    bgsave: *const fn (*anyopaque) Error!void,
-    bgrewriteaof: *const fn (*anyopaque) Error!void,
+    bgsave: *const fn (*anyopaque, TriggerOrigin) Error!void,
+    bgrewriteaof: *const fn (*anyopaque, TriggerOrigin) Error!void,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -54,12 +59,12 @@ pub fn save(self: Store, now_ms: i64) Error!void {
     return self.vtable.save(self.ptr, now_ms);
 }
 
-pub fn bgsave(self: Store) Error!void {
-    return self.vtable.bgsave(self.ptr);
+pub fn bgsave(self: Store, origin: TriggerOrigin) Error!void {
+    return self.vtable.bgsave(self.ptr, origin);
 }
 
-pub fn bgrewriteaof(self: Store) Error!void {
-    return self.vtable.bgrewriteaof(self.ptr);
+pub fn bgrewriteaof(self: Store, origin: TriggerOrigin) Error!void {
+    return self.vtable.bgrewriteaof(self.ptr, origin);
 }
 
 pub fn deinit(self: Store) void {

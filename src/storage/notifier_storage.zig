@@ -21,6 +21,7 @@ const ChangeTracker = @import("../change_tracker.zig");
 const Config = @import("../config.zig");
 const DefaultStorage = @import("default_storage.zig");
 const Lock = @import("../lock.zig");
+const Store = @import("../store/interface.zig");
 
 const NotifierStorage = @This();
 
@@ -344,7 +345,7 @@ const FailingJournal = struct {
     }
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
-    fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) persistence.JournalPersistence.Error!void {}
     fn dueForRewrite(_: *anyopaque, _: Config) bool {
         return false;
     }
@@ -578,7 +579,7 @@ const RecordingJournal = struct {
     fn abortRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
 
     fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
-    fn bgRewrite(_: *anyopaque, _: []const Storage) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) persistence.JournalPersistence.Error!void {}
     fn dueForRewrite(_: *anyopaque, _: Config) bool {
         return false;
     }

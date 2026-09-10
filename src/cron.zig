@@ -110,9 +110,10 @@ fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *sto
 
     // A failed trigger attempt should not crash the cron loop -- it'll just get
     // re-evaluated next tick.
-    data_store.bgsave() catch {
+    data_store.bgsave(.automatic) catch {
         const message = "kgcache: failed to trigger automatic background save\n";
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+        return;
     };
 }
 
@@ -129,7 +130,7 @@ fn triggerRewriteIfDue(
         if (!aof.dueForRewrite(config)) return;
     }
 
-    data_store.bgrewriteaof() catch {
+    data_store.bgrewriteaof(.automatic) catch {
         // A manual client command rewrite can come in after due check and before bgRewrite call and can win the race.
         // client command takes the highest priority so that refusal is expected and must not produce one log per cron tick.
         const rewrite_running = blk: {
@@ -199,7 +200,7 @@ const FinishRewriteJournal = struct {
         self.last_flush_ms = now_ms;
         if (self.fail_flush) return error.FailedToWriteIncrFile;
     }
-    fn bgRewrite(_: *anyopaque, _: []const storage.Interface) persistence.JournalPersistence.Error!void {}
+    fn bgRewrite(_: *anyopaque, _: []const storage.Interface, _: store.Store.TriggerOrigin) persistence.JournalPersistence.Error!void {}
     fn dueForRewrite(_: *anyopaque, _: Config) bool {
         return false;
     }
@@ -468,7 +469,7 @@ test "a completed background save preserves changes made after its snapshot chan
     try writeOneKey(&data_store);
     try testing.expect(change_tracker._dirty.load(.monotonic) > 0);
 
-    try data_store.bgsave();
+    try data_store.bgsave(.manual);
 
     // This write happens after the child captured its snapshot change count.
     try writeOneKey(&data_store);
@@ -525,7 +526,11 @@ test "a failed background save leaves the change tracker dirty" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        persistence_state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = change_tracker.captureSnapshotChangeCount() });
+        persistence_state.setInFlightKgcSave(.{
+            .pid = pid,
+            .captured_change_count = change_tracker.captureSnapshotChangeCount(),
+            .origin = .automatic,
+        });
     }
 
     // reapKgc logs to the real stderr when it observes this non-zero exit --

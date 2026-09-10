@@ -90,12 +90,12 @@ fn save(ptr: *anyopaque, _: i64) Store.Error!void {
     self.save_calls += 1;
 }
 
-fn bgsave(ptr: *anyopaque) Store.Error!void {
+fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) Store.Error!void {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgsave_calls += 1;
 }
 
-fn bgrewriteaof(ptr: *anyopaque) Store.Error!void {
+fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) Store.Error!void {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgrewriteaof_calls += 1;
 }

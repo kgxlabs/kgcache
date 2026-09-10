@@ -7,6 +7,7 @@ const std = @import("std");
 const object = @import("../object.zig");
 const Storage = @import("../storage/interface.zig");
 const PersistenceState = @import("../persistence_state.zig");
+const Store = @import("../store/interface.zig");
 const Manifest = @import("./manifest.zig");
 const Config = @import("../config.zig");
 const time = @import("../time.zig");
@@ -82,7 +83,7 @@ pub const Record = struct {
 pub const VTable = struct {
     prepareRecord: *const fn (*anyopaque, WriteEvent) Error!Record,
     flush: *const fn (*anyopaque, i64) Error!void,
-    bgRewrite: *const fn (*anyopaque, []const Storage) Error!void,
+    bgRewrite: *const fn (*anyopaque, []const Storage, origin: Store.TriggerOrigin) Error!void,
     dueForRewrite: *const fn (*anyopaque, Config) bool,
     finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) Error!void,
     beginLoading: *const fn (*anyopaque) void,
@@ -108,8 +109,8 @@ pub fn flush(self: JournalPersistence, now_ms: i64) Error!void {
     return self.vtable.flush(self.ptr, now_ms);
 }
 
-pub fn bgRewrite(self: JournalPersistence, storages: []const Storage) Error!void {
-    return self.vtable.bgRewrite(self.ptr, storages);
+pub fn bgRewrite(self: JournalPersistence, storages: []const Storage, origin: Store.TriggerOrigin) Error!void {
+    return self.vtable.bgRewrite(self.ptr, storages, origin);
 }
 
 pub fn dueForRewrite(self: JournalPersistence, config: Config) bool {

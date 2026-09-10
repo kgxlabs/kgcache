@@ -1,6 +1,7 @@
 const std = @import("std");
 const Lock = @import("lock.zig");
 const time = @import("time.zig");
+const Store = @import("store/interface.zig");
 
 const PersistenceState = @This();
 
@@ -13,11 +14,13 @@ pub const ReapResult = enum {
 pub const KgcBackgroundSave = struct {
     pid: std.posix.pid_t,
     captured_change_count: u64,
+    origin: Store.TriggerOrigin,
 };
 
 pub const AofBackgroundRewrite = struct {
     pid: std.posix.pid_t,
     base_seq: u32,
+    origin: Store.TriggerOrigin,
 };
 
 pub const KgcReapResult = struct {
@@ -133,8 +136,8 @@ fn reapPid(self: *PersistenceState, name: []const u8, pid: std.posix.pid_t) Reap
                 "kgcache: {s} background save child terminated abnormally\n",
                 .{name},
             ) catch "kgcache: background save child terminated abnormally\n";
+
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
-        // even though this is triggered but failed scenario, we will reset the tracker
         return .failed;
     }
 
@@ -345,7 +348,7 @@ test "reapKgc reports running until background save completes" {
     {
         var tx = try state.begin();
         defer tx.end();
-        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 17 });
+        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 17, .origin = .manual });
     }
     {
         var tx = try state.begin();
@@ -404,7 +407,7 @@ test "reapKgc reports failure and allows a later save" {
     {
         var tx = try state.begin();
         defer tx.end();
-        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 23 });
+        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 23, .origin = .manual });
     }
 
     // reapKgc logs to the real stderr when it observes a non-zero exit --
