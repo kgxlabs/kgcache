@@ -65,6 +65,7 @@ fn finishKgcIfCompleted(
     result: PersistenceState.KgcReapResult,
 ) ChangeTracker.Error!bool {
     if (result.status == .running) return false;
+    // NOTE: this placement is intentional. We will only set in_progress => false only for completion(failed/succeeded)
     defer persistence_state.finishKgc();
 
     if (result.status == .succeeded) {

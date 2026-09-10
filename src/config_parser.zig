@@ -22,6 +22,7 @@ const Directive = enum {
     @"auto-aof-rewrite-percentage",
     @"auto-aof-rewrite-min-size",
     @"aof-load-truncated",
+    @"bg-save-retry-delay-ms",
 };
 
 pub const Error = error{
@@ -89,6 +90,7 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
             .@"auto-aof-rewrite-percentage" => config.auto_aof_rewrite_percentage = try parseInt(u32, value),
             .@"auto-aof-rewrite-min-size" => config.auto_aof_rewrite_min_size = try parseInt(usize, value),
             .@"aof-load-truncated" => config.aof_load_truncated = try parseBool(value),
+            .@"bg-save-retry-delay-ms" => config.bg_save_retry_delay_ms = try parseInt(i64, value),
         }
     }
 
@@ -126,6 +128,7 @@ test "parse overlays every directive onto the defaults" {
         \\active-expire-budget-ms 20
         \\active-expire-batch-size 40
         \\active-expire-threshold-percent 50
+        \\bg-save-retry-delay-ms 10000
     ;
 
     const config = try parse(testing.allocator, contents);
@@ -140,6 +143,7 @@ test "parse overlays every directive onto the defaults" {
     try testing.expectEqual(20, config.active_expire_budget_ms);
     try testing.expectEqual(40, config.active_expire_batch_size);
     try testing.expectEqual(50, config.active_expire_threshold_percent);
+    try testing.expectEqual(10000, config.bg_save_retry_delay_ms);
 }
 
 test "parse leaves directives absent from a partial file at their defaults" {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Lock = @import("lock.zig");
+const time = @import("time.zig");
 
 const PersistenceState = @This();
 
@@ -31,6 +32,7 @@ _aof_in_progress: bool = false,
 _mutual_exclusive: bool = false,
 _in_flight_kgc_save: ?KgcBackgroundSave = null,
 _in_flight_aof_rewrite: ?AofBackgroundRewrite = null,
+_last_failed_save_ms: ?time.UnixMs = null,
 
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
