@@ -5,6 +5,7 @@ const Manifest = @import("../persistence/manifest.zig");
 const Storage = @import("../storage/interface.zig");
 const object = @import("../object.zig");
 const PersistenceState = @import("../persistence_state.zig");
+const Store = @import("../store/interface.zig");
 const Config = @import("../config.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
@@ -195,7 +196,7 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!J
     return Journal.Record.init(prepared, event, publishPreparedRecord, abortPreparedRecord);
 }
 
-pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void {
+pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) Journal.Error!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     {
@@ -322,6 +323,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage) Journal.Error!void 
     self._persistence_state.setInFlightAofRewrite(.{
         .pid = pid,
         .base_seq = base_seq,
+        .origin = origin,
     });
     child_started = true;
 }
@@ -1483,7 +1485,7 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
             try testing.expect(old_total > 0);
             try testing.expectEqual(old_total, backend._file_offset);
 
-            try journal_handle.bgRewrite(&.{});
+            try journal_handle.bgRewrite(&.{}, .manual);
             try testing.expectEqual(old_total, backend._incr_bytes);
             try testing.expectEqual(0, backend._file_offset);
 

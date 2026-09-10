@@ -18,7 +18,7 @@ pub fn commander(self: *BgSave) Commander {
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
 fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
-    data_store.bgsave() catch return Commander.Error.UnableToDoBackgroundSaveKgc;
+    data_store.bgsave(.manual) catch return Commander.Error.UnableToDoBackgroundSaveKgc;
     return .{ .simple_string = "OK" };
 }
 

@@ -6,6 +6,7 @@ const time = @import("../time.zig");
 const KgcEncoder = @import("../codec/kgc_encoder.zig");
 const KgcDecoder = @import("../codec/kgc_decoder.zig");
 const PersistenceState = @import("../persistence_state.zig");
+const Store = @import("../store/interface.zig");
 
 const KgcBackend = @This();
 
@@ -55,19 +56,22 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
         if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
+    var succeeded = false;
     defer {
         var state_tx = self._persistence_state.begin() catch unreachable;
         defer state_tx.end();
+        if (succeeded) self._persistence_state.clearBgsaveCooldown();
         self._persistence_state.finishKgc();
     }
 
     try self.dump(storages);
+    succeeded = true;
 }
 
 // only hold short lock session so we dont hold the lock while fork
 // Finishing this does not mean, saving succeeded.
 // It just means forking completed
-pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count: u64) Snapshot.Error!void {
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count: u64, origin: Store.TriggerOrigin) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
     {
@@ -76,21 +80,18 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
         if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
+    // NOTE: the placement is important. This way A busy return would not run finishKgc() and clear another operation’s active state
+    errdefer {
+        var tx = self._persistence_state.begin() catch unreachable;
+        defer tx.end();
+        self._persistence_state.finishKgc();
+    }
+
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
-        .AGAIN, .NOMEM => {
-            var state_tx = self._persistence_state.begin() catch unreachable;
-            defer state_tx.end();
-            self._persistence_state.finishKgc();
-            return Snapshot.Error.UnableToSave;
-        },
-        else => |err| {
-            var state_tx = self._persistence_state.begin() catch unreachable;
-            defer state_tx.end();
-            self._persistence_state.finishKgc();
-            return std.posix.unexpectedErrno(err) catch Snapshot.Error.UnableToSave;
-        },
+        .AGAIN, .NOMEM => return Snapshot.Error.UnableToSave,
+        else => |err| return std.posix.unexpectedErrno(err) catch Snapshot.Error.UnableToSave,
     };
 
     if (pid == 0) {
@@ -120,9 +121,11 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
 
     var state_tx = self._persistence_state.begin() catch unreachable;
     defer state_tx.end();
+
     self._persistence_state.setInFlightKgcSave(.{
         .pid = pid,
         .captured_change_count = snapshot_change_count,
+        .origin = origin,
     });
 }
 
@@ -301,15 +304,59 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
         persistence_state.finishKgc();
     }
 
-    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, 0));
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, 0, .manual));
 
     // no fork should have happened -- no pid was ever recorded
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
-    try testing.expectEqual(PersistenceState.ReapResult.running, persistence_state.reapKgc().status);
+    try testing.expectEqual(PersistenceState.ReapResult.running, persistence_state.reapKgc(time.nowMs(testing.io)).status);
 }
 
-test "background save returns before completion and produces a loadable snapshot" {
+test "successful save clears the bgsave cooldown" {
+    const testing = std.testing;
+    const path = "scratch-save-clears-cooldown.kgc";
+    std.Io.Dir.cwd().deleteFile(testing.io, path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(testing.io, path) catch {};
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    const failure_ms = time.nowMs(testing.io);
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        persistence_state.startBgsaveCooldown(failure_ms);
+    }
+
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
+    try backend_instance.snapshot().save(&.{});
+
+    var state_tx = try persistence_state.begin();
+    defer state_tx.end();
+    try testing.expect(persistence_state.bgsaveCooldownElapsed(failure_ms, 5000));
+}
+
+test "failed save keeps the bgsave cooldown and releases its claim" {
+    const testing = std.testing;
+    const parent = "missing-save-parent";
+    std.Io.Dir.cwd().deleteTree(testing.io, parent) catch {};
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    const failure_ms = time.nowMs(testing.io);
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        persistence_state.startBgsaveCooldown(failure_ms);
+    }
+
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, parent ++ "/dump.kgc");
+    try testing.expectError(Snapshot.Error.UnableToSave, backend_instance.snapshot().save(&.{}));
+
+    var state_tx = try persistence_state.begin();
+    defer state_tx.end();
+    try testing.expect(!persistence_state.bgsaveCooldownElapsed(failure_ms, 5000));
+    try testing.expect(persistence_state.tryStartKgc());
+}
+
+test "successful automatic background save clears cooldown and produces a loadable snapshot" {
     const testing = std.testing;
     const DefaultStorage = @import("../storage/default_storage.zig");
 
@@ -325,11 +372,17 @@ test "background save returns before completion and produces a loadable snapshot
 
     var persistence_state = PersistenceState.init(testing.io, false);
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "scratch-bgsave.kgc");
+    const failure_ms = time.nowMs(testing.io);
 
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        persistence_state.startBgsaveCooldown(failure_ms);
+    }
     {
         var tx = try backend_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{backend_storage}, 0);
+        try backend_instance.snapshot().bgsave(&.{backend_storage}, 0, .automatic);
     }
     {
         var state_tx = try persistence_state.begin();
@@ -341,7 +394,7 @@ test "background save returns before completion and produces a loadable snapshot
     var tries: usize = 0;
     while (result.status == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapKgc();
+        result = persistence_state.reapKgc(failure_ms);
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
@@ -352,6 +405,7 @@ test "background save returns before completion and produces a loadable snapshot
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
         try testing.expect(!persistence_state.kgcInProgress());
+        try testing.expect(persistence_state.bgsaveCooldownElapsed(failure_ms, 5000));
     }
 
     var fresh = DefaultStorage.init(testing.io, testing.allocator);

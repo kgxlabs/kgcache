@@ -47,6 +47,7 @@ append_fsync: AppendFsync = .everysec,
 auto_aof_rewrite_percentage: u32 = 100,
 auto_aof_rewrite_min_size: usize = 67108864,
 aof_load_truncated: bool = true,
+bgsave_retry_delay_ms: i64 = 5000,
 
 pub fn default() Config {
     return .{};

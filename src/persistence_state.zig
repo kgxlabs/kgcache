@@ -1,5 +1,7 @@
 const std = @import("std");
 const Lock = @import("lock.zig");
+const time = @import("time.zig");
+const Store = @import("store/interface.zig");
 
 const PersistenceState = @This();
 
@@ -12,16 +14,19 @@ pub const ReapResult = enum {
 pub const KgcBackgroundSave = struct {
     pid: std.posix.pid_t,
     captured_change_count: u64,
+    origin: Store.TriggerOrigin,
 };
 
 pub const AofBackgroundRewrite = struct {
     pid: std.posix.pid_t,
     base_seq: u32,
+    origin: Store.TriggerOrigin,
 };
 
 pub const KgcReapResult = struct {
     status: ReapResult,
     saved_change_count: ?u64 = null,
+    origin: ?Store.TriggerOrigin = null,
 };
 
 _io: std.Io,
@@ -31,6 +36,7 @@ _aof_in_progress: bool = false,
 _mutual_exclusive: bool = false,
 _in_flight_kgc_save: ?KgcBackgroundSave = null,
 _in_flight_aof_rewrite: ?AofBackgroundRewrite = null,
+_last_failed_save_ms: ?time.UnixMs = null,
 
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
@@ -59,6 +65,20 @@ pub fn finishKgc(self: *PersistenceState) void {
     self._kgc_in_progress = false;
 }
 
+pub fn startBgsaveCooldown(self: *PersistenceState, now_ms: time.UnixMs) void {
+    self._last_failed_save_ms = now_ms;
+}
+
+pub fn clearBgsaveCooldown(self: *PersistenceState) void {
+    self._last_failed_save_ms = null;
+}
+
+pub fn bgsaveCooldownElapsed(self: *PersistenceState, now_ms: time.UnixMs, retry_delay_ms: i64) bool {
+    const started_ms = self._last_failed_save_ms orelse return true;
+    if (now_ms < started_ms) return false;
+    return now_ms - started_ms >= retry_delay_ms;
+}
+
 pub fn tryStartAof(self: *PersistenceState) bool {
     if (self._aof_in_progress) return false;
     if (self._mutual_exclusive and self._kgc_in_progress) return false;
@@ -82,10 +102,17 @@ pub fn kgcInProgress(self: *PersistenceState) bool {
     return self._kgc_in_progress;
 }
 
-pub fn reapKgc(self: *PersistenceState) KgcReapResult {
+pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
     const save = self._in_flight_kgc_save orelse return .{ .status = .running };
     const status = self.reapPid("kgc", save.pid);
     if (status == .running) return .{ .status = .running };
+
+    // only start cooldown if failed and started by cron
+    if (status == .failed and save.origin == .automatic) {
+        self.startBgsaveCooldown(now_ms);
+    } else if (status == .succeeded) {
+        self.clearBgsaveCooldown();
+    }
 
     self._in_flight_kgc_save = null;
     const saved_change_count = if (status == .succeeded) save.captured_change_count else null;
@@ -93,6 +120,7 @@ pub fn reapKgc(self: *PersistenceState) KgcReapResult {
     return .{
         .status = status,
         .saved_change_count = saved_change_count,
+        .origin = save.origin,
     };
 }
 
@@ -131,8 +159,8 @@ fn reapPid(self: *PersistenceState, name: []const u8, pid: std.posix.pid_t) Reap
                 "kgcache: {s} background save child terminated abnormally\n",
                 .{name},
             ) catch "kgcache: background save child terminated abnormally\n";
+
         std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
-        // even though this is triggered but failed scenario, we will reset the tracker
         return .failed;
     }
 
@@ -202,6 +230,25 @@ test "tryStartKgc blocks a second start until finishKgc releases it" {
         defer tx.end();
         try testing.expect(state.tryStartKgc());
     }
+}
+
+test "bgsave cooldown uses the failure time and clears explicitly" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+    var tx = try state.begin();
+    defer tx.end();
+    const failure_ms = time.nowMs(testing.io);
+
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms, 500));
+
+    state.startBgsaveCooldown(failure_ms);
+    try testing.expect(!state.bgsaveCooldownElapsed(failure_ms + 499, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms + 500, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms, 0));
+    try testing.expect(!state.bgsaveCooldownElapsed(failure_ms - 1, 500));
+
+    state.clearBgsaveCooldown();
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms - 1, 500));
 }
 
 test "tryStartAof blocks a second start until finishAof releases it" {
@@ -340,15 +387,17 @@ test "reapKgc reports running until background save completes" {
         std.c._exit(0);
     }
     _ = std.c.close(fds[0]);
+    const failure_ms = time.nowMs(testing.io);
     {
         var tx = try state.begin();
         defer tx.end();
-        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 17 });
+        state.startBgsaveCooldown(failure_ms);
+        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 17, .origin = .manual });
     }
     {
         var tx = try state.begin();
         defer tx.end();
-        try testing.expectEqual(ReapResult.running, state.reapKgc().status);
+        try testing.expectEqual(ReapResult.running, state.reapKgc(failure_ms).status);
         try testing.expect(state.kgcInProgress());
     }
 
@@ -360,7 +409,7 @@ test "reapKgc reports running until background save completes" {
     var tries: usize = 0;
     while (result.status == .running) {
         var tx = try state.begin();
-        result = state.reapKgc();
+        result = state.reapKgc(failure_ms);
         if (result.status != .running) {
             try testing.expect(state.kgcInProgress());
             try testing.expect(!state.tryStartKgc());
@@ -376,16 +425,20 @@ test "reapKgc reports running until background save completes" {
         var tx = try state.begin();
         defer tx.end();
         try testing.expect(!state.kgcInProgress());
+        try testing.expect(state.bgsaveCooldownElapsed(failure_ms, 5000));
     }
 }
 
-test "reapKgc reports failure and allows a later save" {
+test "failed manual background save preserves cooldown and allows a later save" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, false);
+    const retry_delay_ms = 5000;
+    const failure_ms = time.nowMs(testing.io) - retry_delay_ms;
     {
         var tx = try state.begin();
         defer tx.end();
         try testing.expect(state.tryStartKgc());
+        state.startBgsaveCooldown(failure_ms);
     }
 
     const rc = std.posix.system.fork();
@@ -402,7 +455,7 @@ test "reapKgc reports failure and allows a later save" {
     {
         var tx = try state.begin();
         defer tx.end();
-        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 23 });
+        state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 23, .origin = .manual });
     }
 
     // reapKgc logs to the real stderr when it observes a non-zero exit --
@@ -423,11 +476,12 @@ test "reapKgc reports failure and allows a later save" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
+    const reap_ms = failure_ms + 100;
     var result: KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (result.status == .running) {
         var tx = try state.begin();
-        result = state.reapKgc();
+        result = state.reapKgc(reap_ms);
         if (result.status != .running) state.finishKgc();
         tx.end();
         tries += 1;
@@ -438,6 +492,8 @@ test "reapKgc reports failure and allows a later save" {
     {
         var tx = try state.begin();
         defer tx.end();
+        try testing.expect(!state.bgsaveCooldownElapsed(failure_ms, retry_delay_ms));
+        try testing.expect(state.bgsaveCooldownElapsed(failure_ms + retry_delay_ms, retry_delay_ms));
         try testing.expect(state.tryStartKgc());
     }
 }
