@@ -26,6 +26,7 @@ pub const AofBackgroundRewrite = struct {
 pub const KgcReapResult = struct {
     status: ReapResult,
     saved_change_count: ?u64 = null,
+    origin: ?Store.TriggerOrigin = null,
 };
 
 _io: std.Io,
@@ -98,6 +99,7 @@ pub fn reapKgc(self: *PersistenceState) KgcReapResult {
     return .{
         .status = status,
         .saved_change_count = saved_change_count,
+        .origin = save.origin,
     };
 }
 

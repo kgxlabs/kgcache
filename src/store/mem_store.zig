@@ -147,7 +147,12 @@ pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {
     defer self.endStorageSessions(sessions);
 
     const snapshot_change_count = self._change_tracker.captureSnapshotChangeCount();
-    self._kgc.bgsave(self._storages, snapshot_change_count, origin) catch return Store.Error.UnableToBackgroundSaveKgc;
+    self._kgc.bgsave(self._storages, snapshot_change_count, origin) catch |err| {
+        return switch (err) {
+            error.SaveAlreadyInProgress => Store.Error.SaveAlreadyInProgress,
+            else => Store.Error.UnableToBackgroundSaveKgc,
+        };
+    };
 }
 
 pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {

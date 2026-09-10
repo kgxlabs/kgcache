@@ -19,6 +19,7 @@ pub const Error = std.mem.Allocator.Error || error{
     UnableToBackgroundSaveKgc,
     UnableToRewriteAof,
     AofDisabled,
+    SaveAlreadyInProgress,
 };
 
 const Store = @This();

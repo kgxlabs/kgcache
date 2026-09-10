@@ -77,21 +77,18 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
         if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
+    // NOTE: the placement is important. This way A busy return would not run finishKgc() and clear another operation’s active state
+    errdefer {
+        var tx = self._persistence_state.begin() catch unreachable;
+        defer tx.end();
+        self._persistence_state.finishKgc();
+    }
+
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
-        .AGAIN, .NOMEM => {
-            var state_tx = self._persistence_state.begin() catch unreachable;
-            defer state_tx.end();
-            self._persistence_state.finishKgc();
-            return Snapshot.Error.UnableToSave;
-        },
-        else => |err| {
-            var state_tx = self._persistence_state.begin() catch unreachable;
-            defer state_tx.end();
-            self._persistence_state.finishKgc();
-            return std.posix.unexpectedErrno(err) catch Snapshot.Error.UnableToSave;
-        },
+        .AGAIN, .NOMEM => return Snapshot.Error.UnableToSave,
+        else => |err| return std.posix.unexpectedErrno(err) catch Snapshot.Error.UnableToSave,
     };
 
     if (pid == 0) {

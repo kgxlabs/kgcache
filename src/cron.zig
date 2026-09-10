@@ -52,7 +52,13 @@ pub fn run(
             triggerRewriteIfDue(io, aof, persistence_state, data_store, config);
         }
 
-        triggerSaveIfDue(io, change_tracker, data_store, config);
+        triggerSaveIfDue(
+            io,
+            change_tracker,
+            data_store,
+            persistence_state,
+            config,
+        );
     }
 }
 
@@ -105,15 +111,21 @@ fn finishAofIfCompleted(
     };
 }
 
-fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *store.Store, config: Config) void {
+fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *store.Store, persistence_state: *PersistenceState, config: Config) void {
+    _ = persistence_state;
     if (!change_tracker.dueForSave(time.nowMs(io), config.save_rules)) return;
 
     // A failed trigger attempt should not crash the cron loop -- it'll just get
     // re-evaluated next tick.
-    data_store.bgsave(.automatic) catch {
-        const message = "kgcache: failed to trigger automatic background save\n";
-        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
-        return;
+    data_store.bgsave(.automatic) catch |err| {
+        switch (err) {
+            error.SaveAlreadyInProgress => {},
+            else => {
+                const message = "kgcache: failed to trigger automatic background save\n";
+                std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+                return;
+            },
+        }
     };
 }
 
@@ -584,7 +596,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 0, .changes = 1 }} };
 
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, config);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, config);
 
     // the parent returns immediately -- the flag being set proves the
     // rule match actually reached bgsave() rather than being a no-op.
@@ -634,7 +646,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 300, .changes = 100 }} };
 
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, config);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, config);
 
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
@@ -666,7 +678,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
 
     try writeOneKey(&data_store);
 
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, Config.default());
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, Config.default());
 
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
