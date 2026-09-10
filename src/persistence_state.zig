@@ -65,6 +65,20 @@ pub fn finishKgc(self: *PersistenceState) void {
     self._kgc_in_progress = false;
 }
 
+pub fn startBgsaveCooldown(self: *PersistenceState, now_ms: time.UnixMs) void {
+    self._last_failed_save_ms = now_ms;
+}
+
+pub fn clearBgsaveCooldown(self: *PersistenceState) void {
+    self._last_failed_save_ms = null;
+}
+
+pub fn bgsaveCooldownElapsed(self: *PersistenceState, now_ms: time.UnixMs, retry_delay_ms: i64) bool {
+    const started_ms = self._last_failed_save_ms orelse return true;
+    if (now_ms < started_ms) return false;
+    return now_ms - started_ms >= retry_delay_ms;
+}
+
 pub fn tryStartAof(self: *PersistenceState) bool {
     if (self._aof_in_progress) return false;
     if (self._mutual_exclusive and self._kgc_in_progress) return false;
@@ -209,6 +223,24 @@ test "tryStartKgc blocks a second start until finishKgc releases it" {
         defer tx.end();
         try testing.expect(state.tryStartKgc());
     }
+}
+
+test "bgsave cooldown uses the failure time and clears explicitly" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+    var tx = try state.begin();
+    defer tx.end();
+
+    try testing.expect(state.bgsaveCooldownElapsed(1_000, 500));
+
+    state.startBgsaveCooldown(1_000);
+    try testing.expect(!state.bgsaveCooldownElapsed(1_499, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(1_500, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(1_000, 0));
+    try testing.expect(!state.bgsaveCooldownElapsed(999, 500));
+
+    state.clearBgsaveCooldown();
+    try testing.expect(state.bgsaveCooldownElapsed(999, 500));
 }
 
 test "tryStartAof blocks a second start until finishAof releases it" {
