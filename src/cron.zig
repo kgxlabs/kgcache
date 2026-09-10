@@ -57,6 +57,7 @@ pub fn run(
             change_tracker,
             data_store,
             persistence_state,
+            time.nowMs(io),
             config,
         );
     }
@@ -111,9 +112,23 @@ fn finishAofIfCompleted(
     };
 }
 
-fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *store.Store, persistence_state: *PersistenceState, config: Config) void {
-    _ = persistence_state;
-    if (!change_tracker.dueForSave(time.nowMs(io), config.save_rules)) return;
+fn triggerSaveIfDue(
+    io: std.Io,
+    change_tracker: *ChangeTracker,
+    data_store: *store.Store,
+    persistence_state: *PersistenceState,
+    now_ms: time.UnixMs,
+    config: Config,
+) void {
+    if (!change_tracker.dueForSave(now_ms, config.save_rules)) return;
+
+    {
+        var state_tx = persistence_state.begin() catch return;
+        defer state_tx.end();
+        if (!persistence_state.bgsaveCooldownElapsed(now_ms, config.bgsave_retry_delay_ms)) {
+            return;
+        }
+    }
 
     // A failed trigger attempt should not crash the cron loop -- it'll just get
     // re-evaluated next tick.
@@ -121,6 +136,10 @@ fn triggerSaveIfDue(io: std.Io, change_tracker: *ChangeTracker, data_store: *sto
         switch (err) {
             error.SaveAlreadyInProgress => {},
             else => {
+                var state_tx = persistence_state.begin() catch return;
+                defer state_tx.end();
+                persistence_state.startBgsaveCooldown(now_ms);
+
                 const message = "kgcache: failed to trigger automatic background save\n";
                 std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
                 return;
@@ -561,6 +580,7 @@ test "a failed background save leaves the change tracker dirty" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
+    const cooldown_check_ms = time.nowMs(testing.io);
     var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
     while (reap_result.status == .running) {
@@ -573,6 +593,11 @@ test "a failed background save leaves the change tracker dirty" {
     }
 
     try testing.expectEqual(1, change_tracker._dirty.load(.monotonic));
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        try testing.expect(!persistence_state.bgsaveCooldownElapsed(cooldown_check_ms, 5000));
+    }
 }
 
 test "triggerSaveIfDue starts a background save once writes through the real store meet the configured rule" {
@@ -596,7 +621,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 0, .changes = 1 }} };
 
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, config);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, time.nowMs(testing.io), config);
 
     // the parent returns immediately -- the flag being set proves the
     // rule match actually reached bgsave() rather than being a no-op.
@@ -646,7 +671,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 300, .changes = 100 }} };
 
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, config);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, time.nowMs(testing.io), config);
 
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
@@ -678,9 +703,90 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
 
     try writeOneKey(&data_store);
 
-    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, Config.default());
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, time.nowMs(testing.io), Config.default());
 
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
     try testing.expect(!persistence_state.kgcInProgress());
+}
+
+test "triggerSaveIfDue waits after an automatic save start failure" {
+    const testing = std.testing;
+    var change_tracker = ChangeTracker.init(testing.io);
+    change_tracker.recordChange();
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var mock_store = store.MockStore.init();
+    mock_store.bgsave_result = error.UnableToBackgroundSaveKgc;
+    var data_store = mock_store.store();
+    const config: Config = .{
+        .save_rules = &.{.{ .seconds = 0, .changes = 1 }},
+        .bgsave_retry_delay_ms = 5000,
+    };
+
+    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+    if (devnull < 0) return error.OpenDevNullFailed;
+    defer _ = std.c.close(devnull);
+
+    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
+    if (saved_stderr < 0) return error.DupFailed;
+    defer {
+        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
+        _ = std.c.close(saved_stderr);
+    }
+    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
+
+    const now_ms = time.nowMs(testing.io);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, now_ms, config);
+
+    try testing.expectEqual(@as(usize, 1), mock_store.bgsave_calls);
+}
+
+test "triggerSaveIfDue does not start cooldown for a busy save" {
+    const testing = std.testing;
+    var change_tracker = ChangeTracker.init(testing.io);
+    change_tracker.recordChange();
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var mock_store = store.MockStore.init();
+    mock_store.bgsave_result = error.SaveAlreadyInProgress;
+    var data_store = mock_store.store();
+    const config: Config = .{
+        .save_rules = &.{.{ .seconds = 0, .changes = 1 }},
+        .bgsave_retry_delay_ms = 5000,
+    };
+
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, time.nowMs(testing.io), config);
+    mock_store.bgsave_result = {};
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, time.nowMs(testing.io), config);
+
+    try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);
+}
+
+test "triggerSaveIfDue retries at the cooldown boundary without another write" {
+    const testing = std.testing;
+    var change_tracker = ChangeTracker.init(testing.io);
+    change_tracker.recordChange();
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    const failure_ms = time.nowMs(testing.io);
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        persistence_state.startBgsaveCooldown(failure_ms);
+    }
+
+    var mock_store = store.MockStore.init();
+    var data_store = mock_store.store();
+    const config: Config = .{
+        .save_rules = &.{.{ .seconds = 0, .changes = 1 }},
+        .bgsave_retry_delay_ms = 5000,
+    };
+
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, failure_ms + 4999, config);
+    try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
+
+    triggerSaveIfDue(testing.io, &change_tracker, &data_store, &persistence_state, failure_ms + 5000, config);
+    try testing.expectEqual(@as(usize, 1), mock_store.bgsave_calls);
 }

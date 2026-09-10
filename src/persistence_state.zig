@@ -107,6 +107,13 @@ pub fn reapKgc(self: *PersistenceState) KgcReapResult {
     const status = self.reapPid("kgc", save.pid);
     if (status == .running) return .{ .status = .running };
 
+    // only start cooldown if failed and started by cron
+    if (status == .failed and save.origin == .automatic) {
+        self.startBgsaveCooldown(time.nowMs(self._io));
+    } else if (status == .succeeded) {
+        self.clearBgsaveCooldown();
+    }
+
     self._in_flight_kgc_save = null;
     const saved_change_count = if (status == .succeeded) save.captured_change_count else null;
 
@@ -230,17 +237,18 @@ test "bgsave cooldown uses the failure time and clears explicitly" {
     var state = PersistenceState.init(testing.io, false);
     var tx = try state.begin();
     defer tx.end();
+    const failure_ms = time.nowMs(testing.io);
 
-    try testing.expect(state.bgsaveCooldownElapsed(1_000, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms, 500));
 
-    state.startBgsaveCooldown(1_000);
-    try testing.expect(!state.bgsaveCooldownElapsed(1_499, 500));
-    try testing.expect(state.bgsaveCooldownElapsed(1_500, 500));
-    try testing.expect(state.bgsaveCooldownElapsed(1_000, 0));
-    try testing.expect(!state.bgsaveCooldownElapsed(999, 500));
+    state.startBgsaveCooldown(failure_ms);
+    try testing.expect(!state.bgsaveCooldownElapsed(failure_ms + 499, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms + 500, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms, 0));
+    try testing.expect(!state.bgsaveCooldownElapsed(failure_ms - 1, 500));
 
     state.clearBgsaveCooldown();
-    try testing.expect(state.bgsaveCooldownElapsed(999, 500));
+    try testing.expect(state.bgsaveCooldownElapsed(failure_ms - 1, 500));
 }
 
 test "tryStartAof blocks a second start until finishAof releases it" {
@@ -379,9 +387,11 @@ test "reapKgc reports running until background save completes" {
         std.c._exit(0);
     }
     _ = std.c.close(fds[0]);
+    const failure_ms = time.nowMs(testing.io);
     {
         var tx = try state.begin();
         defer tx.end();
+        state.startBgsaveCooldown(failure_ms);
         state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 17, .origin = .manual });
     }
     {
@@ -415,16 +425,20 @@ test "reapKgc reports running until background save completes" {
         var tx = try state.begin();
         defer tx.end();
         try testing.expect(!state.kgcInProgress());
+        try testing.expect(state.bgsaveCooldownElapsed(failure_ms, 5000));
     }
 }
 
-test "reapKgc reports failure and allows a later save" {
+test "failed manual background save preserves cooldown and allows a later save" {
     const testing = std.testing;
     var state = PersistenceState.init(testing.io, false);
+    const retry_delay_ms = 5000;
+    const failure_ms = time.nowMs(testing.io) - retry_delay_ms;
     {
         var tx = try state.begin();
         defer tx.end();
         try testing.expect(state.tryStartKgc());
+        state.startBgsaveCooldown(failure_ms);
     }
 
     const rc = std.posix.system.fork();
@@ -477,6 +491,8 @@ test "reapKgc reports failure and allows a later save" {
     {
         var tx = try state.begin();
         defer tx.end();
+        try testing.expect(!state.bgsaveCooldownElapsed(failure_ms, retry_delay_ms));
+        try testing.expect(state.bgsaveCooldownElapsed(failure_ms + retry_delay_ms, retry_delay_ms));
         try testing.expect(state.tryStartKgc());
     }
 }
