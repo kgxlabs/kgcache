@@ -3,6 +3,9 @@ const object = @import("../object.zig");
 const Storage = @import("../storage/interface.zig");
 const Request = @import("../commander/request.zig");
 
+// NOTE: currently this is the optimal place that should own `TriggerOrigin`
+// Other places like `PersistenceState` (persistence is not really a operation module) and `Commander` (circular deps) are not solid for now.
+// TODO: If you find somewhere more optimal, you can refactor this
 pub const TriggerOrigin = enum {
     manual,
     automatic,
