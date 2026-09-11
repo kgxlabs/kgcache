@@ -47,7 +47,6 @@ write and can rewrite the growing log in a background child. See
 │   ├── connection.zig           # Accept loop and per-connection request loop
 │   ├── cron.zig                 # Background housekeeping loop (tick schedule)
 │   ├── expiration.zig           # Active expiration round/batch policy
-│   ├── change_tracker.zig       # Write counter + last-save timestamp for automatic BGSAVE
 │   ├── config.zig               # Config struct, defaults, and CLI/file loading
 │   ├── config_parser.zig        # kgcache.conf parser
 │   ├── resp.zig                 # RESP2 parser and serializer
@@ -56,7 +55,7 @@ write and can rewrite the growing log in a background child. See
 │   ├── store/                   # Store abstraction, memory store, test mock
 │   ├── storage/                 # Storage abstraction and default backend
 │   ├── persistence/             # Snapshot (.kgc) and AOF backends, SAVE/BGSAVE
-│   ├── persistence_state.zig    # Shared in-progress/pid tracking for BGSAVE + AOF rewrite
+│   ├── persistence_state.zig    # Persistence lifecycle, retry, and snapshot change accounting
 │   ├── entry.zig                # Stored-value and expiration metadata
 │   └── tests.zig                # Unit-test entry point
 ├── docs/                        # Configuration, commands, and architecture reference
