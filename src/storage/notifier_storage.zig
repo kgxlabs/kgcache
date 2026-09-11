@@ -17,7 +17,7 @@ const object = @import("../object.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
 const PersistenceState = @import("../persistence_state.zig");
-const ChangeTracker = @import("../change_tracker.zig");
+const ChangeTracker = @import("../persistence_state.zig");
 const Config = @import("../config.zig");
 const DefaultStorage = @import("default_storage.zig");
 const Lock = @import("../lock.zig");
@@ -32,7 +32,7 @@ _inner: Storage,
 // every key, not a per-write hook, so it lives at the `Store` level instead (see MemoryStore).
 _aof: ?persistence.JournalPersistence,
 // Shared across every db's NotifierStorage: the dirty count is process-wide, not per-database.
-_change_tracker: *ChangeTracker,
+_persistence_state: *PersistenceState,
 _db_index: u32,
 
 const vtable: Storage.VTable = .{
@@ -65,14 +65,14 @@ pub fn init(
     allocator: std.mem.Allocator,
     inner: Storage,
     aof: ?persistence.JournalPersistence,
-    change_tracker: *ChangeTracker,
+    persistence_state: *PersistenceState,
     db_index: u32,
 ) NotifierStorage {
     return .{
         ._allocator = allocator,
         ._inner = inner,
         ._aof = aof,
-        ._change_tracker = change_tracker,
+        ._persistence_state = persistence_state,
         ._db_index = db_index,
     };
 }
@@ -104,7 +104,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
 
                 const is_removed = try self._inner.removeIfExpired(key);
                 if (is_removed) {
-                    self._change_tracker.recordChange();
+                    self._persistence_state.recordChange();
                     record.publish() catch return Storage.Error.UnableToRecordWrite;
                     return null;
                 }
@@ -117,7 +117,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     }
 
     const is_removed = try self._inner.removeIfExpired(key);
-    if (is_removed) self._change_tracker.recordChange();
+    if (is_removed) self._persistence_state.recordChange();
     return self._inner.get(key);
 }
 
@@ -145,13 +145,13 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
         errdefer record.abort();
 
         const result = try self._inner.put(key, value, options);
-        self._change_tracker.recordChange();
+        self._persistence_state.recordChange();
         record.publish() catch return Storage.Error.UnableToRecordWrite;
         return result;
     }
 
     const result = try self._inner.put(key, value, options);
-    self._change_tracker.recordChange();
+    self._persistence_state.recordChange();
     return result;
 }
 
@@ -171,13 +171,13 @@ pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
         errdefer record.abort();
 
         try self._inner.remove(key);
-        self._change_tracker.recordChange();
+        self._persistence_state.recordChange();
         record.publish() catch return Storage.Error.UnableToRecordWrite;
         return;
     }
 
     try self._inner.remove(key);
-    self._change_tracker.recordChange();
+    self._persistence_state.recordChange();
 }
 
 pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
@@ -224,13 +224,13 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
             return null;
         }
 
-        self._change_tracker.recordChange();
+        self._persistence_state.recordChange();
         record.publish() catch return Storage.Error.UnableToRecordWrite;
         return key;
     }
 
     const maybe_key = self._inner.tryExpireRandom() catch return Storage.Error.UnableToExpire;
-    if (maybe_key != null) self._change_tracker.recordChange();
+    if (maybe_key != null) self._persistence_state.recordChange();
     return maybe_key;
 }
 

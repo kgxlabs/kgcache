@@ -56,22 +56,23 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
         if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
-    var succeeded = false;
-    defer {
+    errdefer {
         var state_tx = self._persistence_state.beginUncancelable();
         defer state_tx.end();
-        if (succeeded) self._persistence_state.clearBgsaveCooldown();
         self._persistence_state.finishKgc();
     }
 
     try self.dump(storages);
-    succeeded = true;
+    const captured_change_count = self._persistence_state.captureSnapshotChangeCount();
+    self._persistence_state.markSaved(captured_change_count, time.nowMs(self._io)) catch return Snapshot.Error.UnableToSave;
+    self._persistence_state.clearBgsaveCooldown();
+    self._persistence_state.finishKgc();
 }
 
 // only hold short lock session so we dont hold the lock while fork
 // Finishing this does not mean, saving succeeded.
 // It just means forking completed
-pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count: u64, origin: Store.TriggerOrigin) Snapshot.Error!void {
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
     {
@@ -123,6 +124,7 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
     var state_tx = self._persistence_state.beginUncancelable();
     defer state_tx.end();
 
+    const snapshot_change_count = self._persistence_state.captureSnapshotChangeCount();
     self._persistence_state.setInFlightKgcSave(.{
         .pid = pid,
         .captured_change_count = snapshot_change_count,

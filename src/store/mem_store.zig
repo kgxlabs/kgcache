@@ -129,15 +129,13 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
     return @intCast(self._storages.len);
 }
 
-pub fn save(ptr: *anyopaque, now_ms: i64) Store.Error!void {
+pub fn save(ptr: *anyopaque) Store.Error!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    const snapshot_change_count = self._change_tracker.captureSnapshotChangeCount();
     self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
-    self._change_tracker.markSaved(snapshot_change_count, now_ms) catch return Store.Error.UnableToSave;
 }
 
 pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {
@@ -146,8 +144,7 @@ pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    const snapshot_change_count = self._change_tracker.captureSnapshotChangeCount();
-    self._kgc.bgsave(self._storages, snapshot_change_count, origin) catch |err| {
+    self._kgc.bgsave(self._storages, origin) catch |err| {
         return switch (err) {
             error.SaveAlreadyInProgress => Store.Error.SaveAlreadyInProgress,
             else => Store.Error.UnableToBackgroundSaveKgc,
