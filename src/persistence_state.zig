@@ -2,6 +2,7 @@ const std = @import("std");
 const Lock = @import("lock.zig");
 const time = @import("time.zig");
 const Store = @import("store/interface.zig");
+const Config = @import("config.zig");
 
 const PersistenceState = @This();
 
@@ -37,12 +38,19 @@ _mutual_exclusive: bool = false,
 _in_flight_kgc_save: ?KgcBackgroundSave = null,
 _in_flight_aof_rewrite: ?AofBackgroundRewrite = null,
 _last_failed_save_ms: ?time.UnixMs = null,
+/// Number of writes (put/remove) since the last save.
+_dirty: std.atomic.Value(u64) = .init(0),
+/// Timestamp of the last save, initialized to "now" at construction (not
+/// 0) so a freshly-started server with no save rules matching yet doesn't
+/// look like it's infinitely overdue.
+_last_save_ms: std.atomic.Value(i64),
 
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
         ._io = io,
         ._lock = Lock.init(io),
         ._mutual_exclusive = mutual_exclusive,
+        ._last_save_ms = .init(time.nowMs(io)),
     };
 }
 
@@ -136,6 +144,37 @@ pub fn reapAof(self: *PersistenceState) ReapResult {
     self._in_flight_aof_rewrite = null;
     self._aof_in_progress = false;
     return status;
+}
+
+pub fn recordChange(self: *PersistenceState) void {
+    _ = self._dirty.fetchAdd(1, .monotonic);
+}
+
+pub fn captureSnapshotChangeCount(self: *PersistenceState) u64 {
+    return self._dirty.load(.monotonic);
+}
+
+/// Returns true if ANY rule's condition is met
+/// rules are OR'd together,
+pub fn dueForSave(self: *PersistenceState, now_ms: i64, rules: []const Config.SaveRule) bool {
+    const dirty = self._dirty.load(.monotonic);
+    const last_save_ms = self._last_save_ms.load(.monotonic);
+    const elapsed_seconds = @divFloor(now_ms - last_save_ms, 1000);
+
+    for (rules) |rule| {
+        if (elapsed_seconds >= rule.seconds and dirty >= rule.changes) return true;
+    }
+    return false;
+}
+
+/// Marks only the changes represented by a completed snapshot as saved.
+/// Changes recorded after the snapshot change count was captured remain dirty.
+pub fn markSaved(self: *PersistenceState, saved_change_count: u64, now_ms: i64) !void {
+    const dirty = self._dirty.load(.monotonic);
+    if (dirty < saved_change_count) return error.InvalidSavedChangeCount;
+
+    _ = self._dirty.fetchSub(saved_change_count, .monotonic);
+    self._last_save_ms.store(now_ms, .monotonic);
 }
 
 // A completed child is reported exactly once. With no pid there is no
