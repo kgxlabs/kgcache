@@ -6,7 +6,6 @@ const TestHelpers = @import("../tests/helpers.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
 const PersistenceState = @import("../persistence_state.zig");
-const ChangeTracker = @import("../change_tracker.zig");
 
 const Ping = @This();
 
@@ -37,13 +36,11 @@ test "execute ping command" {
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
-    var change_tracker = ChangeTracker.init(testing.io);
     var memory_store = store.MemoryStore.init(
         testing.allocator,
         &.{default_storage.storage()},
         kgc_backend.snapshot(),
         null,
-        &change_tracker,
     );
     var data_store = memory_store.store();
     defer data_store.deinit();

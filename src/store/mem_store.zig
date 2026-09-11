@@ -4,7 +4,6 @@ const Storage = @import("../storage/interface.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
 const PersistenceState = @import("../persistence_state.zig");
-const ChangeTracker = @import("../change_tracker.zig");
 const entry = @import("../entry.zig");
 const object = @import("../object.zig");
 const Request = @import("../commander/request.zig");
@@ -17,7 +16,6 @@ _allocator: std.mem.Allocator,
 _storages: []const Storage,
 _kgc: persistence.SnapshotPersistence,
 _aof: ?persistence.JournalPersistence,
-_change_tracker: *ChangeTracker,
 
 /// Takes ownership of `storages`: `deinit` calls `Storage.deinit` on each.
 pub fn init(
@@ -347,8 +345,7 @@ test "set stores a value and returns null" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
-    var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
 
     defer data_store.deinit();
@@ -373,8 +370,7 @@ test "set stores a value and returns value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
-    var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -572,7 +568,7 @@ test "save then load round-trips across databases" {
     _ = try data_store.set(.{ .key = "foo", .value = "bar", .condition = null, .expires_at = null, .keepttl = false, .response = null }, 0);
     _ = try data_store.set(.{ .key = "baz", .value = "qux", .condition = null, .expires_at = expires_at, .keepttl = false, .response = null }, 1);
 
-    try data_store.save(time.nowMs(testing.io));
+    try data_store.save();
 
     var fresh_zero = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_one = DefaultStorage.init(testing.io, testing.allocator);
@@ -598,32 +594,31 @@ test "save then load round-trips across databases" {
     }
 }
 
-test "save resets the change tracker's dirty count" {
+test "save resets the persistence change count" {
     const NotifierStorage = @import("../storage/notifier_storage.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-save-reset.kgc");
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &change_tracker, 0);
-    var memory_store = MemoryStore.init(testing.allocator, &.{notifier.storage()}, kgc_backend.snapshot(), null, &change_tracker);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
+    var memory_store = MemoryStore.init(testing.allocator, &.{notifier.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    // a real write through the store, not the test poking the tracker directly.
+    // Use a real write through the store instead of changing persistence state directly.
     _ = try data_store.set(.{ .key = "foo", .value = "bar", .condition = null, .expires_at = null, .keepttl = false, .response = null }, 0);
-    try testing.expect(change_tracker._dirty.load(.monotonic) > 0);
+    try testing.expect(persistence_state.captureSnapshotChangeCount() > 0);
 
-    try data_store.save(time.nowMs(testing.io));
+    try data_store.save();
 
-    try testing.expectEqual(0, change_tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
 
 test "bgrewriteaof returns AofDisabled when no journal is configured" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
-    var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -647,8 +642,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
-    var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), journal, &change_tracker);
+    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), journal);
     var data_store = memory_store.store();
     defer data_store.deinit();
     defer journal.deinit() catch {};
@@ -694,8 +688,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_state = PersistenceState.init(testing.io, false);
     var fresh_kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &fresh_state, "test.kgc");
-    var fresh_tracker = ChangeTracker.init(testing.io);
-    var fresh_memory_store = MemoryStore.init(testing.allocator, &.{fresh_backend.storage()}, fresh_kgc.snapshot(), null, &fresh_tracker);
+    var fresh_memory_store = MemoryStore.init(testing.allocator, &.{fresh_backend.storage()}, fresh_kgc.snapshot(), null);
     var fresh_store = fresh_memory_store.store();
     defer fresh_store.deinit();
 
@@ -723,9 +716,8 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
     defer journal.deinit() catch {};
-    var change_tracker = ChangeTracker.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), journal, &change_tracker, 0);
-    var memory_store = MemoryStore.init(testing.allocator, &.{notifier.storage()}, kgc_backend.snapshot(), journal, &change_tracker);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), journal, &persistence_state, 0);
+    var memory_store = MemoryStore.init(testing.allocator, &.{notifier.storage()}, kgc_backend.snapshot(), journal);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -761,8 +753,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_state = PersistenceState.init(testing.io, false);
     var fresh_kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &fresh_state, "test.kgc");
-    var fresh_tracker = ChangeTracker.init(testing.io);
-    var fresh_memory_store = MemoryStore.init(testing.allocator, &.{fresh_backend.storage()}, fresh_kgc.snapshot(), null, &fresh_tracker);
+    var fresh_memory_store = MemoryStore.init(testing.allocator, &.{fresh_backend.storage()}, fresh_kgc.snapshot(), null);
     var fresh_store = fresh_memory_store.store();
     defer fresh_store.deinit();
 
@@ -787,8 +778,7 @@ test "concurrent KGC snapshot contains one complete submitted value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, path);
-    var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -854,12 +844,11 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
     defer journal.deinit() catch {};
-    var change_tracker = ChangeTracker.init(testing.io);
-    var notifier_zero = NotifierStorage.init(testing.allocator, backend_zero.storage(), journal, &change_tracker, 0);
-    var notifier_one = NotifierStorage.init(testing.allocator, backend_one.storage(), journal, &change_tracker, 1);
+    var notifier_zero = NotifierStorage.init(testing.allocator, backend_zero.storage(), journal, &persistence_state, 0);
+    var notifier_one = NotifierStorage.init(testing.allocator, backend_one.storage(), journal, &persistence_state, 1);
     var probe_one: BeginProbeStorage = .{ .inner = notifier_one.storage() };
     const storage_one = probe_one.storage();
-    var memory_store = MemoryStore.init(testing.allocator, &.{ notifier_zero.storage(), storage_one }, kgc_backend.snapshot(), journal, &change_tracker);
+    var memory_store = MemoryStore.init(testing.allocator, &.{ notifier_zero.storage(), storage_one }, kgc_backend.snapshot(), journal);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
@@ -902,8 +891,7 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
     var fresh_one = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_state = PersistenceState.init(testing.io, false);
     var fresh_kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &fresh_state, "test.kgc");
-    var fresh_tracker = ChangeTracker.init(testing.io);
-    var fresh_memory_store = MemoryStore.init(testing.allocator, &.{ fresh_zero.storage(), fresh_one.storage() }, fresh_kgc.snapshot(), null, &fresh_tracker);
+    var fresh_memory_store = MemoryStore.init(testing.allocator, &.{ fresh_zero.storage(), fresh_one.storage() }, fresh_kgc.snapshot(), null);
     var fresh_store = fresh_memory_store.store();
     defer fresh_store.deinit();
 
@@ -935,8 +923,7 @@ test "KGC bgsave waits for active Storage work and preserves all databases" {
     const storage_one = probe_one.storage();
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, path);
-    var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = MemoryStore.init(testing.allocator, &.{ backend_zero.storage(), storage_one }, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = MemoryStore.init(testing.allocator, &.{ backend_zero.storage(), storage_one }, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
 

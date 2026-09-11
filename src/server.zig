@@ -104,7 +104,6 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
         self._data_storages,
         kgc_snapshot,
         maybe_aof_journal,
-        &self._change_tracker,
     );
     self._store = self._mem_store.store();
 
