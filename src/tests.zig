@@ -22,6 +22,5 @@ test {
     _ = @import("persistence/kgc.zig");
     _ = @import("persistence/aof.zig");
     _ = @import("persistence/aof_loader.zig");
-    _ = @import("change_tracker.zig");
     _ = @import("server.zig");
 }

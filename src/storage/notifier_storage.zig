@@ -17,7 +17,6 @@ const object = @import("../object.zig");
 const time = @import("../time.zig");
 const helpers = @import("../helpers.zig");
 const PersistenceState = @import("../persistence_state.zig");
-const ChangeTracker = @import("../persistence_state.zig");
 const Config = @import("../config.zig");
 const DefaultStorage = @import("default_storage.zig");
 const Lock = @import("../lock.zig");
@@ -260,12 +259,12 @@ pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaq
     return self._inner.forEach(ctx, visit);
 }
 
-test "put increments the change tracker's dirty count" {
+test "put increments the persistence change count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -274,15 +273,15 @@ test "put increments the change tracker's dirty count" {
 
     _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
 
-    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
 }
 
-test "remove increments the change tracker's dirty count" {
+test "remove increments the persistence change count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -292,15 +291,15 @@ test "remove increments the change tracker's dirty count" {
     _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
     try wrapped.remove("foo");
 
-    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(2, persistence_state.captureSnapshotChangeCount());
 }
 
-test "a lazy-expiration removal during get increments the change tracker's dirty count" {
+test "a lazy-expiration removal during get increments the persistence change count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &tracker, 0);
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -310,11 +309,11 @@ test "a lazy-expiration removal during get increments the change tracker's dirty
     _ = try wrapped.put("expired", .{ .string = "value" }, .{
         .expires_at = time.nowMs(testing.io) - 1,
     });
-    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
 
     try testing.expect(try wrapped.get("expired") == null);
 
-    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(2, persistence_state.captureSnapshotChangeCount());
 }
 
 const FailingJournal = struct {
@@ -360,13 +359,13 @@ test "a journal that fails to record a write fails the put" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
         failing_journal.journal(),
-        &tracker,
+        &persistence_state,
         0,
     );
     var wrapped = notifier.storage();
@@ -377,7 +376,7 @@ test "a journal that fails to record a write fails the put" {
 
     try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null }));
     try testing.expect(try wrapped.get("foo") == null);
-    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
 
 test "a journal preparation failure leaves a removed key unchanged" {
@@ -391,9 +390,9 @@ test "a journal preparation failure leaves a removed key unchanged" {
         _ = try inner.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
     }
 
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var failing_journal = FailingJournal.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -402,7 +401,7 @@ test "a journal preparation failure leaves a removed key unchanged" {
 
     try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.remove("foo"));
     try testing.expect((try wrapped.get("foo")) != null);
-    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
 
 test "a journal preparation failure leaves a lazy-expired key stored" {
@@ -418,9 +417,9 @@ test "a journal preparation failure leaves a lazy-expired key stored" {
         });
     }
 
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var failing_journal = FailingJournal.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -430,7 +429,7 @@ test "a journal preparation failure leaves a lazy-expired key stored" {
     try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.get("expired"));
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
-    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
 
 test "a journal preparation failure leaves an active-expiration key stored" {
@@ -446,9 +445,9 @@ test "a journal preparation failure leaves an active-expiration key stored" {
         });
     }
 
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var failing_journal = FailingJournal.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -458,7 +457,7 @@ test "a journal preparation failure leaves an active-expiration key stored" {
     try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.tryExpireRandom());
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
-    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
 
 test "a journal preparation failure leaves a lazily expired key unchanged" {
@@ -474,9 +473,9 @@ test "a journal preparation failure leaves a lazily expired key unchanged" {
         });
     }
 
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var failing_journal = FailingJournal.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -486,7 +485,7 @@ test "a journal preparation failure leaves a lazily expired key unchanged" {
     try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.get("expired"));
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
-    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
 
 test "a journal preparation failure leaves an actively expired key unchanged" {
@@ -502,9 +501,9 @@ test "a journal preparation failure leaves an actively expired key unchanged" {
         });
     }
 
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var failing_journal = FailingJournal.init(testing.io);
-    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &tracker, 0);
+    var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
 
@@ -514,19 +513,19 @@ test "a journal preparation failure leaves an actively expired key unchanged" {
     try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.tryExpireRandom());
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
-    try testing.expectEqual(0, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
 
 test "a read that finds no expired key does not increment the dirty count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
         null,
-        &tracker,
+        &persistence_state,
         0,
     );
     var wrapped = notifier.storage();
@@ -536,11 +535,11 @@ test "a read that finds no expired key does not increment the dirty count" {
     defer tx.end();
 
     _ = try wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
-    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
 
     _ = try wrapped.get("foo");
 
-    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
 }
 
 const RecordingJournal = struct {
@@ -594,13 +593,13 @@ test "KEEPTTL over an existing expiry journals the existing absolute expiry" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
         recording_journal.journal(),
-        &tracker,
+        &persistence_state,
         0,
     );
     var wrapped = notifier.storage();
@@ -623,13 +622,13 @@ test "remove journals a DEL" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
         recording_journal.journal(),
-        &tracker,
+        &persistence_state,
         0,
     );
     var wrapped = notifier.storage();
@@ -651,13 +650,13 @@ test "an active-expiration removal journals a DEL and increments the dirty count
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
         recording_journal.journal(),
-        &tracker,
+        &persistence_state,
         0,
     );
     var wrapped = notifier.storage();
@@ -669,13 +668,13 @@ test "an active-expiration removal journals a DEL and increments the dirty count
     _ = try wrapped.put("expired", .{ .string = "value" }, .{
         .expires_at = time.nowMs(testing.io) - 1,
     });
-    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
 
     const removed_key = try wrapped.tryExpireRandom();
     try testing.expect(removed_key != null);
     defer testing.allocator.free(removed_key.?);
 
-    try testing.expectEqual(2, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(2, persistence_state.captureSnapshotChangeCount());
 
     switch (recording_journal.last_event.?) {
         .remove => |remove_event| try testing.expectEqualStrings("expired", remove_event.key),
@@ -687,13 +686,13 @@ test "sampling a live key does not increment the dirty count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var tracker = ChangeTracker.init(testing.io);
+    var persistence_state = PersistenceState.init(testing.io, false);
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
         recording_journal.journal(),
-        &tracker,
+        &persistence_state,
         0,
     );
     var wrapped = notifier.storage();
@@ -705,12 +704,12 @@ test "sampling a live key does not increment the dirty count" {
     _ = try wrapped.put("alive", .{ .string = "value" }, .{
         .expires_at = time.nowMs(testing.io) + 100_000,
     });
-    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
 
     const removed_key = try wrapped.tryExpireRandom();
     try testing.expect(removed_key == null);
 
-    try testing.expectEqual(1, tracker._dirty.load(.monotonic));
+    try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
     switch (recording_journal.last_event.?) {
         .put => {},
         .remove => return error.TestUnexpectedResult,

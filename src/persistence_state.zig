@@ -540,3 +540,136 @@ test "failed manual background save preserves cooldown and allows a later save" 
         try testing.expect(state.tryStartKgc());
     }
 }
+
+test "dueForSave is false with no rules configured" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    state.recordChange();
+    try testing.expect(!state.dueForSave(time.nowMs(testing.io), &.{}));
+}
+
+test "dueForSave is false before the seconds threshold elapses even with enough changes" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..100) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    try testing.expect(!state.dueForSave(time.nowMs(testing.io), &rules));
+}
+
+test "dueForSave is false before enough changes even after the seconds threshold elapses" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..99) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    const now_ms = time.nowMs(testing.io) + 300 * 1000;
+    try testing.expect(!state.dueForSave(now_ms, &rules));
+}
+
+test "dueForSave is true once both thresholds are met" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..100) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    const now_ms = time.nowMs(testing.io) + 300 * 1000;
+    try testing.expect(state.dueForSave(now_ms, &rules));
+}
+
+test "dueForSave is true when any configured rule matches" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..5) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{
+        .{ .seconds = 900, .changes = 10_000 },
+        .{ .seconds = 300, .changes = 10_000 },
+        .{ .seconds = 60, .changes = 1 },
+    };
+    const now_ms = time.nowMs(testing.io) + 60 * 1000;
+    try testing.expect(state.dueForSave(now_ms, &rules));
+}
+
+test "markSaved resets the change count and last-save time" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..100) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    const now_ms = time.nowMs(testing.io) + 300 * 1000;
+    try testing.expect(state.dueForSave(now_ms, &rules));
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try state.markSaved(state.captureSnapshotChangeCount(), now_ms);
+    }
+
+    try testing.expect(!state.dueForSave(now_ms, &rules));
+}
+
+test "markSaved preserves changes recorded after capture" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..3) |_| state.recordChange();
+    const snapshot_change_count = state.captureSnapshotChangeCount();
+    for (0..2) |_| state.recordChange();
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try state.markSaved(snapshot_change_count, time.nowMs(testing.io));
+    }
+
+    try testing.expectEqual(2, state.captureSnapshotChangeCount());
+}
+
+test "markSaved rejects a count greater than the current change count" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+    state.recordChange();
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expectError(
+            error.InvalidSavedChangeCount,
+            state.markSaved(2, time.nowMs(testing.io)),
+        );
+    }
+
+    try testing.expectEqual(1, state.captureSnapshotChangeCount());
+}
+
+test "concurrent recordChange calls are never lost" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    const thread_count = 8;
+    const increments_per_thread = 10_000;
+
+    const worker = struct {
+        fn run(persistence_state: *PersistenceState) void {
+            for (0..increments_per_thread) |_| persistence_state.recordChange();
+        }
+    }.run;
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, worker, .{&state});
+    }
+    for (threads) |thread| thread.join();
+
+    try testing.expectEqual(
+        @as(u64, thread_count * increments_per_thread),
+        state.captureSnapshotChangeCount(),
+    );
+}

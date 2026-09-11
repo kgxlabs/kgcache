@@ -310,7 +310,7 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
         persistence_state.finishKgc();
     }
 
-    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, 0, .manual));
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, .manual));
 
     // no fork should have happened -- no pid was ever recorded
     var state_tx = try persistence_state.begin();
@@ -388,7 +388,7 @@ test "successful automatic background save clears cooldown and produces a loadab
     {
         var tx = try backend_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{backend_storage}, 0, .automatic);
+        try backend_instance.snapshot().bgsave(&.{backend_storage}, .automatic);
     }
     {
         var state_tx = try persistence_state.begin();

@@ -3,7 +3,6 @@ const storage = @import("storage.zig");
 const store = @import("store.zig");
 const persistence = @import("persistence.zig");
 const PersistenceState = @import("persistence_state.zig");
-const ChangeTracker = @import("change_tracker.zig");
 const Manifest = @import("persistence/manifest.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
@@ -18,7 +17,6 @@ _allocator: std.mem.Allocator,
 _config: Config,
 
 _persistence_state: PersistenceState,
-_change_tracker: ChangeTracker,
 _kgc: persistence.KgcPersistence,
 _aof: ?persistence.AofPersistence,
 
@@ -80,8 +78,6 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config) !*Server
         try kgc_snapshot.load(raw_storages);
     }
 
-    self._change_tracker = ChangeTracker.init(io);
-
     self._notifier_storages = try allocator.alloc(storage.NotifierStorage, num_databases);
     errdefer allocator.free(self._notifier_storages);
 
@@ -131,7 +127,12 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
 
     // Replay uses the normal storage path, which increments the dirty count.
     // These changes are already stored in the AOF, so startup begins clean.
-    try self._change_tracker.markSaved(self._change_tracker.captureSnapshotChangeCount(), time.nowMs(io));
+    var state_tx = self._persistence_state.beginUncancelable();
+    defer state_tx.end();
+    try self._persistence_state.markSaved(
+        self._persistence_state.captureSnapshotChangeCount(),
+        time.nowMs(io),
+    );
 }
 
 fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {
@@ -417,7 +418,7 @@ test "replay leaves the dirty count at zero" {
     const server = try Server.create(testing.io, testing.allocator, config);
     defer server.destroy();
 
-    try testing.expectEqual(0, server._change_tracker._dirty.load(.monotonic));
+    try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
 }
 
 test "failed AOF replay leaves orphaned files untouched" {
