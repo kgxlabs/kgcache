@@ -184,7 +184,6 @@ fn startCron(self: *Server) !void {
         self._allocator,
         self._data_storages,
         &self._persistence_state,
-        &self._change_tracker,
         &self._store,
         aof_journal,
         self._config,

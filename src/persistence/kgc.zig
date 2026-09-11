@@ -63,6 +63,9 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
     }
 
     try self.dump(storages);
+    var state_tx = self._persistence_state.begin() catch return Snapshot.Error.UnableToSave;
+    defer state_tx.end();
+
     const captured_change_count = self._persistence_state.captureSnapshotChangeCount();
     self._persistence_state.markSaved(captured_change_count, time.nowMs(self._io)) catch return Snapshot.Error.UnableToSave;
     self._persistence_state.clearBgsaveCooldown();
