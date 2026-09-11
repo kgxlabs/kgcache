@@ -58,7 +58,7 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
 
     var succeeded = false;
     defer {
-        var state_tx = self._persistence_state.begin() catch unreachable;
+        var state_tx = self._persistence_state.beginUncancelable();
         defer state_tx.end();
         if (succeeded) self._persistence_state.clearBgsaveCooldown();
         self._persistence_state.finishKgc();
@@ -82,7 +82,7 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
 
     // NOTE: the placement is important. This way A busy return would not run finishKgc() and clear another operation’s active state
     errdefer {
-        var tx = self._persistence_state.begin() catch unreachable;
+        var tx = self._persistence_state.beginUncancelable();
         defer tx.end();
         self._persistence_state.finishKgc();
     }
@@ -119,7 +119,8 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
         std.c._exit(0);
     }
 
-    var state_tx = self._persistence_state.begin() catch unreachable;
+    // Fork succeeded, so cancellation must not leave the child untracked.
+    var state_tx = self._persistence_state.beginUncancelable();
     defer state_tx.end();
 
     self._persistence_state.setInFlightKgcSave(.{

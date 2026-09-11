@@ -50,6 +50,10 @@ pub fn begin(self: *PersistenceState) std.Io.Cancelable!Lock.Tx {
     return self._lock.begin();
 }
 
+pub fn beginUncancelable(self: *PersistenceState) Lock.Tx {
+    return self._lock.beginUncancelable();
+}
+
 pub fn tryStartKgc(self: *PersistenceState) bool {
     if (self._kgc_in_progress) return false;
     if (self._mutual_exclusive and self._aof_in_progress) return false;

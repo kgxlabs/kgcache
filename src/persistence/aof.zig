@@ -208,7 +208,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     var child_started = false;
     errdefer |err| {
         if (!child_started) {
-            var state_tx = self._persistence_state.begin() catch unreachable;
+            var state_tx = self._persistence_state.beginUncancelable();
             self._persistence_state.finishAof();
             state_tx.end();
         }
@@ -318,8 +318,10 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     }
 
     self._pending_base_seq = base_seq;
-    var state_tx = self._persistence_state.begin() catch unreachable;
+    // Fork succeeded, so cancellation must not leave the child untracked.
+    var state_tx = self._persistence_state.beginUncancelable();
     defer state_tx.end();
+
     self._persistence_state.setInFlightAofRewrite(.{
         .pid = pid,
         .base_seq = base_seq,
