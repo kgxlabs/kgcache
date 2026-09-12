@@ -8,7 +8,6 @@ const ClientState = @import("../client_state.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
 const PersistenceState = @import("../persistence_state.zig");
-const ChangeTracker = @import("../change_tracker.zig");
 
 pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp.RESPValue {
     const testing = std.testing;
@@ -21,8 +20,7 @@ pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp
     // part of.
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc") catch unreachable;
-    var change_tracker = ChangeTracker.init(testing.io);
-    var memory_store = store.MemoryStore.init(testing.allocator, &.{default_storage.storage()}, kgc_backend.snapshot(), null, &change_tracker);
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{default_storage.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
     var client_state: ClientState = .{};

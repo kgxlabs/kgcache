@@ -44,7 +44,8 @@ tryStartKgc() fails? ──▶ return SaveAlreadyInProgress, don't fork
 fork()
  ├─ child:  close stdin/stdout, dump(storages), then _exit()
  │          (never returns into the caller's connection-handling code)
- └─ parent: record the child's pid, return OK immediately
+ └─ parent: capture the change count, record the child's pid and origin,
+            then return OK immediately
 ```
 
 A few details here are load-bearing, not stylistic:
@@ -72,11 +73,13 @@ So reaping happens on its own timeline instead: the background housekeeping loop
 tick 1: fork() ── child starts dumping
 tick 2: waitpid(WNOHANG) → still running → no-op
 tick 3: waitpid(WNOHANG) → still running → no-op
-tick 4: waitpid(WNOHANG) → exited        → clear pid/in-progress flag
-                                             non-zero exit? log to stderr
+tick 4: waitpid(WNOHANG) → exited
+          ├─ success: account for the captured changes
+          └─ failure: keep all changes dirty and log to stderr
+        then clear the in-progress flag
 ```
 
-If the child hasn't exited yet, the poll is a no-op. Once it has, the loop clears `PersistenceState`'s flag and pid, and checks the exit status: a non-zero exit (the child hit a write failure) gets logged to stderr, since there's no other channel left to report it through by that point.
+If the child has not exited yet, the poll is a no-op. Once it has, `PersistenceState` clears the recorded child, returns its status and captured change count, and keeps the save claim active until the cron loop finishes accounting for the result. A successful child marks the captured changes as saved. A failed child leaves every change dirty and logs the failure to stderr. The cron loop releases the save claim only after this work is complete.
 
 ### `exclusive-bg-persistence`
 
@@ -86,46 +89,49 @@ By default, a `BGSAVE` and an AOF background rewrite are mutually exclusive: sta
 
 Beyond on-demand `SAVE`/`BGSAVE`, kgcache can trigger a `BGSAVE` on its own once enough writes have piled up: the same idea as `redis-server`'s `save <seconds> <changes>` directive (see [Configuration](CONFIGURATION.md#automatic-background-saving-save) for the config format). This needs two things: something that counts writes, and something that periodically checks whether a configured rule has been satisfied.
 
-### Counting writes: `ChangeTracker`
+### Counting writes: `PersistenceState`
 
-`ChangeTracker` (`src/change_tracker.zig`) tracks two things: a dirty counter (writes since the last save) and the timestamp of the last save. It's deliberately atomics-only, no mutex:
+`PersistenceState` (`src/persistence_state.zig`) owns the full snapshot lifecycle. Along with the in-progress state described above, it tracks the number of writes since the last completed snapshot and the time of that snapshot. Keeping these values together makes claiming, capturing, completing, and retrying a save one coordinated operation.
 
-- Incrementing the counter (`recordChange`) only needs "don't lose concurrent increments": a single-field atomicity guarantee, not a multi-step critical section, so `fetchAdd` is enough.
-- Starting a snapshot captures its change count while every storage lock is held. This ensures the count includes every mutation represented by the snapshot.
-- Completing a snapshot passes that change count to `markSaved`, which subtracts only the captured count. Changes recorded after the snapshot started remain dirty for the next save.
+- `recordChange()` uses an atomic increment, so write paths do not need the persistence-state lock.
+- `dueForSave()` reads the atomic change count and last-save time without blocking writers.
+- Save lifecycle transitions and completion accounting run while holding the persistence-state lock.
+- `markSaved()` subtracts only the count captured for that snapshot. Changes recorded later remain dirty for the next save.
 
 `recordChange()` is called from `NotifierStorage`, the same vantage point that already sees every write for AOF journaling, on every `put`, `remove`, and lazy-expiration removal during `get` (Redis's own dirty counter counts expiry-driven removals too).
 
+Before either save path accesses the dataset, `MemoryStore` acquires every storage lock. For `BGSAVE`, the parent captures the change count after `fork()` and before it records the in-flight child. No write can complete between the fork and that capture, so the count describes exactly the mutations visible to the child. For synchronous `SAVE`, the locks remain held through the dump and its completion accounting.
+
 ### Deciding when to trigger: the cron tick
 
-Every `cron-interval-ms` tick, after reaping any finished background-save child, the housekeeping loop asks `ChangeTracker.dueForSave(now, config.save_rules)`: for each configured rule, has at least `changes` writes happened in the last `seconds` seconds since the last save? Any single matching rule (OR'd together) is enough to trigger a `BGSAVE`.
+Every `cron-interval-ms` tick, after reaping any finished background-save child, the housekeeping loop asks `PersistenceState.dueForSave(now, config.save_rules)`: for each configured rule, is the change count at least `changes`, and have at least `seconds` seconds elapsed since the last successful save? Any single matching rule is enough to trigger a `BGSAVE`.
 
 ```text
 Write path (every db, every put/remove):
-  NotifierStorage.put()/remove() ──▶ ChangeTracker.recordChange()
-                                       (atomic fetchAdd, no lock)
+  NotifierStorage.put()/remove() ──▶ PersistenceState.recordChange()
+                                       (atomic increment, no state lock)
 
 Trigger path (every cron-interval-ms tick):
   cron tick
     │
     ▼
-  ChangeTracker.dueForSave(now, config.save_rules)
-    │  any rule: elapsed_seconds ≥ rule.seconds AND dirty ≥ rule.changes ?
+  PersistenceState.dueForSave(now, config.save_rules)
+    │  any rule: elapsed_seconds ≥ rule.seconds AND changes ≥ rule.changes ?
     ▼ yes
-  Store.bgsave() captures snapshot change count
+  Store.bgsave() locks every storage and forks
     │
-    ▼
-  fork() ── child dumps to disk, exits
-    │
-    ▼ (a later tick)
+    ├─ child dumps to disk, exits
+    └─ parent captures change count and records the in-flight child
+         │
+         ▼ (a later tick)
   PersistenceState.reapKgc() notices the child exited
     │
-    ▼
-  ChangeTracker.markSaved(snapshot_change_count, now)
-    (dirty → dirty - snapshot_change_count, last_save → now)
+    ├─ success: PersistenceState.markSaved(captured_change_count, now)
+    │             (changes → changes - captured count, last-save → now)
+    └─ failure: preserve the change count and last-save time
 ```
 
-A failed trigger attempt (`bgsave()` returning an error) is logged to stderr and otherwise ignored: it's just re-evaluated on the next tick, the same as any other transient failure in the cron loop.
+An automatic save failure starts a retry cooldown. Cron keeps evaluating the save rules, but it does not try another automatic `BGSAVE` until `bgsave-retry-delay-ms` has elapsed. `SaveAlreadyInProgress` does not start the cooldown because it means another persistence operation already owns the claim. A successful save clears any existing cooldown.
 
 ### Why the reset can't happen at the trigger call site
 
@@ -134,16 +140,12 @@ A failed trigger attempt (`bgsave()` returning an error) is logged to stderr and
 ```text
 SAVE (synchronous)                    BGSAVE (forked)
 ───────────────────                   ────────────────
-MemoryStore.save()                    Store.bgsave() returns as soon as
-  → dump() runs on this thread,          fork() succeeds: the child
-    blocking the caller                  hasn't written anything yet
-  → the dump is done by the time
-    save() returns                    markSaved() has to wait for
-  → markSaved() runs right there        PersistenceState.reapKgc() to
-                                         observe the child has exited
-                                         (see "Reaping" above): it runs
-                                         from the cron loop, not from
-                                         bgsave()'s call site
+MemoryStore locks every storage       MemoryStore locks every storage
+  → KgcBackend.dump() runs on           → KgcBackend forks
+    the connection thread               → parent captures the change count
+  → KgcBackend captures the count        → child writes the frozen snapshot
+  → markSaved() runs before return       → cron waits for reapKgc()
+                                         → markSaved() runs only on success
 ```
 
-Reaping a **failed** child (non-zero exit) does not call `markSaved()`, because no snapshot was successfully written. The dirty count and last-save timestamp remain unchanged, so an automatic save that is still due can retry on a later cron tick.
+Reaping a **failed** child (non-zero exit) does not call `markSaved()`, because no snapshot was successfully written. The change count and last-save timestamp remain unchanged, so an automatic save remains due and can retry after its cooldown.

@@ -33,7 +33,7 @@ pub const VTable = struct {
     remove: *const fn (*anyopaque, []const u8, u32) Error!bool,
     dbsize: *const fn (*anyopaque, u32) Error!u32,
     numDatabases: *const fn (*anyopaque) u32,
-    save: *const fn (*anyopaque, i64) Error!void,
+    save: *const fn (*anyopaque) Error!void,
     bgsave: *const fn (*anyopaque, TriggerOrigin) Error!void,
     bgrewriteaof: *const fn (*anyopaque, TriggerOrigin) Error!void,
     deinit: *const fn (*anyopaque) void,
@@ -59,8 +59,8 @@ pub fn numDatabases(self: Store) u32 {
     return self.vtable.numDatabases(self.ptr);
 }
 
-pub fn save(self: Store, now_ms: i64) Error!void {
-    return self.vtable.save(self.ptr, now_ms);
+pub fn save(self: Store) Error!void {
+    return self.vtable.save(self.ptr);
 }
 
 pub fn bgsave(self: Store, origin: TriggerOrigin) Error!void {

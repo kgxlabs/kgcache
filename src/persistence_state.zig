@@ -2,6 +2,7 @@ const std = @import("std");
 const Lock = @import("lock.zig");
 const time = @import("time.zig");
 const Store = @import("store/interface.zig");
+const Config = @import("config.zig");
 
 const PersistenceState = @This();
 
@@ -37,12 +38,19 @@ _mutual_exclusive: bool = false,
 _in_flight_kgc_save: ?KgcBackgroundSave = null,
 _in_flight_aof_rewrite: ?AofBackgroundRewrite = null,
 _last_failed_save_ms: ?time.UnixMs = null,
+/// Number of writes (put/remove) since the last save.
+_change_count: std.atomic.Value(u64) = .init(0),
+/// Timestamp of the last save, initialized to "now" at construction (not
+/// 0) so a freshly-started server with no save rules matching yet doesn't
+/// look like it's infinitely overdue.
+_last_save_ms: std.atomic.Value(i64),
 
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
         ._io = io,
         ._lock = Lock.init(io),
         ._mutual_exclusive = mutual_exclusive,
+        ._last_save_ms = .init(time.nowMs(io)),
     };
 }
 
@@ -136,6 +144,37 @@ pub fn reapAof(self: *PersistenceState) ReapResult {
     self._in_flight_aof_rewrite = null;
     self._aof_in_progress = false;
     return status;
+}
+
+pub fn recordChange(self: *PersistenceState) void {
+    _ = self._change_count.fetchAdd(1, .monotonic);
+}
+
+pub fn captureSnapshotChangeCount(self: *PersistenceState) u64 {
+    return self._change_count.load(.monotonic);
+}
+
+/// Returns true if ANY rule's condition is met
+/// rules are OR'd together,
+pub fn dueForSave(self: *PersistenceState, now_ms: i64, rules: []const Config.SaveRule) bool {
+    const dirty = self._change_count.load(.monotonic);
+    const last_save_ms = self._last_save_ms.load(.monotonic);
+    const elapsed_seconds = @divFloor(now_ms - last_save_ms, 1000);
+
+    for (rules) |rule| {
+        if (elapsed_seconds >= rule.seconds and dirty >= rule.changes) return true;
+    }
+    return false;
+}
+
+/// Marks only the changes represented by a completed snapshot as saved.
+/// Changes recorded after the snapshot change count was captured remain dirty.
+pub fn markSaved(self: *PersistenceState, saved_change_count: u64, now_ms: i64) !void {
+    const current_change_count = self._change_count.load(.monotonic);
+    if (current_change_count < saved_change_count) return error.InvalidSavedChangeCount;
+
+    _ = self._change_count.fetchSub(saved_change_count, .monotonic);
+    self._last_save_ms.store(now_ms, .monotonic);
 }
 
 // A completed child is reported exactly once. With no pid there is no
@@ -421,7 +460,8 @@ test "reapKgc reports running until background save completes" {
         }
         tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(ReapResult.succeeded, result.status);
     try testing.expectEqual(17, result.saved_change_count.?);
@@ -489,7 +529,8 @@ test "failed manual background save preserves cooldown and allows a later save" 
         if (result.status != .running) state.finishKgc();
         tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(ReapResult.failed, result.status);
     try testing.expect(result.saved_change_count == null);
@@ -500,4 +541,137 @@ test "failed manual background save preserves cooldown and allows a later save" 
         try testing.expect(state.bgsaveCooldownElapsed(failure_ms + retry_delay_ms, retry_delay_ms));
         try testing.expect(state.tryStartKgc());
     }
+}
+
+test "dueForSave is false with no rules configured" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    state.recordChange();
+    try testing.expect(!state.dueForSave(time.nowMs(testing.io), &.{}));
+}
+
+test "dueForSave is false before the seconds threshold elapses even with enough changes" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..100) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    try testing.expect(!state.dueForSave(time.nowMs(testing.io), &rules));
+}
+
+test "dueForSave is false before enough changes even after the seconds threshold elapses" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..99) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    const now_ms = time.nowMs(testing.io) + 300 * 1000;
+    try testing.expect(!state.dueForSave(now_ms, &rules));
+}
+
+test "dueForSave is true once both thresholds are met" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..100) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    const now_ms = time.nowMs(testing.io) + 300 * 1000;
+    try testing.expect(state.dueForSave(now_ms, &rules));
+}
+
+test "dueForSave is true when any configured rule matches" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..5) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{
+        .{ .seconds = 900, .changes = 10_000 },
+        .{ .seconds = 300, .changes = 10_000 },
+        .{ .seconds = 60, .changes = 1 },
+    };
+    const now_ms = time.nowMs(testing.io) + 60 * 1000;
+    try testing.expect(state.dueForSave(now_ms, &rules));
+}
+
+test "markSaved resets the change count and last-save time" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..100) |_| state.recordChange();
+
+    const rules = [_]Config.SaveRule{.{ .seconds = 300, .changes = 100 }};
+    const now_ms = time.nowMs(testing.io) + 300 * 1000;
+    try testing.expect(state.dueForSave(now_ms, &rules));
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try state.markSaved(state.captureSnapshotChangeCount(), now_ms);
+    }
+
+    try testing.expect(!state.dueForSave(now_ms, &rules));
+}
+
+test "markSaved preserves changes recorded after capture" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    for (0..3) |_| state.recordChange();
+    const snapshot_change_count = state.captureSnapshotChangeCount();
+    for (0..2) |_| state.recordChange();
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try state.markSaved(snapshot_change_count, time.nowMs(testing.io));
+    }
+
+    try testing.expectEqual(2, state.captureSnapshotChangeCount());
+}
+
+test "markSaved rejects a count greater than the current change count" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+    state.recordChange();
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expectError(
+            error.InvalidSavedChangeCount,
+            state.markSaved(2, time.nowMs(testing.io)),
+        );
+    }
+
+    try testing.expectEqual(1, state.captureSnapshotChangeCount());
+}
+
+test "concurrent recordChange calls are never lost" {
+    const testing = std.testing;
+    var state = PersistenceState.init(testing.io, false);
+
+    const thread_count = 8;
+    const increments_per_thread = 10_000;
+
+    const worker = struct {
+        fn run(persistence_state: *PersistenceState) void {
+            for (0..increments_per_thread) |_| persistence_state.recordChange();
+        }
+    }.run;
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, worker, .{&state});
+    }
+    for (threads) |thread| thread.join();
+
+    try testing.expectEqual(
+        @as(u64, thread_count * increments_per_thread),
+        state.captureSnapshotChangeCount(),
+    );
 }

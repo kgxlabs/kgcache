@@ -56,22 +56,26 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
         if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
-    var succeeded = false;
-    defer {
+    errdefer {
         var state_tx = self._persistence_state.beginUncancelable();
         defer state_tx.end();
-        if (succeeded) self._persistence_state.clearBgsaveCooldown();
         self._persistence_state.finishKgc();
     }
 
     try self.dump(storages);
-    succeeded = true;
+    var state_tx = self._persistence_state.begin() catch return Snapshot.Error.UnableToSave;
+    defer state_tx.end();
+
+    const captured_change_count = self._persistence_state.captureSnapshotChangeCount();
+    self._persistence_state.markSaved(captured_change_count, time.nowMs(self._io)) catch return Snapshot.Error.UnableToSave;
+    self._persistence_state.clearBgsaveCooldown();
+    self._persistence_state.finishKgc();
 }
 
 // only hold short lock session so we dont hold the lock while fork
 // Finishing this does not mean, saving succeeded.
 // It just means forking completed
-pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count: u64, origin: Store.TriggerOrigin) Snapshot.Error!void {
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) Snapshot.Error!void {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
     {
@@ -123,6 +127,7 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, snapshot_change_count:
     var state_tx = self._persistence_state.beginUncancelable();
     defer state_tx.end();
 
+    const snapshot_change_count = self._persistence_state.captureSnapshotChangeCount();
     self._persistence_state.setInFlightKgcSave(.{
         .pid = pid,
         .captured_change_count = snapshot_change_count,
@@ -305,7 +310,7 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
         persistence_state.finishKgc();
     }
 
-    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, 0, .manual));
+    try testing.expectError(Snapshot.Error.SaveAlreadyInProgress, backend_instance.snapshot().bgsave(&.{}, .manual));
 
     // no fork should have happened -- no pid was ever recorded
     var state_tx = try persistence_state.begin();
@@ -383,7 +388,7 @@ test "successful automatic background save clears cooldown and produces a loadab
     {
         var tx = try backend_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{backend_storage}, 0, .automatic);
+        try backend_instance.snapshot().bgsave(&.{backend_storage}, .automatic);
     }
     {
         var state_tx = try persistence_state.begin();
@@ -399,7 +404,8 @@ test "successful automatic background save clears cooldown and produces a loadab
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result.status);
     {
