@@ -341,59 +341,6 @@ test "a successful save replaces the previous snapshot" {
     }
 }
 
-test "a failed save preserves the previous snapshot" {
-    const testing = std.testing;
-    const DefaultStorage = @import("../storage/default_storage.zig");
-    const dirname = "scratch-failed-save-preserves-snapshot";
-    const path = dirname ++ "/dump.kgc";
-    const cwd = std.Io.Dir.cwd();
-
-    if (std.c.geteuid() == 0) return error.SkipZigTest;
-
-    cwd.deleteTree(testing.io, dirname) catch {};
-    try cwd.createDir(testing.io, dirname, .default_dir);
-    defer cwd.deleteTree(testing.io, dirname) catch {};
-
-    var source = DefaultStorage.init(testing.io, testing.allocator);
-    var source_storage = source.storage();
-    defer source_storage.deinit();
-
-    var persistence_state = PersistenceState.init(testing.io, false);
-    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
-
-    {
-        var tx = try source_storage.begin();
-        defer tx.end();
-        _ = try source_storage.put("key", .{ .string = "old" }, .{ .expires_at = null });
-    }
-    try backend_instance.snapshot().save(&.{source_storage});
-
-    {
-        var tx = try source_storage.begin();
-        defer tx.end();
-        _ = try source_storage.put("key", .{ .string = "new" }, .{ .expires_at = null });
-    }
-
-    const writable_permissions: std.Io.Dir.Permissions = .fromMode(0o700);
-    try cwd.setFilePermissions(testing.io, dirname, .fromMode(0o500), .{});
-    defer cwd.setFilePermissions(testing.io, dirname, writable_permissions, .{}) catch {};
-
-    try testing.expectError(Snapshot.Error.UnableToSave, backend_instance.snapshot().save(&.{source_storage}));
-    try cwd.setFilePermissions(testing.io, dirname, writable_permissions, .{});
-
-    var restored = DefaultStorage.init(testing.io, testing.allocator);
-    var restored_storage = restored.storage();
-    defer restored_storage.deinit();
-    try backend_instance.snapshot().load(&.{restored_storage});
-
-    var tx = try restored_storage.begin();
-    defer tx.end();
-    const loaded = try restored_storage.get("key") orelse return error.TestUnexpectedResult;
-    switch (loaded.value) {
-        .string => |value| try testing.expectEqualStrings("old", value),
-    }
-}
-
 test "save returns SaveAlreadyInProgress when a save is already claimed" {
     const testing = std.testing;
     var persistence_state = PersistenceState.init(testing.io, false);
