@@ -204,8 +204,10 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
         defer state_tx.end();
         if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
     }
+
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
     var child_started = false;
+
     errdefer |err| {
         if (!child_started) {
             var state_tx = self._persistence_state.beginUncancelable();
@@ -235,6 +237,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
         dir,
         manifest_name,
     ) catch return error.FailedToReadManifest;
+
     if (maybe_manifest == null) {
         helpers.logStdout(self._io, "aof: cannot find existing manifest file: {s}\n", .{@errorName(Journal.Error.FailedToRewriteAof)});
         return error.FailedToRewriteAof;
@@ -520,6 +523,7 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
 
     const live_incr = Manifest.liveIncr(manifest) orelse
         return Journal.Error.FailedToRewriteAof;
+
     if (live_incr.seq != self._incr_seq or live_incr.seq != base_seq + 1) {
         return Journal.Error.FailedToRewriteAof;
     }

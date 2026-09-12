@@ -173,17 +173,40 @@ fn endDump(self: *KgcBackend) Snapshot.Error!void {
     defer self._encoder = null;
 
     encoder.writeFooter() catch return Snapshot.Error.UnableToSave;
-    self.writeToDisk(encoder.bytes()) catch return Snapshot.Error.UnableToSave;
+
+    const cwd = std.Io.Dir.cwd();
+    // write and fsync to temporary dump file
+    const tmp_file_name = self.tmpFileName() catch return Snapshot.Error.UnableToSave;
+    defer self._allocator.free(tmp_file_name);
+    errdefer cwd.deleteFile(self._io, tmp_file_name) catch {};
+
+    // NOTE: we must put this into separate block
+    // because closing first is clearer even though POSIX permits renaming an open file.
+    // And this will save headaches for futures bugs on platforms like Window
+    {
+        var file = cwd.createFile(self._io, tmp_file_name, .{}) catch return Snapshot.Error.UnableToSave;
+        defer file.close(self._io);
+
+        self.writeToDisk(file, encoder.bytes()) catch return Snapshot.Error.UnableToSave;
+        file.sync(self._io) catch return Snapshot.Error.UnableToSave;
+    }
+
+    cwd.rename(tmp_file_name, cwd, self._path, self._io) catch return Snapshot.Error.UnableToSave;
+
+    // TODO: we still need to sync parent dir because power loss immediately after rename could lose new dir metdata change (aka rename)
+    // but Zig (0.16.0) does not have directory level sync.
+    // This issue is tracked here: https://github.com/kgxlabs/kgcache/issues/64
 }
 
-fn writeToDisk(self: *KgcBackend, data: []const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(self._io, self._path, .{});
-    defer file.close(self._io);
-
+fn writeToDisk(self: *KgcBackend, file: std.Io.File, data: []const u8) !void {
     var buffer: [4096]u8 = undefined;
     var file_writer = file.writer(self._io, &buffer);
     try file_writer.interface.writeAll(data);
     try file_writer.flush();
+}
+
+fn tmpFileName(self: *KgcBackend) ![]u8 {
+    return std.fmt.allocPrint(self._allocator, "{s}.tmp", .{self._path});
 }
 
 pub fn load(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
@@ -273,6 +296,102 @@ test "load rejects a file that isn't a valid .kgc dump" {
     var persistence_state = PersistenceState.init(testing.io, false);
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "corrupted-on-purpose.kgc");
     try testing.expectError(Snapshot.Error.UnableToLoad, backend_instance.snapshot().load(&.{backend_storage}));
+}
+
+test "a successful save replaces the previous snapshot" {
+    const testing = std.testing;
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const path = "scratch-save-replaces-snapshot.kgc";
+    const cwd = std.Io.Dir.cwd();
+
+    cwd.deleteFile(testing.io, path) catch {};
+    defer cwd.deleteFile(testing.io, path) catch {};
+
+    var source = DefaultStorage.init(testing.io, testing.allocator);
+    var source_storage = source.storage();
+    defer source_storage.deinit();
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
+
+    {
+        var tx = try source_storage.begin();
+        defer tx.end();
+        _ = try source_storage.put("key", .{ .string = "old" }, .{ .expires_at = null });
+    }
+    try backend_instance.snapshot().save(&.{source_storage});
+
+    {
+        var tx = try source_storage.begin();
+        defer tx.end();
+        _ = try source_storage.put("key", .{ .string = "new" }, .{ .expires_at = null });
+    }
+    try backend_instance.snapshot().save(&.{source_storage});
+
+    var restored = DefaultStorage.init(testing.io, testing.allocator);
+    var restored_storage = restored.storage();
+    defer restored_storage.deinit();
+    try backend_instance.snapshot().load(&.{restored_storage});
+
+    var tx = try restored_storage.begin();
+    defer tx.end();
+    const loaded = try restored_storage.get("key") orelse return error.TestUnexpectedResult;
+    switch (loaded.value) {
+        .string => |value| try testing.expectEqualStrings("new", value),
+    }
+}
+
+test "a failed save preserves the previous snapshot" {
+    const testing = std.testing;
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const dirname = "scratch-failed-save-preserves-snapshot";
+    const path = dirname ++ "/dump.kgc";
+    const cwd = std.Io.Dir.cwd();
+
+    if (std.c.geteuid() == 0) return error.SkipZigTest;
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    try cwd.createDir(testing.io, dirname, .default_dir);
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var source = DefaultStorage.init(testing.io, testing.allocator);
+    var source_storage = source.storage();
+    defer source_storage.deinit();
+
+    var persistence_state = PersistenceState.init(testing.io, false);
+    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
+
+    {
+        var tx = try source_storage.begin();
+        defer tx.end();
+        _ = try source_storage.put("key", .{ .string = "old" }, .{ .expires_at = null });
+    }
+    try backend_instance.snapshot().save(&.{source_storage});
+
+    {
+        var tx = try source_storage.begin();
+        defer tx.end();
+        _ = try source_storage.put("key", .{ .string = "new" }, .{ .expires_at = null });
+    }
+
+    const writable_permissions: std.Io.Dir.Permissions = .fromMode(0o700);
+    try cwd.setFilePermissions(testing.io, dirname, .fromMode(0o500), .{});
+    defer cwd.setFilePermissions(testing.io, dirname, writable_permissions, .{}) catch {};
+
+    try testing.expectError(Snapshot.Error.UnableToSave, backend_instance.snapshot().save(&.{source_storage}));
+    try cwd.setFilePermissions(testing.io, dirname, writable_permissions, .{});
+
+    var restored = DefaultStorage.init(testing.io, testing.allocator);
+    var restored_storage = restored.storage();
+    defer restored_storage.deinit();
+    try backend_instance.snapshot().load(&.{restored_storage});
+
+    var tx = try restored_storage.begin();
+    defer tx.end();
+    const loaded = try restored_storage.get("key") orelse return error.TestUnexpectedResult;
+    switch (loaded.value) {
+        .string => |value| try testing.expectEqualStrings("old", value),
+    }
 }
 
 test "save returns SaveAlreadyInProgress when a save is already claimed" {
