@@ -173,17 +173,40 @@ fn endDump(self: *KgcBackend) Snapshot.Error!void {
     defer self._encoder = null;
 
     encoder.writeFooter() catch return Snapshot.Error.UnableToSave;
-    self.writeToDisk(encoder.bytes()) catch return Snapshot.Error.UnableToSave;
+
+    const cwd = std.Io.Dir.cwd();
+    // write and fsync to temporary dump file
+    const tmp_file_name = self.tmpFileName() catch return Snapshot.Error.UnableToSave;
+    defer self._allocator.free(tmp_file_name);
+    errdefer cwd.deleteFile(self._io, tmp_file_name) catch {};
+
+    // NOTE: we must put this into separate block
+    // because closing first is clearer even though POSIX permits renaming an open file.
+    // And this will save headaches for futures bugs on platforms like Window
+    {
+        var file = cwd.createFile(self._io, tmp_file_name, .{}) catch return Snapshot.Error.UnableToSave;
+        defer file.close(self._io);
+
+        self.writeToDisk(file, encoder.bytes()) catch return Snapshot.Error.UnableToSave;
+        file.sync(self._io) catch return Snapshot.Error.UnableToSave;
+    }
+
+    cwd.rename(tmp_file_name, cwd, self._path, self._io) catch return Snapshot.Error.UnableToSave;
+
+    // TODO: we still need to sync parent dir because power loss immediately after rename could lose new dir metdata change (aka rename)
+    // but Zig (0.16.0) does not have directory level sync.
+    // This issue is tracked here: https://github.com/kgxlabs/kgcache/issues/64
 }
 
-fn writeToDisk(self: *KgcBackend, data: []const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(self._io, self._path, .{});
-    defer file.close(self._io);
-
+fn writeToDisk(self: *KgcBackend, file: std.Io.File, data: []const u8) !void {
     var buffer: [4096]u8 = undefined;
     var file_writer = file.writer(self._io, &buffer);
     try file_writer.interface.writeAll(data);
     try file_writer.flush();
+}
+
+fn tmpFileName(self: *KgcBackend) ![]u8 {
+    return std.fmt.allocPrint(self._allocator, "{s}.tmp", .{self._path});
 }
 
 pub fn load(ptr: *anyopaque, storages: []const Storage) Snapshot.Error!void {
