@@ -1498,7 +1498,8 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
                 reap_result = state.reapAof();
                 state_tx.end();
                 tries += 1;
-                if (tries > 100_000) return error.ChildNeverReaped;
+                if (tries > 10_000) return error.ChildNeverReaped;
+                try testing.io.sleep(.fromMilliseconds(1), .awake);
             }
             try testing.expectEqual(PersistenceState.ReapResult.succeeded, reap_result);
 

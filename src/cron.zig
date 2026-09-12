@@ -402,7 +402,8 @@ test "triggerRewriteIfDue starts a rewrite when the rule is met" {
         result = state.reapAof();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     var tx = try journal.begin();
     defer tx.end();
@@ -518,7 +519,8 @@ test "a completed background save preserves changes made after its snapshot chan
         _ = try finishKgcIfCompleted(testing.io, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
 
     try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
@@ -582,7 +584,8 @@ test "a failed background save leaves changes dirty" {
         _ = try finishKgcIfCompleted(testing.io, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
 
     try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
@@ -632,7 +635,8 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
         _ = try finishKgcIfCompleted(testing.io, &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
 }
 

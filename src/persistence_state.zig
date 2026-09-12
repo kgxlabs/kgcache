@@ -460,7 +460,8 @@ test "reapKgc reports running until background save completes" {
         }
         tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(ReapResult.succeeded, result.status);
     try testing.expectEqual(17, result.saved_change_count.?);
@@ -528,7 +529,8 @@ test "failed manual background save preserves cooldown and allows a later save" 
         if (result.status != .running) state.finishKgc();
         tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(ReapResult.failed, result.status);
     try testing.expect(result.saved_change_count == null);

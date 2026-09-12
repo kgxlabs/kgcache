@@ -670,7 +670,8 @@ test "AOF rewrite reports progress until completion and replays writes" {
         result = persistence_state.reapAof();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
     {
@@ -739,7 +740,8 @@ test "concurrent AOF rewrite and writes replay to the final value" {
         result = persistence_state.reapAof();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
 
@@ -797,7 +799,8 @@ test "concurrent KGC snapshot contains one complete submitted value" {
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result.status);
 
@@ -878,7 +881,8 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
         result = persistence_state.reapAof();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result);
     {
@@ -955,7 +959,8 @@ test "KGC bgsave waits for active Storage work and preserves all databases" {
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result.status);
 

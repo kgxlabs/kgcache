@@ -404,7 +404,8 @@ test "successful automatic background save clears cooldown and produces a loadab
         if (result.status != .running) persistence_state.finishKgc();
         state_tx.end();
         tries += 1;
-        if (tries > 100_000) return error.ChildNeverReaped;
+        if (tries > 10_000) return error.ChildNeverReaped;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, result.status);
     {
