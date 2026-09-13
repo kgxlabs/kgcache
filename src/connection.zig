@@ -4,16 +4,40 @@ const commander = @import("commander.zig");
 const ClientState = @import("client_state.zig");
 const store = @import("store.zig");
 const Config = @import("config.zig");
+const logging = @import("logger.zig");
 
-pub fn acceptLoop(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store, con_allocator: std.mem.Allocator, config: Config) !void {
+pub fn acceptLoop(
+    io: std.Io,
+    logger: logging.Logger,
+    server: *std.Io.net.Server,
+    data_store: *store.Store,
+    con_allocator: std.mem.Allocator,
+    config: Config,
+) !void {
     while (true) {
         const connection = try server.accept(io);
-        const handle_thread = try std.Thread.spawn(.{}, handle, .{ io, connection, data_store, con_allocator, config.connection_buffer_size });
+        const handle_thread = try std.Thread.spawn(.{}, handle, .{
+            io,
+            logger,
+            connection,
+            data_store,
+            con_allocator,
+            config.connection_buffer_size,
+        });
         handle_thread.detach();
     }
 }
 
-pub fn handle(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Store, con_allocator: std.mem.Allocator, connection_buffer_size: usize) !void {
+pub fn handle(
+    io: std.Io,
+    logger: logging.Logger,
+    connection: std.Io.net.Stream,
+    data_store: *store.Store,
+    con_allocator: std.mem.Allocator,
+    connection_buffer_size: usize,
+) !void {
+    // Work item 2 uses this logger at the connection terminal catches.
+    _ = logger;
     defer connection.close(io);
 
     var client_state = ClientState.init();

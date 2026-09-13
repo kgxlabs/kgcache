@@ -2,6 +2,9 @@ const std = @import("std");
 
 const Logger = @This();
 
+// Logger is a borrowed handle. Its implementation must outlive every call.
+// Application, cron, and connection threads may call the same implementation
+// concurrently, so sinks must make access to mutable state thread-safe.
 ptr: *anyopaque,
 vtable: *const VTable,
 

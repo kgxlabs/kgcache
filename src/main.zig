@@ -4,6 +4,7 @@ const Server = @import("server.zig");
 const logging = @import("logger.zig");
 
 pub fn main(init: std.process.Init) !void {
+    // Server borrows this logger. Keep its storage alive for the full Server lifetime.
     var default_logger = logging.DefaultLogger.init(init.io);
     const logger = default_logger.logger();
 

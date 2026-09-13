@@ -7,9 +7,11 @@ const Config = @import("config.zig");
 const expiration = @import("expiration.zig");
 const time = @import("time.zig");
 const Lock = @import("lock.zig");
+const logging = @import("logger.zig");
 
 pub fn run(
     io: std.Io,
+    logger: logging.Logger,
     allocator: std.mem.Allocator,
     data_storages: []const storage.Interface,
     persistence_state: *PersistenceState,
@@ -18,6 +20,7 @@ pub fn run(
     config: Config,
     stop_requested: *const std.atomic.Value(bool),
 ) !void {
+    _ = logger;
     const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
     var start: usize = 0;
 
