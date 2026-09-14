@@ -36,7 +36,15 @@ pub fn handle(
     con_allocator: std.mem.Allocator,
     connection_buffer_size: usize,
 ) void {
-    handleConnection(io, connection, data_store, con_allocator, connection_buffer_size) catch |err| {
+    defer connection.close(io);
+
+    const buf = con_allocator.alloc(u8, connection_buffer_size) catch |err| {
+        logger.err(err, @errorReturnTrace());
+        return;
+    };
+    defer con_allocator.free(buf);
+
+    handleConnection(io, connection, data_store, buf) catch |err| {
         logger.err(err, @errorReturnTrace());
     };
 }
@@ -45,15 +53,9 @@ fn handleConnection(
     io: std.Io,
     connection: std.Io.net.Stream,
     data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    connection_buffer_size: usize,
+    buf: []u8,
 ) !void {
-    defer connection.close(io);
-
     var client_state = ClientState.init();
-
-    const buf = try con_allocator.alloc(u8, connection_buffer_size);
-    defer con_allocator.free(buf);
 
     while (true) {
         // TODO: use buffered writer
@@ -111,4 +113,44 @@ fn writeError(allocator: std.mem.Allocator, writer: *std.Io.Writer, serializer: 
     defer serializer.deinit(allocator, serialized_value);
 
     try writer.writeAll(serialized_value);
+}
+
+test "buffer allocation failure is reported once and closes the connection" {
+    const CloseRecorder = struct {
+        calls: usize = 0,
+
+        fn close(userdata: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.calls += handles.len;
+        }
+    };
+
+    var close_recorder: CloseRecorder = .{};
+    var io_vtable = std.testing.io.vtable.*;
+    io_vtable.netClose = CloseRecorder.close;
+    const io: std.Io = .{
+        .userdata = &close_recorder,
+        .vtable = &io_vtable,
+    };
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 0,
+    });
+    var test_logger = logging.TestLogger.init();
+    var unused_store: store.Store = undefined;
+
+    handle(
+        io,
+        test_logger.logger(),
+        .{ .socket = .{ .handle = 1, .address = undefined } },
+        &unused_store,
+        failing_allocator.allocator(),
+        1024,
+    );
+
+    const events = test_logger.recordedEvents();
+    try std.testing.expectEqual(1, events.len);
+    try std.testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+    try std.testing.expectEqual(error.OutOfMemory, events[0].source.?);
+    try std.testing.expectEqual(1, close_recorder.calls);
 }
