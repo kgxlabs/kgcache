@@ -35,9 +35,19 @@ pub fn handle(
     data_store: *store.Store,
     con_allocator: std.mem.Allocator,
     connection_buffer_size: usize,
+) void {
+    handleConnection(io, connection, data_store, con_allocator, connection_buffer_size) catch |err| {
+        logger.err(err, @errorReturnTrace());
+    };
+}
+
+fn handleConnection(
+    io: std.Io,
+    connection: std.Io.net.Stream,
+    data_store: *store.Store,
+    con_allocator: std.mem.Allocator,
+    connection_buffer_size: usize,
 ) !void {
-    // Work item 2 uses this logger at the connection terminal catches.
-    _ = logger;
     defer connection.close(io);
 
     var client_state = ClientState.init();
