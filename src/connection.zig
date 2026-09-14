@@ -16,14 +16,17 @@ pub fn acceptLoop(
 ) !void {
     while (true) {
         const connection = try server.accept(io);
-        const handle_thread = try std.Thread.spawn(.{}, handle, .{
+        const handle_thread = std.Thread.spawn(.{}, handle, .{
             io,
             logger,
             connection,
             data_store,
             con_allocator,
             config.connection_buffer_size,
-        });
+        }) catch |err| {
+            connection.close(io);
+            return err;
+        };
         handle_thread.detach();
     }
 }
@@ -97,6 +100,9 @@ fn handleConnection(
         // TODO: There is a potential memory leak when error occurs.
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
         // How do we handle that scenario to free the memory?
+
+        // TODO: Some commands still return internal failures as successful RESP error values.
+        // make those failures reach this catch for reporting.
         const result = c.execute(io, data_store, &client_state) catch |err| {
             if (commander.executeErrorResponse(err)) |response| {
                 try connection_writer.interface.writeAll(response);
@@ -108,7 +114,8 @@ fn handleConnection(
             return;
         };
 
-        const serialized_result = serializer.serialize(req_allocator, result) catch {
+        const serialized_result = serializer.serialize(req_allocator, result) catch |err| {
+            logger.err(err, @errorReturnTrace());
             try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
             return;
         };
