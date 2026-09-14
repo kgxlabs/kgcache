@@ -63,8 +63,12 @@ fn handleConnection(
         var data = [_][]u8{buf};
 
         // TODO: We are directly doing syscall to OS which is expensive. Refactor this to use buffered reader
-        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch break;
-        if (bytes_read == 0) break;
+        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| switch (err) {
+            error.ConnectionResetByPeer => return,
+            else => return err,
+        };
+
+        if (bytes_read == 0) return;
 
         var gpa: std.heap.DebugAllocator(.{}) = .init;
         defer _ = gpa.deinit();
@@ -77,7 +81,7 @@ fn handleConnection(
         // This is the scenario: error can happens when parsing Array type and there are some array items already allocated.
         // We don't need to worry about that because we already errdefer it in parser implementation
         const commands = parser.parse(req_allocator) catch |err| {
-            try writeError(req_allocator, &connection_writer.interface, serializer, resp.errorToRESPValue(err));
+            try connection_writer.interface.writeAll(resp.protocolErrorResponse(err));
             return;
         };
         defer parser.deinit(req_allocator, commands);

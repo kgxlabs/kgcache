@@ -353,15 +353,23 @@ fn isToken(data: []const u8, token: []const u8) bool {
     return std.mem.eql(u8, data, token);
 }
 
-pub fn errorToRESPValue(err: RESPError) RESPValue {
+pub fn protocolErrorResponse(err: RESPError) []const u8 {
     return switch (err) {
-        error.Incomplete => .{ .simple_error = "ERR protocol error: incomplete request" },
-        error.MalformedSize => .{ .simple_error = "ERR protocol error: malformed size" },
-        error.InvalidType => .{ .simple_error = "ERR protocol error: invalid RESP type" },
-        error.IncorrectToken => .{ .simple_error = "ERR protocol error: incorrect token" },
-        error.NotInteger => .{ .simple_error = "ERR protocol error: invalid integer" },
-        error.Malformed => .{ .simple_error = "ERR protocol error: malformed request" },
-        else => .{ .simple_error = "ERR protocol error" },
+        error.Incomplete => "-ERR protocol error: incomplete request\r\n",
+        error.MalformedSize => "-ERR protocol error: malformed size\r\n",
+        error.InvalidType => "-ERR protocol error: invalid RESP type\r\n",
+        error.IncorrectToken => "-ERR protocol error: incorrect token\r\n",
+        error.NotInteger => "-ERR protocol error: invalid integer\r\n",
+        error.Malformed => "-ERR protocol error: malformed request\r\n",
+        error.NotArray,
+        error.NotCRLF,
+        error.NotBulkString,
+        error.ExceededSize,
+        error.TooLong,
+        error.UnknownType,
+        error.SomethingWentWrong,
+        error.WrongNumberOfArgument,
+        => "-ERR protocol error\r\n",
     };
 }
 
