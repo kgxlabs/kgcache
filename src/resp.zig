@@ -353,7 +353,7 @@ fn isToken(data: []const u8, token: []const u8) bool {
     return std.mem.eql(u8, data, token);
 }
 
-pub fn protocolErrorResponse(err: RESPError) []const u8 {
+pub fn parseErrorResponse(err: RESPError) []const u8 {
     return switch (err) {
         error.Incomplete => "-ERR protocol error: incomplete request\r\n",
         error.MalformedSize => "-ERR protocol error: malformed size\r\n",

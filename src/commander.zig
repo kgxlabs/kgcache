@@ -72,22 +72,44 @@ fn create(comptime T: type, allocator: std.mem.Allocator, arguments: []resp.RESP
     return implementation.commander();
 }
 
-pub fn errorToRESPValue(err: Error) resp.RESPValue {
+// if it is not command input related error, propagate it
+pub fn initErrorResponse(err: Error) ?[]const u8 {
     return switch (err) {
-        error.UnknownCommand => .{ .simple_error = "ERR unknown command" },
-        error.UnsupportedKeyword => .{ .simple_error = "ERR unsupported command keyword" },
-        error.UnsupportedArgumentType => .{ .simple_error = "ERR unsupported argument type" },
-        error.MalformedCommandRequest => .{ .simple_error = "ERR malformed command request" },
-        error.WrongNumberArguments => .{ .simple_error = "ERR wrong number of arguments" },
-        error.UnableToConvertObject => .{ .simple_error = "ERR unable to conver object" },
-        error.OutOfMemory => .{ .simple_error = "ERR out of memory" },
-        error.UnsupportedOption => .{ .simple_error = "ERR unsupported option" },
-        error.Syntax => .{ .simple_error = "ERR syntax error" },
-        error.UnableToSaveKgc => .{ .simple_error = "ERR unable to save kgc" },
-        error.UnableToDoBackgroundSaveKgc => .{ .simple_error = "ERR unable to do kgc background save" },
-        error.UnableRewriteAof => .{ .simple_error = "ERR unable to rewrite aof" },
-        error.AofDisabled => .{ .simple_error = "ERR AOF is disabled" },
-        error.SomethingWentWrong => .{ .simple_error = "ERR something went wrong" },
+        error.UnknownCommand => "-ERR unknown command\r\n",
+        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
+        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
+        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
+        error.OutOfMemory,
+        error.WrongNumberArguments,
+        error.UnableToConvertObject,
+        error.UnsupportedOption,
+        error.Syntax,
+        error.SomethingWentWrong,
+        error.UnableToSaveKgc,
+        error.UnableToDoBackgroundSaveKgc,
+        error.UnableRewriteAof,
+        error.AofDisabled,
+        => null,
+    };
+}
+
+pub fn executeErrorResponse(err: Error) ?[]const u8 {
+    return switch (err) {
+        error.UnknownCommand => "-ERR unknown command\r\n",
+        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
+        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
+        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
+        error.WrongNumberArguments => "-ERR wrong number of arguments\r\n",
+        error.UnsupportedOption => "-ERR unsupported option\r\n",
+        error.Syntax => "-ERR syntax error\r\n",
+        error.AofDisabled => "-ERR AOF is disabled\r\n",
+        error.OutOfMemory,
+        error.UnableToConvertObject,
+        error.SomethingWentWrong,
+        error.UnableToSaveKgc,
+        error.UnableToDoBackgroundSaveKgc,
+        error.UnableRewriteAof,
+        => null,
     };
 }
 

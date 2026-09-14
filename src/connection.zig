@@ -44,13 +44,14 @@ pub fn handle(
     };
     defer con_allocator.free(buf);
 
-    handleConnection(io, connection, data_store, buf) catch |err| {
+    handleConnection(io, logger, connection, data_store, buf) catch |err| {
         logger.err(err, @errorReturnTrace());
     };
 }
 
 fn handleConnection(
     io: std.Io,
+    logger: logging.Logger,
     connection: std.Io.net.Stream,
     data_store: *store.Store,
     buf: []u8,
@@ -81,14 +82,15 @@ fn handleConnection(
         // This is the scenario: error can happens when parsing Array type and there are some array items already allocated.
         // We don't need to worry about that because we already errdefer it in parser implementation
         const commands = parser.parse(req_allocator) catch |err| {
-            try connection_writer.interface.writeAll(resp.protocolErrorResponse(err));
+            try connection_writer.interface.writeAll(resp.parseErrorResponse(err));
             return;
         };
         defer parser.deinit(req_allocator, commands);
 
         const c = commander.init(req_allocator, commands) catch |err| {
-            try writeError(req_allocator, &connection_writer.interface, serializer, commander.errorToRESPValue(err));
-            return;
+            const response = commander.initErrorResponse(err) orelse return err;
+            try connection_writer.interface.writeAll(response);
+            continue;
         };
         defer c.deinit();
 
@@ -96,7 +98,13 @@ fn handleConnection(
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
         // How do we handle that scenario to free the memory?
         const result = c.execute(io, data_store, &client_state) catch |err| {
-            try writeError(req_allocator, &connection_writer.interface, serializer, commander.errorToRESPValue(err));
+            if (commander.executeErrorResponse(err)) |response| {
+                try connection_writer.interface.writeAll(response);
+                continue;
+            }
+
+            logger.err(err, @errorReturnTrace());
+            try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
             return;
         };
 
@@ -110,13 +118,6 @@ fn handleConnection(
         // Write serialized string
         try connection_writer.interface.writeAll(serialized_result);
     }
-}
-
-fn writeError(allocator: std.mem.Allocator, writer: *std.Io.Writer, serializer: resp.Serializer, err_value: resp.RESPValue) !void {
-    const serialized_value = try serializer.serialize(allocator, err_value);
-    defer serializer.deinit(allocator, serialized_value);
-
-    try writer.writeAll(serialized_value);
 }
 
 test "buffer allocation failure is reported once and closes the connection" {
