@@ -19,20 +19,29 @@ pub fn run(
     maybe_aof: ?persistence.JournalPersistence,
     config: Config,
     stop_requested: *const std.atomic.Value(bool),
-) !void {
-    _ = logger;
+) void {
     const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
     var start: usize = 0;
 
     while (!stop_requested.load(.acquire)) {
-        try io.sleep(round_duration, .awake);
+        io.sleep(round_duration, .awake) catch |err| {
+            logger.err(err, @errorReturnTrace());
+            return;
+        };
         if (stop_requested.load(.acquire)) return;
 
-        start = try expiration.runRound(io, allocator, data_storages, start, config);
+        const next_start = expiration.runRound(io, allocator, data_storages, start, config) catch |err| {
+            logger.err(err, @errorReturnTrace());
+            continue;
+        };
+        start = next_start;
 
         // clean up forked child processes if any
         {
-            var state_tx = try persistence_state.begin();
+            var state_tx = persistence_state.begin() catch |err| {
+                logger.err(err, @errorReturnTrace());
+                return;
+            };
             defer state_tx.end();
             const completed_save = persistence_state.reapKgc(time.nowMs(io));
             _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch {
@@ -45,7 +54,10 @@ pub fn run(
         if (maybe_aof) |aof| {
             flushAofIfDue(io, aof);
             const aof_result = blk: {
-                var state_tx = try persistence_state.begin();
+                var state_tx = persistence_state.begin() catch |err| {
+                    logger.err(err, @errorReturnTrace());
+                    return;
+                };
                 defer state_tx.end();
                 break :blk persistence_state.reapAof();
             };
