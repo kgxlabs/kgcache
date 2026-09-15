@@ -42,13 +42,13 @@ pub fn handle(
     defer connection.close(io);
 
     const buf = con_allocator.alloc(u8, connection_buffer_size) catch |err| {
-        logger.err(err, @errorReturnTrace());
+        logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
         return;
     };
     defer con_allocator.free(buf);
 
     handleConnection(io, logger, connection, data_store, buf) catch |err| {
-        logger.err(err, @errorReturnTrace());
+        logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
 }
 
@@ -109,13 +109,13 @@ fn handleConnection(
                 continue;
             }
 
-            logger.err(err, @errorReturnTrace());
+            logger.err("connection: command execution failed", err, @errorReturnTrace());
             try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
             return;
         };
 
         const serialized_result = serializer.serialize(req_allocator, result) catch |err| {
-            logger.err(err, @errorReturnTrace());
+            logger.err("connection: response serialization failed", err, @errorReturnTrace());
             try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
             return;
         };

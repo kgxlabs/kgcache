@@ -74,7 +74,7 @@ fn log(ptr: *anyopaque, level: Logger.Level, message: []const u8) void {
     @memcpy(event.message_buffer[0..event.message_len], message[0..event.message_len]);
 }
 
-fn err(ptr: *anyopaque, source: anyerror, trace: Logger.ErrorTrace) void {
+fn err(ptr: *anyopaque, message: []const u8, source: anyerror, trace: Logger.ErrorTrace) void {
     const self: *TestLogger = @ptrCast(@alignCast(ptr));
     self.lock();
     defer self._mutex.unlock();
@@ -89,6 +89,9 @@ fn err(ptr: *anyopaque, source: anyerror, trace: Logger.ErrorTrace) void {
         else
             0,
     };
+
+    event.message_len = @min(message.len, max_message_len);
+    @memcpy(event.message_buffer[0..event.message_len], message[0..event.message_len]);
 }
 
 fn nextEvent(self: *TestLogger) ?*Event {

@@ -18,7 +18,7 @@ pub const ErrorTrace = ?*const std.builtin.StackTrace;
 
 pub const VTable = struct {
     log: *const fn (*anyopaque, Level, []const u8) void,
-    err: *const fn (*anyopaque, anyerror, ErrorTrace) void,
+    err: *const fn (*anyopaque, []const u8, anyerror, ErrorTrace) void,
 };
 
 pub fn log(self: Logger, level: Level, message: []const u8) void {
@@ -39,6 +39,6 @@ pub fn warn(self: Logger, message: []const u8) void {
 
 // Error traces show the return path, not whether an operation partially succeeded.
 /// Sinks must consume the trace during this call and must not retain its pointer.
-pub fn err(self: Logger, source: anyerror, trace: ErrorTrace) void {
-    self.vtable.err(self.ptr, source, trace);
+pub fn err(self: Logger, message: []const u8, source: anyerror, trace: ErrorTrace) void {
+    self.vtable.err(self.ptr, message, source, trace);
 }

@@ -25,28 +25,29 @@ pub fn run(
 
     while (!stop_requested.load(.acquire)) {
         io.sleep(round_duration, .awake) catch |err| {
-            logger.err(err, @errorReturnTrace());
+            logger.err("cron: sleep failed", err, @errorReturnTrace());
             return;
         };
         if (stop_requested.load(.acquire)) return;
 
         const next_start = expiration.runRound(io, allocator, data_storages, start, config) catch |err| {
-            logger.err(err, @errorReturnTrace());
+            logger.err("cron: expiration round failed", err, @errorReturnTrace());
             continue;
         };
+        // on success of exp round, advance to next db
         start = next_start;
 
         // clean up forked child processes if any
         {
             var state_tx = persistence_state.begin() catch |err| {
-                logger.err(err, @errorReturnTrace());
+                logger.err("cron: failed to begin KGC completion session", err, @errorReturnTrace());
                 return;
             };
             defer state_tx.end();
+
             const completed_save = persistence_state.reapKgc(time.nowMs(io));
-            _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch {
-                const message = "kgcache: failed to account for completed background save\n";
-                std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+            _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch |err| {
+                logger.err("cron: failed to account for completed background save", err, @errorReturnTrace());
             };
         }
 
@@ -55,7 +56,7 @@ pub fn run(
             flushAofIfDue(io, aof);
             const aof_result = blk: {
                 var state_tx = persistence_state.begin() catch |err| {
-                    logger.err(err, @errorReturnTrace());
+                    logger.err("cron: failed to begin AOF completion session", err, @errorReturnTrace());
                     return;
                 };
                 defer state_tx.end();
