@@ -1,9 +1,18 @@
 const std = @import("std");
 const Logger = @import("interface.zig");
 
+/// Logger for normal application threads. It is not the fork-safe child sink
+/// required by persistence work.
 const DefaultLogger = @This();
 
 _io: std.Io,
+// Error events use several writes. Without serialization, output can interleave:
+//   [error] operation A failed: ErrorA
+//   [error] operation B failed: ErrorB
+//   error return trace:
+//     0xA
+// Keep every event's lines together.
+_mutex: std.Io.Mutex = .init,
 
 pub fn init(io: std.Io) DefaultLogger {
     return .{ ._io = io };
@@ -23,6 +32,8 @@ const vtable: Logger.VTable = .{
 
 fn log(ptr: *anyopaque, level: Logger.Level, message: []const u8) void {
     const self: *DefaultLogger = @ptrCast(@alignCast(ptr));
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
 
     var buffer: [256]u8 = undefined;
     const line = std.fmt.bufPrint(&buffer, "[{s}] {s}\n", .{ @tagName(level), message }) catch {
@@ -32,11 +43,13 @@ fn log(ptr: *anyopaque, level: Logger.Level, message: []const u8) void {
     self.writeStdout(line);
 }
 
-fn err(ptr: *anyopaque, source: anyerror, trace: Logger.ErrorTrace) void {
+fn err(ptr: *anyopaque, message: []const u8, source: anyerror, trace: Logger.ErrorTrace) void {
     const self: *DefaultLogger = @ptrCast(@alignCast(ptr));
+    self._mutex.lockUncancelable(self._io);
+    defer self._mutex.unlock(self._io);
 
     var error_buffer: [256]u8 = undefined;
-    const error_line = std.fmt.bufPrint(&error_buffer, "[error] {s}\n", .{@errorName(source)}) catch
+    const error_line = std.fmt.bufPrint(&error_buffer, "[error] {s}: {s}\n", .{ message, @errorName(source) }) catch
         "[error] unable to format error\n";
     self.writeStderr(error_line);
 

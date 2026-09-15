@@ -7,9 +7,11 @@ const Config = @import("config.zig");
 const expiration = @import("expiration.zig");
 const time = @import("time.zig");
 const Lock = @import("lock.zig");
+const logging = @import("logger.zig");
 
 pub fn run(
     io: std.Io,
+    logger: logging.Logger,
     allocator: std.mem.Allocator,
     data_storages: []const storage.Interface,
     persistence_state: *PersistenceState,
@@ -17,41 +19,58 @@ pub fn run(
     maybe_aof: ?persistence.JournalPersistence,
     config: Config,
     stop_requested: *const std.atomic.Value(bool),
-) !void {
+) void {
     const round_duration = std.Io.Duration.fromMilliseconds(config.cron_interval_ms);
     var start: usize = 0;
 
     while (!stop_requested.load(.acquire)) {
-        try io.sleep(round_duration, .awake);
+        io.sleep(round_duration, .awake) catch |err| {
+            if (err == error.Canceled and stop_requested.load(.acquire)) return;
+            logger.err("cron: sleep failed", err, @errorReturnTrace());
+            return;
+        };
         if (stop_requested.load(.acquire)) return;
 
-        start = try expiration.runRound(io, allocator, data_storages, start, config);
+        const next_start = expiration.runRound(io, allocator, data_storages, start, config) catch |err| {
+            logger.err("cron: expiration round failed", err, @errorReturnTrace());
+            continue;
+        };
+        // on success of exp round, advance to next db
+        start = next_start;
 
         // clean up forked child processes if any
         {
-            var state_tx = try persistence_state.begin();
+            var state_tx = persistence_state.begin() catch |err| {
+                if (err == error.Canceled and stop_requested.load(.acquire)) return;
+                logger.err("cron: failed to begin KGC completion session", err, @errorReturnTrace());
+                return;
+            };
             defer state_tx.end();
+
             const completed_save = persistence_state.reapKgc(time.nowMs(io));
-            _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch {
-                const message = "kgcache: failed to account for completed background save\n";
-                std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+            _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch |err| {
+                logger.err("cron: failed to account for completed background save", err, @errorReturnTrace());
             };
         }
 
         // clean up forked child processes and register for auto rewrite
         if (maybe_aof) |aof| {
-            flushAofIfDue(io, aof);
+            flushAofIfDue(io, logger, aof);
             const aof_result = blk: {
-                var state_tx = try persistence_state.begin();
+                var state_tx = persistence_state.begin() catch |err| {
+                    if (err == error.Canceled and stop_requested.load(.acquire)) return;
+                    logger.err("cron: failed to begin AOF completion session", err, @errorReturnTrace());
+                    return;
+                };
                 defer state_tx.end();
                 break :blk persistence_state.reapAof();
             };
-            finishAofIfCompleted(io, aof, aof_result);
-            triggerRewriteIfDue(io, aof, persistence_state, data_store, config);
+            finishAofIfCompleted(logger, aof, aof_result);
+            triggerRewriteIfDue(logger, aof, persistence_state, data_store, config);
         }
 
         triggerSaveIfDue(
-            io,
+            logger,
             data_store,
             persistence_state,
             time.nowMs(io),
@@ -77,39 +96,38 @@ fn finishKgcIfCompleted(
     return true;
 }
 
-fn flushAofIfDue(io: std.Io, aof: persistence.JournalPersistence) void {
-    var tx = aof.begin() catch return;
+fn flushAofIfDue(io: std.Io, logger: logging.Logger, aof: persistence.JournalPersistence) void {
+    var tx = aof.begin() catch |err| {
+        logger.err("cron: failed to begin AOF flush session", err, @errorReturnTrace());
+        return;
+    };
     defer tx.end();
 
-    aof.flush(time.nowMs(io)) catch {
-        const message = "kgcache: failed to flush AOF\n";
-        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+    aof.flush(time.nowMs(io)) catch |err| {
+        logger.err("cron: failed to flush AOF", err, @errorReturnTrace());
     };
 }
 
 fn finishAofIfCompleted(
-    io: std.Io,
+    logger: logging.Logger,
     aof: persistence.JournalPersistence,
     reap_result: PersistenceState.ReapResult,
 ) void {
     if (reap_result == .running) return;
 
-    var tx = aof.begin() catch return;
+    var tx = aof.begin() catch |err| {
+        logger.err("cron: failed to begin AOF rewrite completion session", err, @errorReturnTrace());
+        return;
+    };
     defer tx.end();
 
     aof.finishRewrite(reap_result) catch |err| {
-        var buf: [160]u8 = undefined;
-        const message = std.fmt.bufPrint(
-            &buf,
-            "kgcache: failed to finish AOF rewrite: {s}\n",
-            .{@errorName(err)},
-        ) catch "kgcache: failed to finish AOF rewrite\n";
-        std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+        logger.err("cron: failed to finish AOF rewrite", err, @errorReturnTrace());
     };
 }
 
 fn triggerSaveIfDue(
-    io: std.Io,
+    logger: logging.Logger,
     data_store: *store.Store,
     persistence_state: *PersistenceState,
     now_ms: time.UnixMs,
@@ -118,7 +136,10 @@ fn triggerSaveIfDue(
     if (!persistence_state.dueForSave(now_ms, config.save_rules)) return;
 
     {
-        var state_tx = persistence_state.begin() catch return;
+        var state_tx = persistence_state.begin() catch |err| {
+            logger.err("cron: failed to begin background save cooldown check", err, @errorReturnTrace());
+            return;
+        };
         defer state_tx.end();
         if (!persistence_state.bgsaveCooldownElapsed(now_ms, config.bgsave_retry_delay_ms)) {
             return;
@@ -131,12 +152,14 @@ fn triggerSaveIfDue(
         switch (err) {
             error.SaveAlreadyInProgress => {},
             else => {
-                var state_tx = persistence_state.begin() catch return;
+                logger.err("cron: failed to trigger automatic background save", err, @errorReturnTrace());
+
+                var state_tx = persistence_state.begin() catch |recovery_err| {
+                    logger.err("cron: failed to begin background save cooldown recovery", recovery_err, @errorReturnTrace());
+                    return;
+                };
                 defer state_tx.end();
                 persistence_state.startBgsaveCooldown(now_ms);
-
-                const message = "kgcache: failed to trigger automatic background save\n";
-                std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
                 return;
             },
         }
@@ -144,29 +167,34 @@ fn triggerSaveIfDue(
 }
 
 fn triggerRewriteIfDue(
-    io: std.Io,
+    logger: logging.Logger,
     aof: persistence.JournalPersistence,
     persistence_state: *PersistenceState,
     data_store: *store.Store,
     config: Config,
 ) void {
     {
-        var tx = aof.begin() catch return;
+        var tx = aof.begin() catch |err| {
+            logger.err("cron: failed to begin AOF rewrite due check", err, @errorReturnTrace());
+            return;
+        };
         defer tx.end();
         if (!aof.dueForRewrite(config)) return;
     }
 
-    data_store.bgrewriteaof(.automatic) catch {
+    data_store.bgrewriteaof(.automatic) catch |err| {
+        if (err != error.UnableToRewriteAof) {
+            logger.err("cron: failed to trigger automatic AOF rewrite", err, @errorReturnTrace());
+            return;
+        }
+
         // A manual client command rewrite can come in after due check and before bgRewrite call and can win the race.
         // client command takes the highest priority so that refusal is expected and must not produce one log per cron tick.
-        const rewrite_running = blk: {
-            var state_tx = persistence_state.begin() catch break :blk false;
-            defer state_tx.end();
-            break :blk persistence_state.aofInProgress();
-        };
+        var state_tx = persistence_state.beginUncancelable();
+        defer state_tx.end();
+        const rewrite_running = persistence_state.aofInProgress();
         if (!rewrite_running) {
-            const message = "kgcache: failed to trigger automatic AOF rewrite\n";
-            std.Io.File.writeStreamingAll(std.Io.File.stderr(), io, message) catch {};
+            logger.err("cron: failed to trigger automatic AOF rewrite", err, @errorReturnTrace());
         }
     };
 }
@@ -248,7 +276,7 @@ test "cron flushes the AOF and swallows flush errors" {
     const testing = std.testing;
     var backend = FinishRewriteJournal.init(testing.io);
 
-    flushAofIfDue(testing.io, backend.journal());
+    flushAofIfDue(testing.io, logging.NoopLogger.logger(), backend.journal());
     try testing.expectEqual(@as(usize, 1), backend.flush_calls);
     try testing.expect(backend.last_flush_ms != null);
 
@@ -265,7 +293,7 @@ test "cron flushes the AOF and swallows flush errors" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
-    flushAofIfDue(testing.io, backend.journal());
+    flushAofIfDue(testing.io, logging.NoopLogger.logger(), backend.journal());
     try testing.expectEqual(@as(usize, 2), backend.flush_calls);
 }
 
@@ -290,7 +318,7 @@ test "everysec cron flush drains buffered commands" {
         defer tx.end();
         try journal.onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
     }
-    flushAofIfDue(testing.io, backend.journal());
+    flushAofIfDue(testing.io, logging.NoopLogger.logger(), backend.journal());
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
     defer dir.close(testing.io);
@@ -320,7 +348,7 @@ test "no cron flush drains buffered commands" {
         defer tx.end();
         try journal.onWrite(.{ .remove = .{ .db_index = 0, .key = "foo" } });
     }
-    flushAofIfDue(testing.io, backend.journal());
+    flushAofIfDue(testing.io, logging.NoopLogger.logger(), backend.journal());
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
     defer dir.close(testing.io);
@@ -334,10 +362,10 @@ test "cron forwards failed AOF completion and ignores a running child" {
     var backend = FinishRewriteJournal.init(testing.io);
     const journal = backend.journal();
 
-    finishAofIfCompleted(testing.io, journal, .running);
+    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .running);
     try testing.expectEqual(@as(usize, 0), backend.calls);
 
-    finishAofIfCompleted(testing.io, journal, .failed);
+    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .failed);
     try testing.expectEqual(@as(usize, 1), backend.calls);
     try testing.expectEqual(PersistenceState.ReapResult.failed, backend.last_result.?);
 }
@@ -359,7 +387,7 @@ test "cron swallows finishRewrite errors" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
-    finishAofIfCompleted(testing.io, backend.journal(), .succeeded);
+    finishAofIfCompleted(logging.NoopLogger.logger(), backend.journal(), .succeeded);
 
     try testing.expectEqual(@as(usize, 1), backend.calls);
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, backend.last_result.?);
@@ -387,7 +415,7 @@ test "triggerRewriteIfDue starts a rewrite when the rule is met" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    triggerRewriteIfDue(testing.io, journal, &state, &data_store, config);
+    triggerRewriteIfDue(logging.NoopLogger.logger(), journal, &state, &data_store, config);
 
     {
         var state_tx = try state.begin();
@@ -440,7 +468,7 @@ test "triggerRewriteIfDue does nothing when a rewrite is already running" {
         state.finishAof();
     }
 
-    triggerRewriteIfDue(testing.io, backend.journal(), &state, &data_store, config);
+    triggerRewriteIfDue(logging.NoopLogger.logger(), backend.journal(), &state, &data_store, config);
 
     var state_tx = try state.begin();
     defer state_tx.end();
@@ -467,7 +495,7 @@ test "a failed rewrite is not retried immediately and wait for delay" {
     var mock_store = store.MockStore.init();
     var data_store = mock_store.store();
 
-    triggerRewriteIfDue(testing.io, backend.journal(), &state, &data_store, config);
+    triggerRewriteIfDue(logging.NoopLogger.logger(), backend.journal(), &state, &data_store, config);
 
     var state_tx = try state.begin();
     defer state_tx.end();
@@ -616,7 +644,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 0, .changes = 1 }} };
 
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, time.nowMs(testing.io), config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, time.nowMs(testing.io), config);
 
     // the parent returns immediately -- the flag being set proves the
     // rule match actually reached bgsave() rather than being a no-op.
@@ -666,7 +694,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
 
     const config: Config = .{ .save_rules = &.{.{ .seconds = 300, .changes = 100 }} };
 
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, time.nowMs(testing.io), config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, time.nowMs(testing.io), config);
 
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
@@ -696,7 +724,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
 
     try writeOneKey(&data_store);
 
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, time.nowMs(testing.io), Config.default());
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, time.nowMs(testing.io), Config.default());
 
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
@@ -728,8 +756,8 @@ test "triggerSaveIfDue waits after an automatic save start failure" {
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
     const now_ms = time.nowMs(testing.io);
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, now_ms, config);
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
 
     try testing.expectEqual(@as(usize, 1), mock_store.bgsave_calls);
 }
@@ -747,9 +775,9 @@ test "triggerSaveIfDue does not start cooldown for a busy save" {
     };
 
     const now_ms = time.nowMs(testing.io);
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
     mock_store.bgsave_result = {};
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
 
     try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);
 }
@@ -772,9 +800,9 @@ test "triggerSaveIfDue retries at the cooldown boundary without another write" {
         .bgsave_retry_delay_ms = 5000,
     };
 
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, failure_ms + 4999, config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, failure_ms + 4999, config);
     try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
 
-    triggerSaveIfDue(testing.io, &data_store, &persistence_state, failure_ms + 5000, config);
+    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, failure_ms + 5000, config);
     try testing.expectEqual(@as(usize, 1), mock_store.bgsave_calls);
 }

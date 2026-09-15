@@ -16,6 +16,7 @@ const Server = @This();
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _config: Config,
+// Borrowed from the caller. Server does not own or release the logger implementation.
 _logger: logging.Logger,
 
 _persistence_state: PersistenceState,
@@ -184,6 +185,7 @@ fn startCron(self: *Server) !void {
     const aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
     self._cron_thread = try std.Thread.spawn(.{}, cron.run, .{
         self._io,
+        self._logger,
         self._allocator,
         self._data_storages,
         &self._persistence_state,
@@ -214,7 +216,14 @@ pub fn run(self: *Server) !void {
     try self.startCron();
     defer self.stopCron();
 
-    try connection.acceptLoop(self._io, &self._listener.?, &self._store, self._allocator, self._config);
+    try connection.acceptLoop(
+        self._io,
+        self._logger,
+        &self._listener.?,
+        &self._store,
+        self._allocator,
+        self._config,
+    );
 }
 
 test "create builds the full object graph and destroy leaks nothing" {

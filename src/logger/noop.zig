@@ -18,4 +18,4 @@ const vtable: Logger.VTable = .{
 
 fn log(_: *anyopaque, _: Logger.Level, _: []const u8) void {}
 
-fn err(_: *anyopaque, _: anyerror, _: Logger.ErrorTrace) void {}
+fn err(_: *anyopaque, _: []const u8, _: anyerror, _: Logger.ErrorTrace) void {}
