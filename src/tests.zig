@@ -24,4 +24,5 @@ test {
     _ = @import("persistence/aof.zig");
     _ = @import("persistence/aof_loader.zig");
     _ = @import("server.zig");
+    _ = @import("main.zig");
 }
