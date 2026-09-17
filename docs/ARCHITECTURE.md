@@ -21,6 +21,8 @@ RESP client
 
 The TCP server runs one detached thread per connection. The storage backend owns its copied keys and string values, and protects operations with a mutex-backed transaction boundary.
 
+On a server runtime failure, the listener closes and cron is joined before AOF and Store cleanup. Active detached connection workers are not yet stopped or drained, so they may still use shared state during teardown. Signal-driven shutdown and connection draining are separate planned work.
+
 ## Storage and concurrency trade-offs
 
 The default backend is intentionally straightforward today: a `StringHashMap` stores values, an `ArrayList` holds TTL bookkeeping, and each expiring entry keeps an index into that list for O(1) updates. Full layout, memory cost, and the planned redesign toward larger keyspaces are in [Expiration bookkeeping](EXPIRATION.md).
