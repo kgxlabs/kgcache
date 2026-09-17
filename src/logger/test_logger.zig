@@ -1,3 +1,4 @@
+const std = @import("std");
 const Logger = @import("interface.zig");
 
 const TestLogger = @This();
@@ -27,6 +28,7 @@ pub const Event = struct {
 events: [max_events]Event = undefined,
 event_count: usize = 0,
 dropped_event_count: usize = 0,
+_mutex: std.atomic.Mutex = .unlocked,
 
 pub fn init() TestLogger {
     return .{};
@@ -39,11 +41,15 @@ pub fn logger(self: *TestLogger) Logger {
     };
 }
 
+/// Inspect recorded events only after threads using this logger have finished.
 pub fn recordedEvents(self: *const TestLogger) []const Event {
     return self.events[0..self.event_count];
 }
 
 pub fn reset(self: *TestLogger) void {
+    self.lock();
+    defer self._mutex.unlock();
+
     self.event_count = 0;
     self.dropped_event_count = 0;
 }
@@ -55,6 +61,9 @@ const vtable: Logger.VTable = .{
 
 fn log(ptr: *anyopaque, level: Logger.Level, message: []const u8) void {
     const self: *TestLogger = @ptrCast(@alignCast(ptr));
+    self.lock();
+    defer self._mutex.unlock();
+
     const event = self.nextEvent() orelse return;
     event.* = .{
         .kind = .log,
@@ -65,8 +74,11 @@ fn log(ptr: *anyopaque, level: Logger.Level, message: []const u8) void {
     @memcpy(event.message_buffer[0..event.message_len], message[0..event.message_len]);
 }
 
-fn err(ptr: *anyopaque, source: anyerror, trace: Logger.ErrorTrace) void {
+fn err(ptr: *anyopaque, message: []const u8, source: anyerror, trace: Logger.ErrorTrace) void {
     const self: *TestLogger = @ptrCast(@alignCast(ptr));
+    self.lock();
+    defer self._mutex.unlock();
+
     const event = self.nextEvent() orelse return;
     event.* = .{
         .kind = .err,
@@ -77,6 +89,9 @@ fn err(ptr: *anyopaque, source: anyerror, trace: Logger.ErrorTrace) void {
         else
             0,
     };
+
+    event.message_len = @min(message.len, max_message_len);
+    @memcpy(event.message_buffer[0..event.message_len], message[0..event.message_len]);
 }
 
 fn nextEvent(self: *TestLogger) ?*Event {
@@ -90,4 +105,35 @@ fn nextEvent(self: *TestLogger) ?*Event {
     return event;
 }
 
-// No tests are added unless we need them in the future.
+fn lock(self: *TestLogger) void {
+    while (!self._mutex.tryLock()) std.atomic.spinLoopHint();
+}
+
+test "records concurrent logger calls without losing event counts" {
+    const thread_count = 8;
+    const calls_per_thread = 16;
+    const total_calls = thread_count * calls_per_thread;
+
+    var test_logger = TestLogger.init();
+    const logger_handle = test_logger.logger();
+
+    const Worker = struct {
+        fn run(worker_logger: Logger) void {
+            for (0..calls_per_thread) |_| worker_logger.info("concurrent event");
+        }
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (&threads) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{logger_handle});
+    }
+    for (threads) |thread| thread.join();
+
+    try std.testing.expectEqual(max_events, test_logger.recordedEvents().len);
+    try std.testing.expectEqual(total_calls - max_events, test_logger.dropped_event_count);
+    for (test_logger.recordedEvents()) |event| {
+        try std.testing.expectEqual(Event.Kind.log, event.kind);
+        try std.testing.expectEqual(Logger.Level.info, event.level.?);
+        try std.testing.expectEqualStrings("concurrent event", event.message());
+    }
+}

@@ -7,7 +7,6 @@ const Manifest = @import("persistence/manifest.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
 const connection = @import("connection.zig");
-const helpers = @import("helpers.zig");
 const time = @import("time.zig");
 const logging = @import("logger.zig");
 
@@ -16,6 +15,7 @@ const Server = @This();
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _config: Config,
+// Borrowed from the caller. Server does not own or release the logger implementation.
 _logger: logging.Logger,
 
 _persistence_state: PersistenceState,
@@ -159,13 +159,14 @@ fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, con
 /// Unwinds `create` in reverse. `_store.deinit()` chains through
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
-pub fn destroy(self: *Server) void {
+/// Returns the AOF close source after freeing the rest of the server.
+pub fn destroy(self: *Server) persistence.JournalPersistence.Error!void {
     self.stopCron();
 
-    // flush out buffered datas and clear it before tearning down store
+    var cleanup_error: ?persistence.JournalPersistence.Error = null;
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {
-            helpers.logStderr(self._io, "server: failed to destoy: {s}\n", .{@errorName(err)});
+            cleanup_error = err;
         };
     }
 
@@ -175,6 +176,8 @@ pub fn destroy(self: *Server) void {
     self._allocator.free(self._notifier_storages);
     self._allocator.free(self._default_storages);
     self._allocator.destroy(self);
+
+    if (cleanup_error) |err| return err;
 }
 
 fn startCron(self: *Server) !void {
@@ -184,6 +187,7 @@ fn startCron(self: *Server) !void {
     const aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
     self._cron_thread = try std.Thread.spawn(.{}, cron.run, .{
         self._io,
+        self._logger,
         self._allocator,
         self._data_storages,
         &self._persistence_state,
@@ -214,14 +218,21 @@ pub fn run(self: *Server) !void {
     try self.startCron();
     defer self.stopCron();
 
-    try connection.acceptLoop(self._io, &self._listener.?, &self._store, self._allocator, self._config);
+    try connection.acceptLoop(
+        self._io,
+        self._logger,
+        &self._listener.?,
+        &self._store,
+        self._allocator,
+        self._config,
+    );
 }
 
 test "create builds the full object graph and destroy leaks nothing" {
     const testing = std.testing;
 
     const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
-    server.destroy();
+    try server.destroy();
 }
 
 test "server owns and joins the cron thread" {
@@ -230,7 +241,7 @@ test "server owns and joins the cron thread" {
     config.cron_interval_ms = 1;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy();
+    defer server.destroy() catch unreachable;
 
     try server.startCron();
     try testing.expect(server._cron_thread != null);
@@ -266,7 +277,7 @@ test "create with appendonly off builds no aof backend and creates no append dir
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
     try testing.expect(server._aof == null);
-    server.destroy();
+    try server.destroy();
 
     try testing.expectError(error.FileNotFound, cwd.openDir(testing.io, dirname, .{}));
 }
@@ -289,7 +300,30 @@ test "create with appendonly on opens the append directory and destroy leaves no
     var dir = try cwd.openDir(testing.io, dirname, .{});
     dir.close(testing.io);
 
-    server.destroy();
+    try server.destroy();
+}
+
+test "destroy releases server state after AOF close failure" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-close-failure";
+    const stderr_guard = try TestStderrGuard.silence();
+    defer stderr_guard.restore();
+
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const aof = &server._aof.?;
+    const file = aof._file orelse return error.TestUnexpectedResult;
+    file.close(testing.io);
+    aof._file = null;
+
+    try testing.expectError(error.FailedToCloseAof, server.destroy());
 }
 
 test "create with appendonly on does not load the kgc snapshot" {
@@ -310,7 +344,7 @@ test "create with appendonly on does not load the kgc snapshot" {
     config.snapshot_path = snapshot_path;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy();
+    defer server.destroy() catch unreachable;
 
     const loaded = try server._store.get("foo", 0);
     try testing.expect(loaded == null);
@@ -329,7 +363,7 @@ test "create with appendonly off still loads the kgc snapshot" {
     config.snapshot_path = snapshot_path;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy();
+    defer server.destroy() catch unreachable;
 
     const loaded = try server._store.get("foo", 0) orelse return error.TestUnexpectedResult;
     switch (loaded) {
@@ -392,7 +426,7 @@ test "replay does not append to the file it is replaying" {
     config.append_dirname = dirname;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy();
+    defer server.destroy() catch unreachable;
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
     defer dir.close(testing.io);
@@ -419,7 +453,7 @@ test "replay leaves the dirty count at zero" {
     config.append_dirname = dirname;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy();
+    defer server.destroy() catch unreachable;
 
     try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
 }
@@ -483,7 +517,7 @@ test "manifest without incrementals is repaired and server remains writable" {
     config.append_fsync = .always;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy();
+    defer server.destroy() catch unreachable;
 
     const repaired_manifest = try Manifest.read(
         testing.io,
@@ -542,11 +576,11 @@ test "writes survive a simulated restart" {
             .keepttl = false,
             .response = null,
         }, 1);
-        first.destroy();
+        try first.destroy();
     }
 
     const second = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer second.destroy();
+    defer second.destroy() catch unreachable;
 
     const persistent = try second._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("one", persistent.string);

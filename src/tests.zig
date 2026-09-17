@@ -15,6 +15,7 @@ test {
     _ = @import("expiration.zig");
     _ = @import("cron.zig");
     _ = @import("connection.zig");
+    _ = @import("logger/test_logger.zig");
     _ = @import("config.zig");
     _ = @import("config_parser.zig");
     _ = @import("persistence/manifest.zig");
@@ -23,4 +24,5 @@ test {
     _ = @import("persistence/aof.zig");
     _ = @import("persistence/aof_loader.zig");
     _ = @import("server.zig");
+    _ = @import("main.zig");
 }

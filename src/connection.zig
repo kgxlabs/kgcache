@@ -4,22 +4,62 @@ const commander = @import("commander.zig");
 const ClientState = @import("client_state.zig");
 const store = @import("store.zig");
 const Config = @import("config.zig");
+const logging = @import("logger.zig");
 
-pub fn acceptLoop(io: std.Io, server: *std.Io.net.Server, data_store: *store.Store, con_allocator: std.mem.Allocator, config: Config) !void {
+pub fn acceptLoop(
+    io: std.Io,
+    logger: logging.Logger,
+    server: *std.Io.net.Server,
+    data_store: *store.Store,
+    con_allocator: std.mem.Allocator,
+    config: Config,
+) !void {
     while (true) {
         const connection = try server.accept(io);
-        const handle_thread = try std.Thread.spawn(.{}, handle, .{ io, connection, data_store, con_allocator, config.connection_buffer_size });
+        const handle_thread = std.Thread.spawn(.{}, handle, .{
+            io,
+            logger,
+            connection,
+            data_store,
+            con_allocator,
+            config.connection_buffer_size,
+        }) catch |err| {
+            connection.close(io);
+            return err;
+        };
         handle_thread.detach();
     }
 }
 
-pub fn handle(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Store, con_allocator: std.mem.Allocator, connection_buffer_size: usize) !void {
+pub fn handle(
+    io: std.Io,
+    logger: logging.Logger,
+    connection: std.Io.net.Stream,
+    data_store: *store.Store,
+    con_allocator: std.mem.Allocator,
+    connection_buffer_size: usize,
+) void {
     defer connection.close(io);
 
-    var client_state = ClientState.init();
-
-    const buf = try con_allocator.alloc(u8, connection_buffer_size);
+    const buf = con_allocator.alloc(u8, connection_buffer_size) catch |err| {
+        logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
+        return;
+    };
     defer con_allocator.free(buf);
+
+    handleConnection(io, logger, connection, data_store, buf) catch |err| {
+        logger.err("connection: request handling failed", err, @errorReturnTrace());
+    };
+}
+
+fn handleConnection(
+    io: std.Io,
+    logger: logging.Logger,
+    connection: std.Io.net.Stream,
+    data_store: *store.Store,
+    buf: []u8,
+) !void {
+    var client_state = ClientState.init();
 
     while (true) {
         // TODO: use buffered writer
@@ -27,8 +67,12 @@ pub fn handle(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Stor
         var data = [_][]u8{buf};
 
         // TODO: We are directly doing syscall to OS which is expensive. Refactor this to use buffered reader
-        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch break;
-        if (bytes_read == 0) break;
+        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| switch (err) {
+            error.ConnectionResetByPeer => return,
+            else => return err,
+        };
+
+        if (bytes_read == 0) return;
 
         var gpa: std.heap.DebugAllocator(.{}) = .init;
         defer _ = gpa.deinit();
@@ -41,26 +85,37 @@ pub fn handle(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Stor
         // This is the scenario: error can happens when parsing Array type and there are some array items already allocated.
         // We don't need to worry about that because we already errdefer it in parser implementation
         const commands = parser.parse(req_allocator) catch |err| {
-            try writeError(req_allocator, &connection_writer.interface, serializer, resp.errorToRESPValue(err));
+            try connection_writer.interface.writeAll(resp.parseErrorResponse(err));
             return;
         };
         defer parser.deinit(req_allocator, commands);
 
         const c = commander.init(req_allocator, commands) catch |err| {
-            try writeError(req_allocator, &connection_writer.interface, serializer, commander.errorToRESPValue(err));
-            return;
+            const response = commander.initErrorResponse(err) orelse return err;
+            try connection_writer.interface.writeAll(response);
+            continue;
         };
         defer c.deinit();
 
         // TODO: There is a potential memory leak when error occurs.
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
         // How do we handle that scenario to free the memory?
+
+        // TODO: Some commands still return internal failures as successful RESP error values.
+        // make those failures reach this catch for reporting.
         const result = c.execute(io, data_store, &client_state) catch |err| {
-            try writeError(req_allocator, &connection_writer.interface, serializer, commander.errorToRESPValue(err));
+            if (commander.executeErrorResponse(err)) |response| {
+                try connection_writer.interface.writeAll(response);
+                continue;
+            }
+
+            logger.err("connection: command execution failed", err, @errorReturnTrace());
+            try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
             return;
         };
 
-        const serialized_result = serializer.serialize(req_allocator, result) catch {
+        const serialized_result = serializer.serialize(req_allocator, result) catch |err| {
+            logger.err("connection: response serialization failed", err, @errorReturnTrace());
             try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
             return;
         };
@@ -72,9 +127,42 @@ pub fn handle(io: std.Io, connection: std.Io.net.Stream, data_store: *store.Stor
     }
 }
 
-fn writeError(allocator: std.mem.Allocator, writer: *std.Io.Writer, serializer: resp.Serializer, err_value: resp.RESPValue) !void {
-    const serialized_value = try serializer.serialize(allocator, err_value);
-    defer serializer.deinit(allocator, serialized_value);
+test "buffer allocation failure is reported once and closes the connection" {
+    const CloseRecorder = struct {
+        calls: usize = 0,
 
-    try writer.writeAll(serialized_value);
+        fn close(userdata: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.calls += handles.len;
+        }
+    };
+
+    var close_recorder: CloseRecorder = .{};
+    var io_vtable = std.testing.io.vtable.*;
+    io_vtable.netClose = CloseRecorder.close;
+    const io: std.Io = .{
+        .userdata = &close_recorder,
+        .vtable = &io_vtable,
+    };
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 0,
+    });
+    var test_logger = logging.TestLogger.init();
+    var unused_store: store.Store = undefined;
+
+    handle(
+        io,
+        test_logger.logger(),
+        .{ .socket = .{ .handle = 1, .address = undefined } },
+        &unused_store,
+        failing_allocator.allocator(),
+        1024,
+    );
+
+    const events = test_logger.recordedEvents();
+    try std.testing.expectEqual(1, events.len);
+    try std.testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+    try std.testing.expectEqual(error.OutOfMemory, events[0].source.?);
+    try std.testing.expectEqual(1, close_recorder.calls);
 }
