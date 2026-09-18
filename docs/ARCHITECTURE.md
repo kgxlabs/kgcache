@@ -37,6 +37,9 @@ write and can rewrite the growing log in a background child. See
 [Snapshots](SNAPSHOTS.md) for snapshot details, and
 [Append-only file](AOF.md) for AOF.
 
+See [Errors and logging](ERRORS.md) for error ownership, terminal reports,
+and trace availability.
+
 ## Repository map
 
 ```text
@@ -67,6 +70,7 @@ write and can rewrite the growing log in a background child. See
 │   ├── PERSISTENCE.md           # Snapshot and AOF overview
 │   ├── SNAPSHOTS.md             # SAVE, BGSAVE, and automatic saving
 │   ├── AOF.md                   # AOF setup, fsync, loading, and rewrites
+│   ├── ERRORS.md                # Error propagation, logging, and traces
 │   └── EXPIRATION.md            # TTL bookkeeping layout, memory cost, planned redesign
 └── README.md
 ```

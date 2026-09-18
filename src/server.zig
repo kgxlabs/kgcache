@@ -56,8 +56,11 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     self._aof = null;
 
     self._default_storages = try allocator.alloc(storage.DefaultStorage, num_databases);
-    errdefer allocator.free(self._default_storages);
     for (self._default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
+    errdefer {
+        for (self._default_storages) |*s| s.storage().deinit();
+        allocator.free(self._default_storages);
+    }
 
     self._persistence_state = PersistenceState.init(io, .{ .mutual_exclusive = config.exclusive_bg_persistence });
 
@@ -67,7 +70,9 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
         self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
         self._aof.?._logger = logger;
     }
-    errdefer if (self._aof) |*aof| aof.journal().deinit() catch {};
+    errdefer if (self._aof) |*aof| aof.journal().deinit() catch |err| {
+        logger.err("server: failed to close AOF after startup failure", err, @errorReturnTrace());
+    };
 
     const kgc_snapshot = self._kgc.snapshot();
     const maybe_aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
@@ -120,7 +125,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
 }
 
 fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
-    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
+    const aof = if (self._aof) |*backend| backend else unreachable;
 
     const journal = aof.journal();
     journal.beginLoading();
@@ -141,7 +146,7 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {
-    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
+    const aof = if (self._aof) |*backend| backend else unreachable;
     const journal = aof.journal();
 
     const cwd = std.Io.Dir.cwd();
@@ -434,7 +439,7 @@ test "replay leaves the dirty count at zero" {
     try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
 }
 
-test "failed AOF replay leaves orphaned files untouched" {
+test "failed AOF replay frees loaded entries and leaves orphaned files untouched" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();
     const dirname = "scratch-server-aof-failed-replay-keeps-orphans";
@@ -444,7 +449,8 @@ test "failed AOF replay leaves orphaned files untouched" {
     try writeReplayFixture(
         testing.io,
         dirname,
-        "*1\r\n$7\r\nUNKNOWN\r\n",
+        "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n" ++
+            "*1\r\n$7\r\nUNKNOWN\r\n",
     );
 
     var dir = try cwd.openDir(testing.io, dirname, .{});

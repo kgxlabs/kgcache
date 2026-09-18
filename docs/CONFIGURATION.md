@@ -15,7 +15,7 @@ port 7000
 num-databases 4
 ```
 
-Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup: an unrecognized directive, a directive with no value, or a value that doesn't fit its type all fail the process with a message on stderr rather than being silently ignored: the same fail-fast-on-bad-config behavior as `redis-server`.
+Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value that does not fit its type stops startup. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
 
 ## Directives
 
@@ -48,7 +48,7 @@ See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every dire
 - Must end in `.kgc`.
 - A relative path resolves against the server's current working directory, not the config file's location.
 - The parent directory must already exist: it is not created automatically.
-- `~` is not expanded, since that's a shell feature rather than something the config parser does; use an absolute path like `/Users/you/dump.kgc` instead of `~/dump.kgc`.
+- `~` is not expanded, since that's a shell feature rather than something the config parser does; use an absolute path like `/absolute/path/to/dump.kgc` instead of `~/dump.kgc`.
 
 ## `exclusive-bg-persistence` recommendation
 

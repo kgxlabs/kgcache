@@ -80,6 +80,7 @@ fn err(ptr: *anyopaque, message: []const u8, source: anyerror, trace: Logger.Err
     }
 }
 
+// A sink failure cannot be reported through the same sink without recursion.
 fn writeStdout(self: *DefaultLogger, bytes: []const u8) void {
     std.Io.File.writeStreamingAll(std.Io.File.stdout(), self._io, bytes) catch {};
 }

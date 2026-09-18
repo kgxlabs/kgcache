@@ -98,12 +98,9 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerO
     const pid = try self._fork();
 
     if (pid == 0) {
-        // A background child has no business holding the parent's stdin/stdout
-        // open -- besides not needing them, keeping a duplicate fd around
-        // delays the OS from ever delivering EOF on them to whatever the
-        // parent's other end is (a terminal, a log pipe, or, as seen under
-        // `zig build test`, the build system's own IPC channel), even
-        // after the parent itself has moved on.
+        // The child inherits stdin, stdout, and stderr from the parent.
+        // It needs no stdin. Close stdout so tests waiting for output can finish.
+        // Keep stderr open to report child errors.
         _ = std.c.close(std.posix.STDIN_FILENO);
         _ = std.c.close(std.posix.STDOUT_FILENO);
 
@@ -187,6 +184,7 @@ fn endDump(self: *KgcBackend) !void {
     // write and fsync to temporary dump file
     const tmp_file_name = try self.tmpFileName();
     defer self._allocator.free(tmp_file_name);
+    // Keep the original save error if removing the temporary file also fails.
     errdefer cwd.deleteFile(self._io, tmp_file_name) catch {};
 
     // NOTE: we must put this into separate block

@@ -14,7 +14,6 @@ pub const Error = std.mem.Allocator.Error || error{
     WrongNumberArguments,
     UnsupportedOption,
     Syntax,
-    AofDisabled,
     DbIndexOutOfRange,
 };
 

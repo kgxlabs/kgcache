@@ -78,6 +78,7 @@ kgcache /absolute/path/to/kgcache.conf
 | [Commands](docs/COMMANDS.md) | Supported commands, `SET` options, and compatibility notes |
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
 | [Architecture](docs/ARCHITECTURE.md) | Role within kgx, request flow, design trade-offs, repository layout |
+| [Errors and logging](docs/ERRORS.md) | Error propagation, terminal reports, and trace availability |
 | [Persistence](docs/PERSISTENCE.md) | Short comparison of snapshots and AOF |
 | [Snapshots](docs/SNAPSHOTS.md) | `SAVE`, `BGSAVE`, child cleanup, and automatic saving |
 | [Append-only file](docs/AOF.md) | AOF setup, fsync policies, file layout, startup, and rewrite flow |

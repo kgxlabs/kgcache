@@ -114,7 +114,7 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Manifest 
             .incr => {
                 if (last_incr_seq != null and seq <= last_incr_seq.?) return Error.NonAscendingIncrSeq;
                 last_incr_seq = seq;
-                incrs.append(allocator, entry) catch return Error.OutOfMemory;
+                try incrs.append(allocator, entry);
             },
         }
     }
@@ -136,6 +136,7 @@ pub fn write(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename
 
     const tmp_filename = try std.fmt.allocPrint(allocator, "{s}.tmp", .{filename});
     defer allocator.free(tmp_filename);
+    // Keep the original write error if removing the temporary file also fails.
     errdefer dir.deleteFile(io, tmp_filename) catch {};
 
     try dir.writeFile(io, .{
