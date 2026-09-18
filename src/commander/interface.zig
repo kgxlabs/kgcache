@@ -16,9 +16,6 @@ pub const Error = std.mem.Allocator.Error || error{
     UnsupportedOption,
     Syntax,
     SomethingWentWrong,
-    UnableToSaveKgc,
-    UnableToDoBackgroundSaveKgc,
-    UnableRewriteAof,
     AofDisabled,
 };
 
@@ -26,11 +23,11 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    execute: *const fn (*anyopaque, std.Io, *store.Store, *ClientState) Error!resp.RESPValue,
+    execute: *const fn (*anyopaque, std.Io, *store.Store, *ClientState) anyerror!resp.RESPValue,
     deinit: *const fn (*anyopaque) void,
 };
 
-pub fn execute(self: Commander, io: std.Io, data_store: *store.Store, client_state: *ClientState) Error!resp.RESPValue {
+pub fn execute(self: Commander, io: std.Io, data_store: *store.Store, client_state: *ClientState) anyerror!resp.RESPValue {
     return self.vtable.execute(self.ptr, io, data_store, client_state);
 }
 

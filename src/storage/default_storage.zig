@@ -257,7 +257,7 @@ pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
     return;
 }
 
-pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
+pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) anyerror!void {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
 
     var iterator = self._entry_map.iterator();
@@ -277,7 +277,7 @@ pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaq
             exp = expires_at;
         }
 
-        visit(ctx, item.key_ptr.*, entry_object.value, exp) catch return Storage.Error.UnableToRecordWrite;
+        try visit(ctx, item.key_ptr.*, entry_object.value, exp);
     }
 }
 

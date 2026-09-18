@@ -254,7 +254,7 @@ pub fn size(ptr: *anyopaque) u32 {
     return self._inner.size();
 }
 
-pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
+pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) anyerror!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.forEach(ctx, visit);
 }

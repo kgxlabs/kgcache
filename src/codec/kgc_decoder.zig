@@ -45,7 +45,7 @@ pub const Record = struct {
 /// (`KgcBackend.load`) hands them straight to `Storage.put`, which makes its
 /// own owned copies immediately -- mirroring how `KgcEncoder` never owns the
 /// bytes it's given either, since `Storage` already owns them upstream.
-pub fn decode(data: []const u8, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, record: Record) anyerror!void) Error!void {
+pub fn decode(data: []const u8, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, record: Record) anyerror!void) anyerror!void {
     if (data.len < min_file_len) return Error.Truncated;
     if (!std.mem.eql(u8, data[0..magic.len], magic)) return Error.InvalidMagic;
     if (!std.mem.eql(u8, data[magic.len..header.len], version)) return Error.UnsupportedVersion;
@@ -83,12 +83,12 @@ pub fn decode(data: []const u8, ctx: *anyopaque, visit: *const fn (ctx: *anyopaq
             .string => .{ .string = try cursor.readLengthPrefixed() },
         };
 
-        visit(ctx, .{
+        try visit(ctx, .{
             .db_index = db_index,
             .key = key,
             .value = value,
             .exp = exp,
-        }) catch return Error.InvalidEntry;
+        });
     }
 }
 

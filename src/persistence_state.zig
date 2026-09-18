@@ -28,6 +28,7 @@ pub const KgcReapResult = struct {
     status: ReapResult,
     saved_change_count: ?u64 = null,
     origin: ?Store.TriggerOrigin = null,
+    report_error: ?anyerror = null,
 };
 
 _io: std.Io,
@@ -116,8 +117,9 @@ pub fn kgcInProgress(self: *PersistenceState) bool {
 
 pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
     const save = self._in_flight_kgc_save orelse return .{ .status = .running };
-    const status = self.reapPid("kgc", save.pid);
-    if (status == .running) return .{ .status = .running };
+    const child = reapKgcPid(save.pid);
+    const status = child.status;
+    if (status == .running) return .{ .status = .running, .report_error = child.report_error };
 
     // only start cooldown if failed and started by cron
     if (status == .failed and save.origin == .automatic) {
@@ -133,7 +135,40 @@ pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
         .status = status,
         .saved_change_count = saved_change_count,
         .origin = save.origin,
+        .report_error = child.report_error,
     };
+}
+
+const KgcChildResult = struct {
+    status: ReapResult,
+    report_error: ?anyerror = null,
+};
+
+fn reapKgcPid(pid: std.posix.pid_t) KgcChildResult {
+    var status: c_int = undefined;
+    while (true) {
+        const result = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
+
+        if (result == 0) return .{ .status = .running };
+
+        if (result < 0) {
+            return switch (std.posix.errno(result)) {
+                .INTR => continue,
+                .CHILD => .{ .status = .failed, .report_error = error.NoChildProcess },
+                else => .{ .status = .running, .report_error = error.Unexpected },
+            };
+        }
+
+        const bits: u32 = @bitCast(status);
+        if (!std.c.W.IFEXITED(bits)) {
+            return .{ .status = .failed, .report_error = error.ChildTerminatedAbnormally };
+        }
+        return switch (std.c.W.EXITSTATUS(bits)) {
+            0 => .{ .status = .succeeded },
+            1 => .{ .status = .failed },
+            else => .{ .status = .failed, .report_error = error.ChildExitedAbnormally },
+        };
+    }
 }
 
 pub fn reapAof(self: *PersistenceState) ReapResult {
@@ -177,7 +212,7 @@ pub fn markSaved(self: *PersistenceState, saved_change_count: u64, now_ms: i64) 
     self._last_save_ms.store(now_ms, .monotonic);
 }
 
-// A completed child is reported exactly once. With no pid there is no
+// A completed AOF child is reported exactly once. With no pid there is no
 // completion event, so callers receive .running and do no follow-up work.
 fn reapPid(self: *PersistenceState, name: []const u8, pid: std.posix.pid_t) ReapResult {
     var status: c_int = undefined;
@@ -502,24 +537,6 @@ test "failed manual background save preserves cooldown and allows a later save" 
         state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 23, .origin = .manual });
     }
 
-    // reapKgc logs to the real stderr when it observes a non-zero exit --
-    // exactly what this test exercises. Left alone, that write lands in the
-    // test binary's own stderr, and `zig build test` flags an otherwise
-    // fully-passing run as a "failed command" because of it. Redirect
-    // stderr to /dev/null only for the reap loop, then restore it, so the
-    // logging code still runs for real without polluting captured output.
-    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-    if (devnull < 0) return error.OpenDevNullFailed;
-    defer _ = std.c.close(devnull);
-
-    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-    if (saved_stderr < 0) return error.DupFailed;
-    defer {
-        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-        _ = std.c.close(saved_stderr);
-    }
-    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
     const reap_ms = failure_ms + 100;
     var result: KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
@@ -533,6 +550,7 @@ test "failed manual background save preserves cooldown and allows a later save" 
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(ReapResult.failed, result.status);
+    try testing.expectEqual(error.ChildExitedAbnormally, result.report_error.?);
     try testing.expect(result.saved_change_count == null);
     {
         var tx = try state.begin();

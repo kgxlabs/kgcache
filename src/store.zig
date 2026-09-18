@@ -8,8 +8,6 @@ pub fn errorToString(err: Store.Error) []const u8 {
         error.OutOfMemory => "Out of memory",
         error.CancelledCommand => "Command cancelled",
         error.SomethingWentWrong => "Something went wrong",
-        error.UnableToSave => "Unable to save",
-        error.UnableToBackgroundSaveKgc => "Unable to do kgc background save",
         error.UnableToRewriteAof => "Unable to rewrite aof",
         error.AofDisabled => "AOF is disabled",
         error.SaveAlreadyInProgress => "Save is already in progress",

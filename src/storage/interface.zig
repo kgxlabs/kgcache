@@ -61,7 +61,7 @@ pub const VTable = struct {
         *anyopaque,
         *anyopaque,
         *const fn (*anyopaque, []const u8, object.Object, ?time.UnixMs) anyerror!void,
-    ) Error!void,
+    ) anyerror!void,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -115,7 +115,7 @@ pub fn clearExp(self: Storage, key: []const u8) Error!void {
     return self.vtable.clearExp(self.ptr, key);
 }
 
-pub fn forEach(self: Storage, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Error!void {
+pub fn forEach(self: Storage, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) anyerror!void {
     return self.vtable.forEach(self.ptr, ctx, visit);
 }
 

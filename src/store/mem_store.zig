@@ -131,30 +131,25 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
     return @intCast(self._storages.len);
 }
 
-pub fn save(ptr: *anyopaque) Store.Error!void {
+pub fn save(ptr: *anyopaque) anyerror!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
+    try self._kgc.save(self._storages);
 }
 
-pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {
+pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    self._kgc.bgsave(self._storages, origin) catch |err| {
-        return switch (err) {
-            error.SaveAlreadyInProgress => Store.Error.SaveAlreadyInProgress,
-            else => Store.Error.UnableToBackgroundSaveKgc,
-        };
-    };
+    try self._kgc.bgsave(self._storages, origin);
 }
 
-pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {
+pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const aof = self._aof orelse return Store.Error.AofDisabled;
 
@@ -167,8 +162,8 @@ pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!vo
     aof.bgRewrite(self._storages, origin) catch return Store.Error.UnableToRewriteAof;
 }
 
-fn beginStorageSessions(self: *MemoryStore) Store.Error![]Storage.Tx {
-    const sessions = self._allocator.alloc(Storage.Tx, self._storages.len) catch return Store.Error.OutOfMemory;
+fn beginStorageSessions(self: *MemoryStore) ![]Storage.Tx {
+    const sessions = try self._allocator.alloc(Storage.Tx, self._storages.len);
     errdefer self._allocator.free(sessions);
 
     var count: usize = 0;
@@ -178,7 +173,7 @@ fn beginStorageSessions(self: *MemoryStore) Store.Error![]Storage.Tx {
     };
 
     for (self._storages) |storage| {
-        sessions[count] = storage.begin() catch return Store.Error.CancelledCommand;
+        sessions[count] = try storage.begin();
         count += 1;
     }
 
@@ -330,7 +325,7 @@ const BeginProbeStorage = struct {
         ptr: *anyopaque,
         ctx: *anyopaque,
         visit: *const fn (*anyopaque, []const u8, object.Object, ?time.UnixMs) anyerror!void,
-    ) Storage.Error!void {
+    ) anyerror!void {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.forEach(ctx, visit);
     }

@@ -48,6 +48,9 @@ pub fn run(
             defer state_tx.end();
 
             const completed_save = persistence_state.reapKgc(time.nowMs(io));
+            if (completed_save.report_error) |err| {
+                logger.err("cron: KGC background child failed", err, @errorReturnTrace());
+            }
             _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch |err| {
                 logger.err("cron: failed to account for completed background save", err, @errorReturnTrace());
             };
@@ -587,22 +590,6 @@ test "a failed background save leaves changes dirty" {
         });
     }
 
-    // reapKgc logs to the real stderr when it observes this non-zero exit --
-    // exactly what this test exercises. Redirect it for the reap loop, then
-    // restore it, same as persistence_state.zig's own
-    // "reapKgc clears state after the child exits with a failure status" test.
-    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-    if (devnull < 0) return error.OpenDevNullFailed;
-    defer _ = std.c.close(devnull);
-
-    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-    if (saved_stderr < 0) return error.DupFailed;
-    defer {
-        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-        _ = std.c.close(saved_stderr);
-    }
-    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
     const failure_ms = time.nowMs(testing.io);
     var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
@@ -615,6 +602,7 @@ test "a failed background save leaves changes dirty" {
         if (tries > 10_000) return error.ChildNeverReaped;
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
+    try testing.expectEqual(error.ChildExitedAbnormally, reap_result.report_error.?);
 
     try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
     {
@@ -736,24 +724,12 @@ test "triggerSaveIfDue waits after an automatic save start failure" {
     var persistence_state = PersistenceState.init(testing.io, false);
     persistence_state.recordChange();
     var mock_store = store.MockStore.init();
-    mock_store.bgsave_result = error.UnableToBackgroundSaveKgc;
+    mock_store.bgsave_result = error.TestBackgroundStart;
     var data_store = mock_store.store();
     const config: Config = .{
         .save_rules = &.{.{ .seconds = 0, .changes = 1 }},
         .bgsave_retry_delay_ms = 5000,
     };
-
-    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-    if (devnull < 0) return error.OpenDevNullFailed;
-    defer _ = std.c.close(devnull);
-
-    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-    if (saved_stderr < 0) return error.DupFailed;
-    defer {
-        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-        _ = std.c.close(saved_stderr);
-    }
-    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
     const now_ms = time.nowMs(testing.io);
     triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);

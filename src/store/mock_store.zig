@@ -8,7 +8,7 @@ get_result: Store.Error!?object.Object = null,
 set_result: Store.Error!?object.Object = null,
 remove_result: Store.Error!bool = false,
 dbsize_result: Store.Error!u32 = 0,
-bgsave_result: Store.Error!void = {},
+bgsave_result: anyerror!void = {},
 num_databases_result: u32 = 1,
 get_calls: usize = 0,
 set_calls: usize = 0,
@@ -91,7 +91,7 @@ fn save(ptr: *anyopaque) Store.Error!void {
     self.save_calls += 1;
 }
 
-fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) Store.Error!void {
+fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!void {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgsave_calls += 1;
     return self.bgsave_result;

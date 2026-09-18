@@ -9,15 +9,12 @@ const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
 const PersistenceState = @import("../persistence_state.zig");
 
-pub fn executeWithMemoryStore(command: commander.Commander) commander.Error!resp.RESPValue {
+pub fn executeWithMemoryStore(command: commander.Commander) anyerror!resp.RESPValue {
     const testing = std.testing;
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
-    // `catch unreachable`: the path is a literal known to end in `.kgc`, so
-    // `InitError.InvalidExtension` can't actually happen here -- and this
-    // function's return type is `commander.Error`, which that error isn't
-    // part of.
+    // The literal path has the required extension, so init cannot fail.
     var persistence_state = PersistenceState.init(testing.io, false);
     var kgc_backend = persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc") catch unreachable;
     var memory_store = store.MemoryStore.init(testing.allocator, &.{default_storage.storage()}, kgc_backend.snapshot(), null);

@@ -85,15 +85,12 @@ pub fn initErrorResponse(err: Error) ?[]const u8 {
         error.UnsupportedOption,
         error.Syntax,
         error.SomethingWentWrong,
-        error.UnableToSaveKgc,
-        error.UnableToDoBackgroundSaveKgc,
-        error.UnableRewriteAof,
         error.AofDisabled,
         => null,
     };
 }
 
-pub fn executeErrorResponse(err: Error) ?[]const u8 {
+pub fn executeErrorResponse(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.UnknownCommand => "-ERR unknown command\r\n",
         error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
@@ -102,14 +99,13 @@ pub fn executeErrorResponse(err: Error) ?[]const u8 {
         error.WrongNumberArguments => "-ERR wrong number of arguments\r\n",
         error.UnsupportedOption => "-ERR unsupported option\r\n",
         error.Syntax => "-ERR syntax error\r\n",
+        error.SaveAlreadyInProgress => "-ERR save already in progress\r\n",
         error.AofDisabled => "-ERR AOF is disabled\r\n",
         error.OutOfMemory,
         error.UnableToConvertObject,
         error.SomethingWentWrong,
-        error.UnableToSaveKgc,
-        error.UnableToDoBackgroundSaveKgc,
-        error.UnableRewriteAof,
         => null,
+        else => null,
     };
 }
 

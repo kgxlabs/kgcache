@@ -62,6 +62,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     self._persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
 
     self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, config.snapshot_path);
+    self._kgc._logger = logger;
     if (config.append_only) {
         self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
     }

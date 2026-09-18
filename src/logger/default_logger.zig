@@ -1,8 +1,8 @@
 const std = @import("std");
 const Logger = @import("interface.zig");
 
-/// Logger for normal application threads. It is not the fork-safe child sink
-/// required by persistence work.
+/// Logger for application threads. KGC also uses it in a child until child
+/// errors can be sent to the parent through a pipe.
 const DefaultLogger = @This();
 
 _io: std.Io,
