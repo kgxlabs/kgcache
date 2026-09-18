@@ -56,14 +56,13 @@ const vtable = Store.VTable{
     .deinit = deinit,
 };
 
-pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!?object.Object {
+pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
-    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = try storage.begin();
     defer tx.end();
 
-    // TODO: Refactor with robust error propagation design
-    const maybe_value = storage.get(key) catch return Store.Error.SomethingWentWrong;
+    const maybe_value = try storage.get(key);
     const value = maybe_value orelse return null;
     return value.value;
 }
@@ -73,17 +72,16 @@ pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!?object.
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!?object.Object {
+pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
     try validateCondition(req.condition);
 
-    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = try storage.begin();
     defer tx.end();
 
-    // TODO: Refactor with robust error propagation design
-    const existing_entry = storage.get(req.key) catch return Store.Error.SomethingWentWrong;
+    const existing_entry = try storage.get(req.key);
     if (existing_entry != null and shouldSkipIfExist(req.condition)) {
         return makeSetResponse(req, existing_entry.?.value);
     }
@@ -92,26 +90,25 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!
         return makeSetResponse(req, null);
     }
 
-    // TODO: Refactor with robust error propagation design
-    const stored_entry = storage.put(req.key, .{
+    const stored_entry = try storage.put(req.key, .{
         .string = req.value,
     }, .{
         .expires_at = req.expires_at,
         .keepttl = req.keepttl,
-    }) catch return Store.Error.SomethingWentWrong;
+    });
 
     return makeSetResponse(req, stored_entry.value);
 }
 
-pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!bool {
+pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
-    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = try storage.begin();
     defer tx.end();
 
-    const existed = storage.get(key) catch return Store.Error.SomethingWentWrong;
-    storage.remove(key) catch return Store.Error.SomethingWentWrong;
+    const existed = try storage.get(key);
+    try storage.remove(key);
 
     return existed != null;
 }
@@ -156,10 +153,10 @@ pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    var aof_tx = aof.begin() catch return Store.Error.UnableToRewriteAof;
+    var aof_tx = try aof.begin();
     defer aof_tx.end();
 
-    aof.bgRewrite(self._storages, origin) catch return Store.Error.UnableToRewriteAof;
+    try aof.bgRewrite(self._storages, origin);
 }
 
 fn beginStorageSessions(self: *MemoryStore) ![]Storage.Tx {
@@ -266,17 +263,17 @@ const BeginProbeStorage = struct {
         return self.inner.begin();
     }
 
-    fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
+    fn get(ptr: *anyopaque, key: []const u8) anyerror!?entry.Object {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.get(key);
     }
 
-    fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
+    fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) anyerror!entry.Object {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.put(key, value, options);
     }
 
-    fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
+    fn remove(ptr: *anyopaque, key: []const u8) anyerror!void {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.remove(key);
     }
@@ -306,7 +303,7 @@ const BeginProbeStorage = struct {
         return self.inner.sampleExpirableKey();
     }
 
-    fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
+    fn tryExpireRandom(ptr: *anyopaque) anyerror!?[]const u8 {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.tryExpireRandom();
     }
@@ -662,7 +659,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
     var tries: usize = 0;
     while (result == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapAof();
+        result = persistence_state.reapAof().status;
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -732,7 +729,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     var tries: usize = 0;
     while (result == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapAof();
+        result = persistence_state.reapAof().status;
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -873,7 +870,7 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
     var tries: usize = 0;
     while (result == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapAof();
+        result = persistence_state.reapAof().status;
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;

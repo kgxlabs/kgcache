@@ -20,23 +20,16 @@ vtable: *const VTable,
 _lock: *Lock,
 
 pub const Error = error{
-    OutOfMemory,
-    UnableToRecordWrite,
-    UnableToLoad,
-    UnableToRewrite,
     RewriteAlreadyInProgress,
-    FailedToOpenDir,
-    FailedToReadManifest,
-    FailedToWriteManifest,
-    FailedToOpenManifest,
-    FailedToOpenIncrFile,
-    FailedToWriteIncrFile,
-    FailedToOpenBase,
-    FailedBufferAppend,
-    FailedToCloseAof,
-    FailedToRewriteAof,
-    FailedToReconcileAof,
-    TxCancelled,
+    JournalWriteBlocked,
+    MissingAofManifest,
+    MissingLiveAofFile,
+    MissingPendingBase,
+    InvalidManifestSequence,
+    BaseAlreadyOpen,
+    BaseEncoderMissing,
+    BaseFileMissing,
+    RewriteStillRunning,
 };
 
 pub const Tx = Lock.Tx;
@@ -49,14 +42,14 @@ pub const WriteEvent = union(enum) {
 pub const Record = struct {
     ptr: *anyopaque,
     event: WriteEvent,
-    publish_fn: *const fn (*anyopaque, WriteEvent) Error!void,
+    publish_fn: *const fn (*anyopaque, WriteEvent) anyerror!void,
     abort_fn: *const fn (*anyopaque, WriteEvent) void,
     state: enum { pending, published, aborted } = .pending,
 
     pub fn init(
         ptr: *anyopaque,
         event: WriteEvent,
-        publish_fn: *const fn (*anyopaque, WriteEvent) Error!void,
+        publish_fn: *const fn (*anyopaque, WriteEvent) anyerror!void,
         abort_fn: *const fn (*anyopaque, WriteEvent) void,
     ) Record {
         return .{
@@ -67,7 +60,7 @@ pub const Record = struct {
         };
     }
 
-    pub fn publish(self: *Record) Error!void {
+    pub fn publish(self: *Record) anyerror!void {
         std.debug.assert(self.state == .pending);
         self.state = .published;
         return self.publish_fn(self.ptr, self.event);
@@ -81,43 +74,43 @@ pub const Record = struct {
 };
 
 pub const VTable = struct {
-    prepareRecord: *const fn (*anyopaque, WriteEvent) Error!Record,
-    flush: *const fn (*anyopaque, i64) Error!void,
-    bgRewrite: *const fn (*anyopaque, []const Storage, origin: Store.TriggerOrigin) Error!void,
-    dueForRewrite: *const fn (*anyopaque, Config) bool,
-    finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) Error!void,
+    prepareRecord: *const fn (*anyopaque, WriteEvent) anyerror!Record,
+    flush: *const fn (*anyopaque, i64) anyerror!void,
+    bgRewrite: *const fn (*anyopaque, []const Storage, origin: Store.TriggerOrigin) anyerror!void,
+    dueForRewrite: *const fn (*anyopaque, Config) anyerror!bool,
+    finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) anyerror!void,
     beginLoading: *const fn (*anyopaque) void,
     endLoading: *const fn (*anyopaque) void,
-    reconcile: *const fn (*anyopaque, std.Io, std.mem.Allocator, std.Io.Dir, []const u8, ?Manifest.Manifest) Error!void,
-    deinit: *const fn (*anyopaque) Error!void,
+    reconcile: *const fn (*anyopaque, std.Io, std.mem.Allocator, std.Io.Dir, []const u8, ?Manifest.Manifest) anyerror!void,
+    deinit: *const fn (*anyopaque) anyerror!void,
 };
 
-pub fn begin(self: JournalPersistence) Error!Tx {
-    return self._lock.begin() catch return Error.TxCancelled;
+pub fn begin(self: JournalPersistence) std.Io.Cancelable!Tx {
+    return self._lock.begin();
 }
 
-pub fn onWrite(self: JournalPersistence, event: WriteEvent) Error!void {
+pub fn onWrite(self: JournalPersistence, event: WriteEvent) anyerror!void {
     var record = try self.prepareRecord(event);
     return record.publish();
 }
 
-pub fn prepareRecord(self: JournalPersistence, event: WriteEvent) Error!Record {
+pub fn prepareRecord(self: JournalPersistence, event: WriteEvent) anyerror!Record {
     return self.vtable.prepareRecord(self.ptr, event);
 }
 
-pub fn flush(self: JournalPersistence, now_ms: i64) Error!void {
+pub fn flush(self: JournalPersistence, now_ms: i64) anyerror!void {
     return self.vtable.flush(self.ptr, now_ms);
 }
 
-pub fn bgRewrite(self: JournalPersistence, storages: []const Storage, origin: Store.TriggerOrigin) Error!void {
+pub fn bgRewrite(self: JournalPersistence, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!void {
     return self.vtable.bgRewrite(self.ptr, storages, origin);
 }
 
-pub fn dueForRewrite(self: JournalPersistence, config: Config) bool {
+pub fn dueForRewrite(self: JournalPersistence, config: Config) anyerror!bool {
     return self.vtable.dueForRewrite(self.ptr, config);
 }
 
-pub fn finishRewrite(self: JournalPersistence, reap_result: PersistenceState.ReapResult) Error!void {
+pub fn finishRewrite(self: JournalPersistence, reap_result: PersistenceState.ReapResult) anyerror!void {
     return self.vtable.finishRewrite(self.ptr, reap_result);
 }
 
@@ -136,10 +129,10 @@ pub fn reconcile(
     dir: std.Io.Dir,
     filename: []const u8,
     manifest: ?Manifest.Manifest,
-) Error!void {
+) anyerror!void {
     return self.vtable.reconcile(self.ptr, io, allocator, dir, filename, manifest);
 }
 
-pub fn deinit(self: JournalPersistence) Error!void {
+pub fn deinit(self: JournalPersistence) anyerror!void {
     return self.vtable.deinit(self.ptr);
 }

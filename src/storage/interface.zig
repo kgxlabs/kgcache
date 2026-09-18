@@ -12,9 +12,7 @@ const Lock = @import("../lock.zig");
 pub const Error = error{
     OutOfMemory,
     InvalidIndex,
-    UnableToExpire,
     TxCancelled,
-    UnableToRecordWrite,
 };
 
 const Storage = @This();
@@ -37,14 +35,14 @@ pub const RemovalMode = enum {
 pub const Tx = Lock.Tx;
 
 pub const VTable = struct {
-    get: *const fn (*anyopaque, []const u8) Error!?entry.Object,
-    put: *const fn (*anyopaque, []const u8, object.Object, PutOptions) Error!entry.Object,
+    get: *const fn (*anyopaque, []const u8) anyerror!?entry.Object,
+    put: *const fn (*anyopaque, []const u8, object.Object, PutOptions) anyerror!entry.Object,
     // NOTE: remove and removeIfExpired are basically the same.
     // Only difference is intent. The reason we split two functions is
     // because we want to have a bool return for `removeIfExpired` so that the client can utilize that to make subsequent decision
     // and we dont want to pollute `remove`.
     // TODO: Refactor this if we find a better solution
-    remove: *const fn (*anyopaque, []const u8) Error!void,
+    remove: *const fn (*anyopaque, []const u8) anyerror!void,
     removeIfExpired: *const fn (*anyopaque, []const u8) Error!bool,
     getExp: *const fn (*anyopaque, []const u8) Error!?entry.ObjectExpiration,
     setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
@@ -53,7 +51,7 @@ pub const VTable = struct {
     // Returns the key that was expired and removed, or `null` if nothing was
     // removed. The returned slice is a fresh allocation owned by the caller;
     // the caller must free it (see `tryExpireRandom` below).
-    tryExpireRandom: *const fn (*anyopaque) Error!?[]const u8,
+    tryExpireRandom: *const fn (*anyopaque) anyerror!?[]const u8,
     clearExp: *const fn (*anyopaque, []const u8) Error!void,
     size: *const fn (*anyopaque) u32,
     begin: *const fn (*anyopaque) Error!Tx,
@@ -69,15 +67,15 @@ pub fn begin(self: Storage) Error!Tx {
     return self.vtable.begin(self.ptr);
 }
 
-pub fn get(self: Storage, key: []const u8) Error!?entry.Object {
+pub fn get(self: Storage, key: []const u8) anyerror!?entry.Object {
     return self.vtable.get(self.ptr, key);
 }
 
-pub fn put(self: Storage, key: []const u8, entry_object: object.Object, options: PutOptions) Error!entry.Object {
+pub fn put(self: Storage, key: []const u8, entry_object: object.Object, options: PutOptions) anyerror!entry.Object {
     return self.vtable.put(self.ptr, key, entry_object, options);
 }
 
-pub fn remove(self: Storage, key: []const u8) Error!void {
+pub fn remove(self: Storage, key: []const u8) anyerror!void {
     return self.vtable.remove(self.ptr, key);
 }
 
@@ -107,7 +105,7 @@ pub fn sampleExpirableKey(self: Storage) Error!?[]const u8 {
 /// Returns the removed key, or `null` if nothing was removed.
 /// The caller must free the returned key with the same allocator the
 /// storage implementation was created with.
-pub fn tryExpireRandom(self: Storage) Error!?[]const u8 {
+pub fn tryExpireRandom(self: Storage) anyerror!?[]const u8 {
     return self.vtable.tryExpireRandom(self.ptr);
 }
 

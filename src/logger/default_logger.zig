@@ -1,7 +1,7 @@
 const std = @import("std");
 const Logger = @import("interface.zig");
 
-/// Logger for application threads. KGC also uses it in a child until child
+/// Logger for application threads. Persistence children also use it until child
 /// errors can be sent to the parent through a pipe.
 const DefaultLogger = @This();
 

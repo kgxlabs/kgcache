@@ -22,21 +22,19 @@ const vtable = Commander.VTable{
     .deinit = deinit,
 };
 
-fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!resp.RESPValue {
     const self: *Set = @ptrCast(@alignCast(ptr));
 
     const now_ms = std.Io.Clock.real.now(io).toMilliseconds();
     const req = try bind(self.arguments, now_ms);
 
-    const maybe_object = data_store.set(req, client_state.db_index) catch |err| {
-        return .{ .simple_error = store.errorToString(err) };
-    };
+    const maybe_object = try data_store.set(req, client_state.db_index);
 
     if (maybe_object == null) {
         return .{ .simple_string = "OK" };
     }
 
-    return object.toRESP(maybe_object.?) catch Commander.Error.UnableToConvertObject;
+    return try object.toRESP(maybe_object.?);
 }
 
 const schema: Schema.Interface.SchemaDefinition = .{

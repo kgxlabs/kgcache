@@ -23,7 +23,7 @@ fn execute(
     _: std.Io,
     data_store: *store.Store,
     client_state: *Commander.ClientState,
-) Commander.Error!resp.RESPValue {
+) anyerror!resp.RESPValue {
     const self: *Del = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 0) return error.WrongNumberArguments;
@@ -31,9 +31,7 @@ fn execute(
     var removed: i64 = 0;
     for (self.arguments) |argument| {
         const key = try command_arguments.bulkString(argument);
-        if (data_store.remove(key, client_state.db_index) catch |err| {
-            return .{ .simple_error = store.errorToString(err) };
-        }) removed += 1;
+        if (try data_store.remove(key, client_state.db_index)) removed += 1;
     }
 
     return .{ .integer = removed };

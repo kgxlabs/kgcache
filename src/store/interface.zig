@@ -15,7 +15,6 @@ pub const Error = std.mem.Allocator.Error || error{
     UnsupportedCondition,
     SomethingWentWrong,
     CancelledCommand,
-    UnableToRewriteAof,
     AofDisabled,
     SaveAlreadyInProgress,
 };
@@ -26,9 +25,9 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    get: *const fn (*anyopaque, []const u8, u32) Error!?object.Object,
-    set: *const fn (*anyopaque, Request.SetRequest, u32) Error!?object.Object,
-    remove: *const fn (*anyopaque, []const u8, u32) Error!bool,
+    get: *const fn (*anyopaque, []const u8, u32) anyerror!?object.Object,
+    set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!?object.Object,
+    remove: *const fn (*anyopaque, []const u8, u32) anyerror!bool,
     dbsize: *const fn (*anyopaque, u32) Error!u32,
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque) anyerror!void,
@@ -37,15 +36,15 @@ pub const VTable = struct {
     deinit: *const fn (*anyopaque) void,
 };
 
-pub fn get(self: Store, key: []const u8, db_index: u32) Error!?object.Object {
+pub fn get(self: Store, key: []const u8, db_index: u32) anyerror!?object.Object {
     return self.vtable.get(self.ptr, key, db_index);
 }
 
-pub fn set(self: Store, req: Request.SetRequest, db_index: u32) Error!?object.Object {
+pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!?object.Object {
     return self.vtable.set(self.ptr, req, db_index);
 }
 
-pub fn remove(self: Store, key: []const u8, db_index: u32) Error!bool {
+pub fn remove(self: Store, key: []const u8, db_index: u32) anyerror!bool {
     return self.vtable.remove(self.ptr, key, db_index);
 }
 

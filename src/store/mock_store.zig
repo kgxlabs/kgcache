@@ -4,9 +4,9 @@ const Request = @import("../commander/request.zig");
 
 const MockStore = @This();
 
-get_result: Store.Error!?object.Object = null,
-set_result: Store.Error!?object.Object = null,
-remove_result: Store.Error!bool = false,
+get_result: anyerror!?object.Object = null,
+set_result: anyerror!?object.Object = null,
+remove_result: anyerror!bool = false,
 dbsize_result: Store.Error!u32 = 0,
 bgsave_result: anyerror!void = {},
 num_databases_result: u32 = 1,
@@ -48,14 +48,14 @@ const vtable = Store.VTable{
     .deinit = deinit,
 };
 
-fn get(ptr: *anyopaque, key: []const u8, _: u32) Store.Error!?object.Object {
+fn get(ptr: *anyopaque, key: []const u8, _: u32) anyerror!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.get_calls += 1;
     self.last_get_key = key;
     return self.get_result;
 }
 
-fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!?object.Object {
+fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Object {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.set_calls += 1;
     self.last_set_key = req.key;
@@ -68,7 +68,7 @@ fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!?obj
     return self.set_result;
 }
 
-fn remove(ptr: *anyopaque, key: []const u8, _: u32) Store.Error!bool {
+fn remove(ptr: *anyopaque, key: []const u8, _: u32) anyerror!bool {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.remove_calls += 1;
     self.last_remove_key = key;

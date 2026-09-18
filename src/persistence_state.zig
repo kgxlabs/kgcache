@@ -31,7 +31,11 @@ pub const KgcReapResult = struct {
     report_error: ?anyerror = null,
 };
 
-_io: std.Io,
+pub const AofReapResult = struct {
+    status: ReapResult,
+    report_error: ?anyerror = null,
+};
+
 _lock: Lock,
 _kgc_in_progress: bool = false,
 _aof_in_progress: bool = false,
@@ -48,7 +52,6 @@ _last_save_ms: std.atomic.Value(i64),
 
 pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
     return .{
-        ._io = io,
         ._lock = Lock.init(io),
         ._mutual_exclusive = mutual_exclusive,
         ._last_save_ms = .init(time.nowMs(io)),
@@ -117,7 +120,7 @@ pub fn kgcInProgress(self: *PersistenceState) bool {
 
 pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
     const save = self._in_flight_kgc_save orelse return .{ .status = .running };
-    const child = reapKgcPid(save.pid);
+    const child = reapPid(save.pid);
     const status = child.status;
     if (status == .running) return .{ .status = .running, .report_error = child.report_error };
 
@@ -139,12 +142,12 @@ pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
     };
 }
 
-const KgcChildResult = struct {
+const ChildResult = struct {
     status: ReapResult,
     report_error: ?anyerror = null,
 };
 
-fn reapKgcPid(pid: std.posix.pid_t) KgcChildResult {
+fn reapPid(pid: std.posix.pid_t) ChildResult {
     var status: c_int = undefined;
     while (true) {
         const result = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
@@ -171,14 +174,14 @@ fn reapKgcPid(pid: std.posix.pid_t) KgcChildResult {
     }
 }
 
-pub fn reapAof(self: *PersistenceState) ReapResult {
-    const rewrite = self._in_flight_aof_rewrite orelse return .running;
-    const status = self.reapPid("aof", rewrite.pid);
-    if (status == .running) return .running;
+pub fn reapAof(self: *PersistenceState) AofReapResult {
+    const rewrite = self._in_flight_aof_rewrite orelse return .{ .status = .running };
+    const child = reapPid(rewrite.pid);
+    if (child.status == .running) return .{ .status = .running, .report_error = child.report_error };
 
     self._in_flight_aof_rewrite = null;
     self._aof_in_progress = false;
-    return status;
+    return .{ .status = child.status, .report_error = child.report_error };
 }
 
 pub fn recordChange(self: *PersistenceState) void {
@@ -210,39 +213,6 @@ pub fn markSaved(self: *PersistenceState, saved_change_count: u64, now_ms: i64) 
 
     _ = self._change_count.fetchSub(saved_change_count, .monotonic);
     self._last_save_ms.store(now_ms, .monotonic);
-}
-
-// A completed AOF child is reported exactly once. With no pid there is no
-// completion event, so callers receive .running and do no follow-up work.
-fn reapPid(self: *PersistenceState, name: []const u8, pid: std.posix.pid_t) ReapResult {
-    var status: c_int = undefined;
-    const r = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
-    // Child porcess is still running
-    if (r == 0) return .running;
-
-    const status_bits: u32 = @bitCast(status);
-    // Only a normal zero exit proves the child completed its persistence
-    // work. A non-zero exit or signal termination must never publish output.
-    if (!std.c.W.IFEXITED(status_bits) or std.c.W.EXITSTATUS(status_bits) != 0) {
-        var buf: [128]u8 = undefined;
-        const message = if (std.c.W.IFEXITED(status_bits))
-            std.fmt.bufPrint(
-                &buf,
-                "kgcache: {s} background save child exited with status {d}\n",
-                .{ name, std.c.W.EXITSTATUS(status_bits) },
-            ) catch "kgcache: background save child exited with a failure status\n"
-        else
-            std.fmt.bufPrint(
-                &buf,
-                "kgcache: {s} background save child terminated abnormally\n",
-                .{name},
-            ) catch "kgcache: background save child terminated abnormally\n";
-
-        std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
-        return .failed;
-    }
-
-    return .succeeded;
 }
 
 test "ending a PersistenceState session allows another session to begin" {
