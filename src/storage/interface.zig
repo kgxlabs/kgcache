@@ -9,12 +9,6 @@ const object = @import("../object.zig");
 const time = @import("../time.zig");
 const Lock = @import("../lock.zig");
 
-pub const Error = error{
-    OutOfMemory,
-    InvalidIndex,
-    TxCancelled,
-};
-
 const Storage = @This();
 
 ptr: *anyopaque,
@@ -43,18 +37,18 @@ pub const VTable = struct {
     // and we dont want to pollute `remove`.
     // TODO: Refactor this if we find a better solution
     remove: *const fn (*anyopaque, []const u8) anyerror!void,
-    removeIfExpired: *const fn (*anyopaque, []const u8) Error!bool,
-    getExp: *const fn (*anyopaque, []const u8) Error!?entry.ObjectExpiration,
-    setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) Error!entry.ObjectExpiration,
+    removeIfExpired: *const fn (*anyopaque, []const u8) anyerror!bool,
+    getExp: *const fn (*anyopaque, []const u8) anyerror!?entry.ObjectExpiration,
+    setExp: *const fn (*anyopaque, []const u8, ?time.UnixMs) anyerror!entry.ObjectExpiration,
     getExpirableCount: *const fn (*anyopaque) u32,
-    sampleExpirableKey: *const fn (*anyopaque) Error!?[]const u8,
+    sampleExpirableKey: *const fn (*anyopaque) anyerror!?[]const u8,
     // Returns the key that was expired and removed, or `null` if nothing was
     // removed. The returned slice is a fresh allocation owned by the caller;
     // the caller must free it (see `tryExpireRandom` below).
     tryExpireRandom: *const fn (*anyopaque) anyerror!?[]const u8,
-    clearExp: *const fn (*anyopaque, []const u8) Error!void,
+    clearExp: *const fn (*anyopaque, []const u8) anyerror!void,
     size: *const fn (*anyopaque) u32,
-    begin: *const fn (*anyopaque) Error!Tx,
+    begin: *const fn (*anyopaque) anyerror!Tx,
     forEach: *const fn (
         *anyopaque,
         *anyopaque,
@@ -63,7 +57,7 @@ pub const VTable = struct {
     deinit: *const fn (*anyopaque) void,
 };
 
-pub fn begin(self: Storage) Error!Tx {
+pub fn begin(self: Storage) anyerror!Tx {
     return self.vtable.begin(self.ptr);
 }
 
@@ -79,15 +73,15 @@ pub fn remove(self: Storage, key: []const u8) anyerror!void {
     return self.vtable.remove(self.ptr, key);
 }
 
-pub fn removeIfExpired(self: Storage, key: []const u8) Error!bool {
+pub fn removeIfExpired(self: Storage, key: []const u8) anyerror!bool {
     return self.vtable.removeIfExpired(self.ptr, key);
 }
 
-pub fn getExp(self: Storage, key: []const u8) Error!?entry.ObjectExpiration {
+pub fn getExp(self: Storage, key: []const u8) anyerror!?entry.ObjectExpiration {
     return self.vtable.getExp(self.ptr, key);
 }
 
-pub fn setExp(self: Storage, key: []const u8, expires_at: ?time.UnixMs) Error!entry.ObjectExpiration {
+pub fn setExp(self: Storage, key: []const u8, expires_at: ?time.UnixMs) anyerror!entry.ObjectExpiration {
     return self.vtable.setExp(self.ptr, key, expires_at);
 }
 
@@ -97,7 +91,7 @@ pub fn getExpirableCount(self: Storage) u32 {
 
 /// Selects an expirable key without removing it.
 /// The caller owns the returned key and must free it with the storage allocator.
-pub fn sampleExpirableKey(self: Storage) Error!?[]const u8 {
+pub fn sampleExpirableKey(self: Storage) anyerror!?[]const u8 {
     return self.vtable.sampleExpirableKey(self.ptr);
 }
 
@@ -109,7 +103,7 @@ pub fn tryExpireRandom(self: Storage) anyerror!?[]const u8 {
     return self.vtable.tryExpireRandom(self.ptr);
 }
 
-pub fn clearExp(self: Storage, key: []const u8) Error!void {
+pub fn clearExp(self: Storage, key: []const u8) anyerror!void {
     return self.vtable.clearExp(self.ptr, key);
 }
 

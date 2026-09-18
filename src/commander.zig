@@ -72,46 +72,6 @@ fn create(comptime T: type, allocator: std.mem.Allocator, arguments: []resp.RESP
     return implementation.commander();
 }
 
-// if it is not command input related error, propagate it
-pub fn initErrorResponse(err: Error) ?[]const u8 {
-    return switch (err) {
-        error.UnknownCommand => "-ERR unknown command\r\n",
-        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
-        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
-        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
-        error.OutOfMemory,
-        error.WrongNumberArguments,
-        error.UnableToConvertObject,
-        error.UnsupportedOption,
-        error.Syntax,
-        error.SomethingWentWrong,
-        error.AofDisabled,
-        => null,
-    };
-}
-
-pub fn executeErrorResponse(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.UnknownCommand => "-ERR unknown command\r\n",
-        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
-        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
-        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
-        error.WrongNumberArguments => "-ERR wrong number of arguments\r\n",
-        error.UnsupportedOption => "-ERR unsupported option\r\n",
-        error.Syntax => "-ERR syntax error\r\n",
-        error.SaveAlreadyInProgress => "-ERR save already in progress\r\n",
-        error.RewriteAlreadyInProgress => "-ERR rewrite already in progress\r\n",
-        error.UnsupportedCondition => "-ERR unsupported condition\r\n",
-        error.JournalWriteBlocked => "-ERR AOF write is blocked\r\n",
-        error.AofDisabled => "-ERR AOF is disabled\r\n",
-        error.OutOfMemory,
-        error.UnableToConvertObject,
-        error.SomethingWentWrong,
-        => null,
-        else => null,
-    };
-}
-
 fn parseKeyword(value: resp.RESPValue) Error!CommandKind {
     return switch (value) {
         .array => |maybe_commands| {

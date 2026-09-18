@@ -85,14 +85,23 @@ fn handleConnection(
         // This is the scenario: error can happens when parsing Array type and there are some array items already allocated.
         // We don't need to worry about that because we already errdefer it in parser implementation
         const commands = parser.parse(req_allocator) catch |err| {
-            try connection_writer.interface.writeAll(resp.parseErrorResponse(err));
+            if (err == error.OutOfMemory) {
+                logger.err("connection: request parsing failed", err, @errorReturnTrace());
+                _ = writeResponse(logger, &connection_writer, internal_error_response);
+            } else {
+                _ = writeResponse(logger, &connection_writer, parseErrorResponse(err));
+            }
             return;
         };
         defer parser.deinit(req_allocator, commands);
 
         const c = commander.init(req_allocator, commands) catch |err| {
-            const response = commander.initErrorResponse(err) orelse return err;
-            try connection_writer.interface.writeAll(response);
+            const response = initErrorResponse(err) orelse {
+                logger.err("connection: command initialization failed", err, @errorReturnTrace());
+                _ = writeResponse(logger, &connection_writer, internal_error_response);
+                return;
+            };
+            if (!writeResponse(logger, &connection_writer, response)) return;
             continue;
         };
         defer c.deinit();
@@ -101,30 +110,100 @@ fn handleConnection(
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
         // How do we handle that scenario to free the memory?
 
-        // TODO: Some commands still return internal failures as successful RESP error values.
-        // make those failures reach this catch for reporting.
         const result = c.execute(io, data_store, &client_state) catch |err| {
-            if (commander.executeErrorResponse(err)) |response| {
-                try connection_writer.interface.writeAll(response);
+            if (executeErrorResponse(err, commands)) |response| {
+                if (!writeResponse(logger, &connection_writer, response)) return;
                 continue;
             }
 
             logger.err("connection: command execution failed", err, @errorReturnTrace());
-            try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
+            _ = writeResponse(logger, &connection_writer, internal_error_response);
             return;
         };
 
         const serialized_result = serializer.serialize(req_allocator, result) catch |err| {
             logger.err("connection: response serialization failed", err, @errorReturnTrace());
-            try connection_writer.interface.writeAll("-ERR something went wrong\r\n");
+            _ = writeResponse(logger, &connection_writer, internal_error_response);
             return;
         };
 
         defer serializer.deinit(req_allocator, serialized_result);
 
         // Write serialized string
-        try connection_writer.interface.writeAll(serialized_result);
+        if (!writeResponse(logger, &connection_writer, serialized_result)) return;
     }
+}
+
+const internal_error_response = "-ERR something went wrong\r\n";
+
+fn parseErrorResponse(err: resp.ParseError) []const u8 {
+    return switch (err) {
+        error.Incomplete => "-ERR protocol error: incomplete request\r\n",
+        error.MalformedSize => "-ERR protocol error: malformed size\r\n",
+        error.InvalidType => "-ERR protocol error: invalid RESP type\r\n",
+        error.IncorrectToken => "-ERR protocol error: incorrect token\r\n",
+        error.NotInteger => "-ERR protocol error: invalid integer\r\n",
+        error.Malformed => "-ERR protocol error: malformed request\r\n",
+        error.ExceededSize => "-ERR protocol error\r\n",
+        error.OutOfMemory => unreachable,
+    };
+}
+
+fn writeResponse(logger: logging.Logger, writer: *std.Io.net.Stream.Writer, bytes: []const u8) bool {
+    writer.interface.writeAll(bytes) catch |err| {
+        logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+        return false;
+    };
+    return true;
+}
+
+fn initErrorResponse(err: commander.Error) ?[]const u8 {
+    return switch (err) {
+        error.UnknownCommand => "-ERR unknown command\r\n",
+        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
+        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
+        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
+        else => null,
+    };
+}
+
+fn executeErrorResponse(err: anyerror, request: resp.RESPValue) ?[]const u8 {
+    return switch (err) {
+        error.UnknownCommand => "-ERR unknown command\r\n",
+        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
+        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
+        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
+        error.WrongNumberArguments => if (usesLegacyArgumentResponse(request))
+            "-Wrong number of arguments\r\n"
+        else
+            "-ERR wrong number of arguments\r\n",
+        error.DbIndexOutOfRange => "-ERR DB index is out of range\r\n",
+        error.UnsupportedOption => "-ERR unsupported option\r\n",
+        error.Syntax => "-ERR syntax error\r\n",
+        error.SaveAlreadyInProgress => "-ERR save already in progress\r\n",
+        error.RewriteAlreadyInProgress => "-ERR rewrite already in progress\r\n",
+        error.UnsupportedCondition => "-ERR unsupported condition\r\n",
+        error.JournalWriteBlocked => "-ERR AOF write is blocked\r\n",
+        error.AofDisabled => "-ERR AOF is disabled\r\n",
+        else => null,
+    };
+}
+
+// These commands sent this exact wire response before validation moved here.
+fn usesLegacyArgumentResponse(request: resp.RESPValue) bool {
+    const values = switch (request) {
+        .array => |maybe_values| maybe_values orelse return false,
+        else => return false,
+    };
+    if (values.len == 0) return false;
+    const keyword = switch (values[0]) {
+        .bulk_string => |maybe_keyword| maybe_keyword orelse return false,
+        else => return false,
+    };
+    return std.ascii.eqlIgnoreCase(keyword, "DBSIZE") or
+        std.ascii.eqlIgnoreCase(keyword, "SELECT") or
+        std.ascii.eqlIgnoreCase(keyword, "COMMAND") or
+        std.ascii.eqlIgnoreCase(keyword, "ECHO");
 }
 
 test "buffer allocation failure is reported once and closes the connection" {
@@ -165,4 +244,183 @@ test "buffer allocation failure is reported once and closes the connection" {
     try std.testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
     try std.testing.expectEqual(error.OutOfMemory, events[0].source.?);
     try std.testing.expectEqual(1, close_recorder.calls);
+}
+
+const TestConnectionIo = struct {
+    requests: []const []const u8,
+    next_request: usize = 0,
+    output: [512]u8 = undefined,
+    output_len: usize = 0,
+    close_calls: usize = 0,
+    fail_write: bool = false,
+    vtable: std.Io.VTable = undefined,
+
+    fn io(self: *@This()) std.Io {
+        self.vtable = std.testing.io.vtable.*;
+        self.vtable.netRead = read;
+        self.vtable.netWrite = write;
+        self.vtable.netClose = close;
+        return .{ .userdata = self, .vtable = &self.vtable };
+    }
+
+    fn read(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        if (self.next_request == self.requests.len) return 0;
+        const request = self.requests[self.next_request];
+        self.next_request += 1;
+        std.debug.assert(request.len <= data[0].len);
+        @memcpy(data[0][0..request.len], request);
+        return request.len;
+    }
+
+    fn write(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        if (self.fail_write) return error.NetworkDown;
+        var count: usize = 0;
+        self.append(header);
+        count += header.len;
+        for (data[0 .. data.len - 1]) |part| {
+            self.append(part);
+            count += part.len;
+        }
+        if (splat > 0) {
+            const part = data[data.len - 1];
+            for (0..splat) |_| {
+                self.append(part);
+                count += part.len;
+            }
+        }
+        return count;
+    }
+
+    fn append(self: *@This(), bytes: []const u8) void {
+        std.debug.assert(self.output_len + bytes.len <= self.output.len);
+        @memcpy(self.output[self.output_len..][0..bytes.len], bytes);
+        self.output_len += bytes.len;
+    }
+
+    fn close(ptr: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.close_calls += handles.len;
+    }
+
+    fn written(self: *const @This()) []const u8 {
+        return self.output[0..self.output_len];
+    }
+};
+
+test "a Storage source crosses Store and Commander to the connection logger" {
+    const testing = std.testing;
+    const Storage = @import("storage/interface.zig");
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n"} };
+    var test_logger = logging.TestLogger.init();
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var fake_storage = backend.storage();
+    var fake_vtable = fake_storage.vtable.*;
+    fake_vtable.begin = struct {
+        fn begin(_: *anyopaque) anyerror!Storage.Tx {
+            return error.TestStorageSource;
+        }
+    }.begin;
+    fake_storage.vtable = &fake_vtable;
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &state, "scratch-storage-source.kgc");
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{fake_storage}, kgc.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+
+    try testing.expectEqualStrings(internal_error_response, fake_io.written());
+    try testing.expectEqual(1, fake_io.close_calls);
+    const events = test_logger.recordedEvents();
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqual(error.TestStorageSource, events[0].source.?);
+}
+
+test "command input errors keep their wire response and allow another request" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{
+        "*2\r\n$6\r\nDBSIZE\r\n$1\r\nx\r\n",
+        "*1\r\n$4\r\nPING\r\n",
+    } };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+
+    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+
+    try testing.expectEqualStrings("-Wrong number of arguments\r\n+PONG\r\n", fake_io.written());
+    try testing.expectEqual(2, fake_io.next_request);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+    try testing.expectEqual(1, fake_io.close_calls);
+}
+
+test "a malformed protocol request gets its fixed response without an error event" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{"?\r\n"} };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+
+    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+
+    try testing.expectEqualStrings("-ERR protocol error: invalid RESP type\r\n", fake_io.written());
+    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+}
+
+test "an unknown command gets its fixed response and the connection continues" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{
+        "*1\r\n$7\r\nUNKNOWN\r\n",
+        "*1\r\n$4\r\nPING\r\n",
+    } };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+
+    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+
+    try testing.expectEqualStrings("-ERR unknown command\r\n+PONG\r\n", fake_io.written());
+    try testing.expectEqual(2, fake_io.next_request);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+}
+
+test "a response write source is reported once and closes the connection" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$4\r\nPING\r\n"}, .fail_write = true };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+
+    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+
+    try testing.expectEqualStrings("", fake_io.written());
+    try testing.expectEqual(1, fake_io.close_calls);
+    const events = test_logger.recordedEvents();
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqual(error.NetworkDown, events[0].source.?);
+}
+
+test "an internal failure and failed error response report both sources" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n"}, .fail_write = true };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    mock.dbsize_result = error.TestStorageSource;
+    var data_store = mock.store();
+
+    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+
+    try testing.expectEqualStrings("", fake_io.written());
+    try testing.expectEqual(1, fake_io.close_calls);
+    const events = test_logger.recordedEvents();
+    try testing.expectEqual(2, events.len);
+    try testing.expectEqual(error.TestStorageSource, events[0].source.?);
+    try testing.expectEqual(error.NetworkDown, events[1].source.?);
 }

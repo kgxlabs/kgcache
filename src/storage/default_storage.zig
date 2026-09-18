@@ -67,9 +67,9 @@ pub fn init(
     };
 }
 
-pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
+pub fn begin(ptr: *anyopaque) anyerror!Storage.Tx {
     var self: *DefaultStorage = @ptrCast(@alignCast(ptr));
-    return self._lock.begin() catch return Storage.Error.TxCancelled;
+    return self._lock.begin();
 }
 
 pub fn deinit(ptr: *anyopaque) void {
@@ -100,7 +100,7 @@ pub fn deinit(ptr: *anyopaque) void {
 // already-observable `removeIfExpired` first, then delegate the plain
 // lookup to this `get`, so the lazy-expiration delete goes through the same
 // notification path a `DEL` would.
-pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
+pub fn get(ptr: *anyopaque, key: []const u8) anyerror!?entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
 
     const is_removed = removeByKey(self, key, .expired_only);
@@ -113,7 +113,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     return value;
 }
 
-pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
+pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) anyerror!entry.Object {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     const string_value = switch (value) {
         .string => |string| string,
@@ -150,10 +150,10 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
             const stored_key_ptr = self._entry_map.getKeyPtr(key) orelse unreachable;
             const stored_key = stored_key_ptr.*;
 
-            self._expirables.append(self._allocator, .{
+            try self._expirables.append(self._allocator, .{
                 .key = stored_key,
                 .expires_at = options.expires_at.?,
-            }) catch return Storage.Error.OutOfMemory;
+            });
 
             const index = self._expirables.items.len - 1;
             existing.exp_index = index;
@@ -179,44 +179,44 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
     };
 
     if (options.expires_at) |expires_ms| {
-        self._expirables.append(self._allocator, .{ .key = owned_key, .expires_at = expires_ms }) catch return Storage.Error.OutOfMemory;
+        try self._expirables.append(self._allocator, .{ .key = owned_key, .expires_at = expires_ms });
         errdefer _ = self._expirables.pop();
 
         const index = self._expirables.items.len - 1;
         entry_object.exp_index = index;
     }
 
-    self._entry_map.put(owned_key, entry_object) catch return Storage.Error.OutOfMemory;
+    try self._entry_map.put(owned_key, entry_object);
 
     return entry_object;
 }
 
-pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
+pub fn remove(ptr: *anyopaque, key: []const u8) anyerror!void {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     _ = removeByKey(self, key, .unconditional);
     return;
 }
 
-pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
+pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) anyerror!bool {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     return removeByKey(self, key, .expired_only);
 }
 
-pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpiration {
+pub fn getExp(ptr: *anyopaque, key: []const u8) anyerror!?entry.ObjectExpiration {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     const existing = self._entry_map.get(key) orelse return null;
     const index = existing.exp_index orelse return null;
     return self._expirables.items[index];
 }
 
-pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {
+pub fn setExp(_: *anyopaque, _: []const u8, _: ?time.UnixMs) anyerror!entry.ObjectExpiration {
     return entry.ObjectExpiration{
         .key = "foo",
         .expires_at = 1785000509089,
     };
 }
 
-pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
+pub fn tryExpireRandom(ptr: *anyopaque) anyerror!?[]const u8 {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     const owned_key = try sampleExpirableKey(ptr) orelse return null;
     errdefer self._allocator.free(owned_key);
@@ -230,7 +230,7 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
     return owned_key;
 }
 
-pub fn sampleExpirableKey(ptr: *anyopaque) Storage.Error!?[]const u8 {
+pub fn sampleExpirableKey(ptr: *anyopaque) anyerror!?[]const u8 {
     const self: *DefaultStorage = @ptrCast(@alignCast(ptr));
     if (self._expirables.items.len == 0) {
         return null;
@@ -242,7 +242,7 @@ pub fn sampleExpirableKey(ptr: *anyopaque) Storage.Error!?[]const u8 {
     // This could be unnecessary since random could actually guaranteed valid number between min and max
     // TODO: Remove this if we are sure to trust random
     if (random_index > last_index) {
-        return Storage.Error.InvalidIndex;
+        return error.InvalidIndex;
     }
 
     return try self._allocator.dupe(u8, self._expirables.items[random_index].key);
@@ -253,7 +253,7 @@ pub fn getExpirableCount(ptr: *anyopaque) u32 {
     return @intCast(self._expirables.items.len);
 }
 
-pub fn clearExp(_: *anyopaque, _: []const u8) Storage.Error!void {
+pub fn clearExp(_: *anyopaque, _: []const u8) anyerror!void {
     return;
 }
 

@@ -49,7 +49,7 @@ const schema: Schema.Interface.SchemaDefinition = .{
     },
 };
 
-fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) Commander.Error!Request.SetRequest {
+fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) anyerror!Request.SetRequest {
     var pos: usize = 0;
     var req: Request.SetRequest = .{
         .key = "",
@@ -82,19 +82,19 @@ fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) Commander.Error!Request.Set
                 if (req.condition != null)
                     return Commander.Error.Syntax;
 
-                break :blk Schema.Set.apply(&req, definition, argv[pos..], now_ms) catch return Commander.Error.UnsupportedOption;
+                break :blk try applyOption(&req, definition, argv[pos..], now_ms);
             },
             .expiration => blk: {
                 if (req.expires_at != null or req.keepttl)
                     return Commander.Error.Syntax;
 
-                break :blk Schema.Set.apply(&req, definition, argv[pos..], now_ms) catch return Commander.Error.UnsupportedOption;
+                break :blk try applyOption(&req, definition, argv[pos..], now_ms);
             },
             .response => blk: {
                 if (req.response != null)
                     return Commander.Error.Syntax;
 
-                break :blk Schema.Set.apply(&req, definition, argv[pos..], now_ms) catch return Commander.Error.UnsupportedOption;
+                break :blk try applyOption(&req, definition, argv[pos..], now_ms);
             },
         };
 
@@ -106,6 +106,18 @@ fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) Commander.Error!Request.Set
     }
 
     return req;
+}
+
+fn applyOption(req: *Request.SetRequest, definition: *const Schema.Interface.OptionDefinition, args: []const resp.RESPValue, now_ms: time.UnixMs) anyerror!usize {
+    return Schema.Set.apply(req, definition, args, now_ms) catch |err| switch (err) {
+        error.Syntax,
+        error.InvalidCharacter,
+        error.Overflow,
+        error.MalformedCommandRequest,
+        error.UnsupportedArgumentType,
+        => error.UnsupportedOption,
+        else => err,
+    };
 }
 
 // NOTE: The caller must only provide arguments after "key" and "value"

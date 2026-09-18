@@ -76,7 +76,7 @@ pub fn init(
     };
 }
 
-pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
+pub fn begin(ptr: *anyopaque) anyerror!Storage.Tx {
     var self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.begin();
 }
@@ -179,12 +179,12 @@ pub fn remove(ptr: *anyopaque, key: []const u8) anyerror!void {
     self._persistence_state.recordChange();
 }
 
-pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
+pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) anyerror!bool {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.removeIfExpired(key);
 }
 
-pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpiration {
+pub fn getExp(ptr: *anyopaque, key: []const u8) anyerror!?entry.ObjectExpiration {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.getExp(key);
 }
@@ -192,7 +192,7 @@ pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpir
 // TODO: setExp doesn't journal. Harmless today since no command reaches this
 // without also writing a value; EXPIRE/PERSIST/GETEX will need to journal
 // from here once they exist.
-pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {
+pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) anyerror!entry.ObjectExpiration {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.setExp(key, exp);
 }
@@ -238,13 +238,13 @@ pub fn getExpirableCount(ptr: *anyopaque) u32 {
     return self._inner.getExpirableCount();
 }
 
-pub fn sampleExpirableKey(ptr: *anyopaque) Storage.Error!?[]const u8 {
+pub fn sampleExpirableKey(ptr: *anyopaque) anyerror!?[]const u8 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.sampleExpirableKey();
 }
 
 // TODO: same gap as setExp. PERSIST will need to journal from here.
-pub fn clearExp(ptr: *anyopaque, key: []const u8) Storage.Error!void {
+pub fn clearExp(ptr: *anyopaque, key: []const u8) anyerror!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.clearExp(key);
 }
@@ -263,7 +263,7 @@ test "put increments the persistence change count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -280,7 +280,7 @@ test "remove increments the persistence change count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -298,7 +298,7 @@ test "a lazy-expiration removal during get increments the persistence change cou
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -359,7 +359,7 @@ test "a journal that fails to record a write fails the put" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -390,7 +390,7 @@ test "a journal preparation failure leaves a removed key unchanged" {
         _ = try inner.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -417,7 +417,7 @@ test "a journal preparation failure leaves a lazy-expired key stored" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -445,7 +445,7 @@ test "a journal preparation failure leaves an active-expiration key stored" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -473,7 +473,7 @@ test "a journal preparation failure leaves a lazily expired key unchanged" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -501,7 +501,7 @@ test "a journal preparation failure leaves an actively expired key unchanged" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -520,7 +520,7 @@ test "a read that finds no expired key does not increment the dirty count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
@@ -593,7 +593,7 @@ test "KEEPTTL over an existing expiry journals the existing absolute expiry" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -622,7 +622,7 @@ test "remove journals a DEL" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -650,7 +650,7 @@ test "an active-expiration removal journals a DEL and increments the dirty count
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -686,7 +686,7 @@ test "sampling a live key does not increment the dirty count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,

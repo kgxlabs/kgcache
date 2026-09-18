@@ -7,7 +7,7 @@ const MockStore = @This();
 get_result: anyerror!?object.Object = null,
 set_result: anyerror!?object.Object = null,
 remove_result: anyerror!bool = false,
-dbsize_result: Store.Error!u32 = 0,
+dbsize_result: anyerror!u32 = 0,
 bgsave_result: anyerror!void = {},
 num_databases_result: u32 = 1,
 get_calls: usize = 0,
@@ -75,7 +75,7 @@ fn remove(ptr: *anyopaque, key: []const u8, _: u32) anyerror!bool {
     return self.remove_result;
 }
 
-fn dbsize(ptr: *anyopaque, _: u32) Store.Error!u32 {
+fn dbsize(ptr: *anyopaque, _: u32) anyerror!u32 {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.dbsize_calls += 1;
     return self.dbsize_result;
@@ -86,7 +86,7 @@ fn numDatabases(ptr: *anyopaque) u32 {
     return self.num_databases_result;
 }
 
-fn save(ptr: *anyopaque) Store.Error!void {
+fn save(ptr: *anyopaque) anyerror!void {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.save_calls += 1;
 }
@@ -97,7 +97,7 @@ fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!void {
     return self.bgsave_result;
 }
 
-fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) Store.Error!void {
+fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!void {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgrewriteaof_calls += 1;
 }

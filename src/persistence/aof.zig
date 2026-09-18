@@ -834,7 +834,7 @@ fn withScratchDir(comptime name: []const u8, comptime testFn: fn (std.Io, std.Io
 test "ending a journal session allows another session to begin" {
     try withScratchDir("scratch-aof-journal-session-reentry", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-journal-session-reentry" };
             var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
@@ -865,7 +865,7 @@ test "journal begin serializes two concurrent callers" {
         }
 
         fn run(io: std.Io, _: std.Io.Dir) !void {
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-journal-session-serialization" };
             var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
@@ -889,7 +889,7 @@ test "dueForRewrite is false below the min size even after huge growth" {
     try withScratchDir("scratch-aof-rewrite-below-min", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-below-min",
@@ -914,7 +914,7 @@ test "dueForRewrite is true once growth and min size are both met" {
     try withScratchDir("scratch-aof-rewrite-due", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-due",
@@ -939,7 +939,7 @@ test "dueForRewrite treats a zero base size as reduce-to-min-size-only" {
     try withScratchDir("scratch-aof-rewrite-zero-base", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-zero-base",
@@ -964,7 +964,7 @@ test "dueForRewrite is false when the percentage is zero" {
     try withScratchDir("scratch-aof-rewrite-disabled", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-disabled",
@@ -989,7 +989,7 @@ test "dueForRewrite is false while a rewrite is already running" {
     try withScratchDir("scratch-aof-rewrite-running", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-running",
@@ -1024,7 +1024,7 @@ test "dueForRewrite backs off after a failed rewrite attempt" {
     try withScratchDir("scratch-aof-rewrite-backoff", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-backoff",
@@ -1053,7 +1053,7 @@ test "init creates the append directory and a seq-1 manifest on first boot" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-init-first-boot" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1080,7 +1080,7 @@ test "onWrite followed by flush puts the encoded command in the incr file" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-onwrite-flush" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1107,7 +1107,7 @@ test "prepared record is invisible until publish and abort keeps it invisible" {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-prepare-record" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1136,7 +1136,7 @@ test "always writes and fsyncs before onWrite returns" {
     try withScratchDir("scratch-aof-fsync-always", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-always",
                 .append_fsync = .always,
@@ -1162,7 +1162,7 @@ test "everysec does not fsync more than once per second" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             _ = dir;
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-everysec",
                 .append_fsync = .everysec,
@@ -1190,7 +1190,7 @@ test "everysec retries after a failed flush" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             _ = dir;
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-retry",
                 .append_fsync = .everysec,
@@ -1234,7 +1234,7 @@ test "flush returns file source errors and retries the buffered write" {
                 }
             };
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-source-flush-retry",
                 .append_fsync = .everysec,
@@ -1280,7 +1280,7 @@ test "no policy flushes without fsync" {
     try withScratchDir("scratch-aof-fsync-no", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-no",
                 .append_fsync = .no,
@@ -1307,7 +1307,7 @@ test "onWrite alone leaves the file untouched" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-onwrite-buffers" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1330,7 +1330,7 @@ test "clean shutdown flushes no-policy writes without forcing fsync" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-shutdown-no-fsync",
                 .append_fsync = .no,
@@ -1359,7 +1359,7 @@ test "clean shutdown forces everysec writes to durable storage" {
             _ = dir;
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-shutdown-everysec-fsync",
                 .append_fsync = .everysec,
@@ -1387,7 +1387,7 @@ test "writeBaseEntry buffers reconstruction commands and commits the selected db
             _ = dir;
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-write-base-entry" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1419,7 +1419,7 @@ test "init reopens the existing live incr file and appends after its existing co
             const config: Config = .{ .append_dirname = "scratch-aof-reopen-no-truncate" };
 
             {
-                var state = PersistenceState.init(io, false);
+                var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
                 var backend = try AofBackend.init(io, testing.allocator, &state, config);
                 const journal_handle = backend.journal();
                 {
@@ -1435,7 +1435,7 @@ test "init reopens the existing live incr file and appends after its existing co
             defer testing.allocator.free(before);
             try testing.expect(before.len > 0);
 
-            var state2 = PersistenceState.init(io, false);
+            var state2 = PersistenceState.init(io, .{ .mutual_exclusive = false });
             var backend2 = try AofBackend.init(io, testing.allocator, &state2, config);
             defer backend2.journal().deinit() catch {};
 
@@ -1472,7 +1472,7 @@ test "init picks the highest-seq incr from a manifest with several" {
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.incr", .data = "older" });
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = "existing" });
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-picks-highest-seq" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1489,7 +1489,7 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
     try withScratchDir("scratch-aof-rewrite-cut-byte-accounting", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-rewrite-cut-byte-accounting" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1539,7 +1539,7 @@ test "successful finishRewrite publishes the new base and removes retired files"
     try withScratchDir("scratch-aof-finish-rewrite-success", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-finish-rewrite-success" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1601,7 +1601,7 @@ test "failed finishRewrite removes the orphan base and preserves the cut manifes
     try withScratchDir("scratch-aof-finish-rewrite-failure", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-finish-rewrite-failure" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1648,7 +1648,7 @@ test "reconcile removes stale and orphaned AOF files only" {
     try withScratchDir("scratch-aof-reconcile", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-reconcile" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1701,7 +1701,7 @@ test "reconcile refuses to delete files without an authoritative manifest" {
     try withScratchDir("scratch-aof-reconcile-no-manifest", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-reconcile-no-manifest" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1729,7 +1729,7 @@ test "a flush failure latches, and the next onWrite fails fast" {
             _ = dir;
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-flush-failure-latch" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1759,7 +1759,7 @@ test "concurrent onWrite from several threads loses no bytes" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-concurrent-onwrite" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);

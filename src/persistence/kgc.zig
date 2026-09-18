@@ -253,7 +253,7 @@ fn readFromDisk(self: *KgcBackend) ![]u8 {
 
 test "init rejects a path without the .kgc extension" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump.rdb"));
     try testing.expectError(InitError.InvalidExtension, init(testing.io, testing.allocator, &persistence_state, "dump"));
@@ -262,7 +262,7 @@ test "init rejects a path without the .kgc extension" {
 
 test "init accepts a path with the .kgc extension" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     _ = try init(testing.io, testing.allocator, &persistence_state, "dump.kgc");
 }
@@ -275,7 +275,7 @@ test "load does nothing when no .kgc file exists yet" {
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "missing-on-purpose.kgc");
     try backend_instance.snapshot().load(&.{backend_storage});
 
@@ -302,7 +302,7 @@ test "load rejects a file that isn't a valid .kgc dump" {
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "corrupted-on-purpose.kgc");
     try testing.expectError(error.InvalidMagic, backend_instance.snapshot().load(&.{backend_storage}));
 }
@@ -320,7 +320,7 @@ test "a successful save replaces the previous snapshot" {
     var source_storage = source.storage();
     defer source_storage.deinit();
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
 
     {
@@ -352,7 +352,7 @@ test "a successful save replaces the previous snapshot" {
 
 test "save returns SaveAlreadyInProgress when a save is already claimed" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-save.kgc");
 
     {
@@ -371,7 +371,7 @@ test "save returns SaveAlreadyInProgress when a save is already claimed" {
 
 test "bgsave returns SaveAlreadyInProgress when a save is already claimed, without forking" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "already-in-progress-bgsave.kgc");
 
     {
@@ -399,7 +399,7 @@ test "successful save clears the bgsave cooldown" {
     std.Io.Dir.cwd().deleteFile(testing.io, path) catch {};
     defer std.Io.Dir.cwd().deleteFile(testing.io, path) catch {};
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const failure_ms = time.nowMs(testing.io);
     {
         var state_tx = try persistence_state.begin();
@@ -420,7 +420,7 @@ test "failed save keeps the bgsave cooldown and releases its claim" {
     const parent = "missing-save-parent";
     std.Io.Dir.cwd().deleteTree(testing.io, parent) catch {};
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const failure_ms = time.nowMs(testing.io);
     {
         var state_tx = try persistence_state.begin();
@@ -440,7 +440,7 @@ test "failed save keeps the bgsave cooldown and releases its claim" {
 test "encoder allocation failure preserves the source error and releases the save claim" {
     const testing = std.testing;
     var failing_allocator = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, failing_allocator.allocator(), &persistence_state, "encoder-allocation-failure.kgc");
 
     try testing.expectError(error.OutOfMemory, backend_instance.snapshot().save(&.{}));
@@ -469,7 +469,7 @@ test "storage visitor failure keeps the previous snapshot and removes encoder st
         _ = try data_storage.put("key", .{ .string = "old" }, .{ .expires_at = null });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
     try backend_instance.snapshot().save(&.{data_storage});
     const previous = try cwd.readFileAlloc(testing.io, path, testing.allocator, .unlimited);
@@ -498,7 +498,7 @@ test "storage visitor failure keeps the previous snapshot and removes encoder st
 
 test "fork failure keeps its source error and releases the background save claim" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "fork-failure.kgc");
     backend_instance._fork = struct {
         fn fail() anyerror!std.posix.pid_t {
@@ -545,7 +545,7 @@ test "background child reports its storage source once through the normal logger
     }
     if (std.c.dup2(fds[1], std.posix.STDERR_FILENO) < 0) return error.DupFailed;
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "child-source-failure.kgc");
     var default_logger = logging.DefaultLogger.init(testing.io);
     backend_instance._logger = default_logger.logger();
@@ -611,7 +611,7 @@ test "loading an out-of-range database preserves the decoder visitor error" {
     var storage_backend = DefaultStorage.init(testing.io, testing.allocator);
     var data_storage = storage_backend.storage();
     defer data_storage.deinit();
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
 
     try testing.expectError(error.InvalidDbIndex, backend_instance.snapshot().load(&.{data_storage}));
@@ -630,7 +630,7 @@ test "file operation failures preserve source errors and the previous snapshot" 
     defer cwd.deleteFile(testing.io, path) catch {};
     defer cwd.deleteFile(testing.io, tmp_path) catch {};
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, path);
     try backend_instance.snapshot().save(&.{});
     const previous = try cwd.readFileAlloc(testing.io, path, testing.allocator, .unlimited);
@@ -701,7 +701,7 @@ test "snapshot read returns its file source error" {
     var io_vtable = testing.io.vtable.*;
     io_vtable.dirOpenFile = Fail.open;
     const injected_io: std.Io = .{ .userdata = testing.io.userdata, .vtable = &io_vtable };
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(injected_io, testing.allocator, &persistence_state, "read-source-failure.kgc");
     var storage_backend = DefaultStorage.init(testing.io, testing.allocator);
     var data_storage = storage_backend.storage();
@@ -727,7 +727,7 @@ test "successful automatic background save clears cooldown and produces a loadab
         _ = try backend_storage.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "scratch-bgsave.kgc");
     const failure_ms = time.nowMs(testing.io);
 

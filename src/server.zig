@@ -59,7 +59,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     errdefer allocator.free(self._default_storages);
     for (self._default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
 
-    self._persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
+    self._persistence_state = PersistenceState.init(io, .{ .mutual_exclusive = config.exclusive_bg_persistence });
 
     self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, config.snapshot_path);
     self._kgc._logger = logger;
@@ -258,7 +258,7 @@ fn writeKgcSnapshotWithFooBar(io: std.Io, allocator: std.mem.Allocator, path: []
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var persistence_state = PersistenceState.init(io, false);
+    var persistence_state = PersistenceState.init(io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(io, allocator, &persistence_state, path);
     var tx = try backend_storage.begin();
     defer tx.end();

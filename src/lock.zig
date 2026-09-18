@@ -3,10 +3,6 @@ const testing = std.testing;
 
 const Lock = @This();
 
-pub const Error = error{
-    TxCancelled,
-};
-
 _io: std.Io,
 _mutex: std.Io.Mutex = .init,
 

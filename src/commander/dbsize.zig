@@ -16,13 +16,13 @@ pub fn commander(self: *DBSize) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!resp.RESPValue {
     const self: *DBSize = @ptrCast(@alignCast(ptr));
     if (self.arguments.len != 0) {
-        return .{ .simple_error = "Wrong number of arguments" };
+        return error.WrongNumberArguments;
     }
 
-    const size = data_store.dbsize(client_state.db_index) catch return Commander.Error.SomethingWentWrong;
+    const size = try data_store.dbsize(client_state.db_index);
     return .{ .integer = @intCast(size) };
 }
 
@@ -67,9 +67,5 @@ test "rejects arguments" {
     };
     const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
 
-    const result = try TestHelpers.executeWithMemoryStore(command);
-    switch (result) {
-        .simple_error => |message| try testing.expectEqualStrings("Wrong number of arguments", message),
-        else => return error.TestUnexpectedResult,
-    }
+    try testing.expectError(error.WrongNumberArguments, TestHelpers.executeWithMemoryStore(command));
 }

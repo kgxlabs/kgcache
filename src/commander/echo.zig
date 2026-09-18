@@ -22,7 +22,7 @@ fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientStat
     const self: *Echo = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len != 1) {
-        return .{ .simple_error = "Wrong number of arguments" };
+        return error.WrongNumberArguments;
     }
 
     return switch (self.arguments[0]) {

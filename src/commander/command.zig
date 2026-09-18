@@ -18,7 +18,7 @@ fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientStat
     const self: *Command = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 0) {
-        return .{ .simple_error = "Wrong number of arguments" };
+        return error.WrongNumberArguments;
     }
 
     // TODO: Implement introspection.

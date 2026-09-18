@@ -15,7 +15,7 @@ pub fn executeWithMemoryStore(command: commander.Commander) anyerror!resp.RESPVa
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
     // The literal path has the required extension, so init cannot fail.
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc") catch unreachable;
     var memory_store = store.MemoryStore.init(testing.allocator, &.{default_storage.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();

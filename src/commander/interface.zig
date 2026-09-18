@@ -12,11 +12,10 @@ pub const Error = std.mem.Allocator.Error || error{
     UnsupportedArgumentType,
     MalformedCommandRequest,
     WrongNumberArguments,
-    UnableToConvertObject,
     UnsupportedOption,
     Syntax,
-    SomethingWentWrong,
     AofDisabled,
+    DbIndexOutOfRange,
 };
 
 ptr: *anyopaque,
