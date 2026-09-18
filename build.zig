@@ -2,11 +2,14 @@ const std = @import("std");
 
 // Learn more about this file here: https://ziglang.org/learn/build-system
 pub fn build(b: *std.Build) void {
+    const optimize = b.standardOptimizeOption(.{});
     const exe = b.addExecutable(.{
         .name = "kgcache",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = b.graph.host,
+            .optimize = optimize,
+            .error_tracing = true,
             .link_libc = true,
         }),
     });
@@ -31,6 +34,8 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
             .target = b.graph.host,
+            .optimize = optimize,
+            .error_tracing = true,
             .link_libc = true,
         }),
     });

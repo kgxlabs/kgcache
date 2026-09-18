@@ -8,8 +8,8 @@ const PersistenceState = @import("../persistence_state.zig");
 const Store = @import("../store/interface.zig");
 const Config = @import("../config.zig");
 const time = @import("../time.zig");
-const helpers = @import("../helpers.zig");
 const Lock = @import("../lock.zig");
+const logging = @import("../logger.zig");
 
 const AofBackend = @This();
 const rewrite_retry_delay_ms: time.UnixMs = 60_000;
@@ -20,6 +20,7 @@ _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
 _persistence_state: *PersistenceState,
 _config: Config,
+_logger: logging.Logger = logging.NoopLogger.logger(),
 //NOTE: base file is only for parent process. never use it in child fork
 // Live incr file handle, will keep the file handle for the lifetime of the process (we can because we open it in append mode)
 _file: ?std.Io.File,
@@ -79,29 +80,29 @@ pub fn finishLoading(self: *AofBackend, base_size: u64, incr_bytes: u64, file_of
 }
 
 // TODO: Refactor init. separate concerns
-pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) Journal.Error!AofBackend {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) !AofBackend {
     const cwd = std.Io.Dir.cwd();
 
     cwd.createDir(io, config.append_dirname, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
-        else => return Journal.Error.FailedToOpenDir,
+        else => return err,
     };
 
-    const dir = cwd.openDir(io, config.append_dirname, .{}) catch return Journal.Error.FailedToOpenDir;
+    const dir = try cwd.openDir(io, config.append_dirname, .{});
     defer dir.close(io);
 
     var incr_seq: u32 = 1;
     var base_size: u64 = 0;
     var incr_bytes: u64 = 0;
-    const read_manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToReadManifest;
+    const read_manifest_name = try Manifest.manifestName(allocator, config.append_filename);
     defer allocator.free(read_manifest_name);
 
-    const maybe_manifest = Manifest.read(
+    const maybe_manifest = try Manifest.read(
         io,
         allocator,
         dir,
         read_manifest_name,
-    ) catch return Journal.Error.FailedToReadManifest;
+    );
 
     // if manifest exists (reopening), set live seq of incr
     if (maybe_manifest) |manifest| {
@@ -114,19 +115,19 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         }
 
         for (manifest.incrs) |incr| {
-            const incr_file = dir.openFile(io, incr.name, .{}) catch return Journal.Error.FailedToOpenIncrFile;
+            const incr_file = try dir.openFile(io, incr.name, .{});
             defer incr_file.close(io);
-            incr_bytes += incr_file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
+            incr_bytes += try incr_file.length(io);
         }
 
         if (manifest.base) |base_entry| {
-            const base_file = dir.openFile(io, base_entry.name, .{}) catch return Journal.Error.FailedToOpenBase;
+            const base_file = try dir.openFile(io, base_entry.name, .{});
             defer base_file.close(io);
-            base_size = base_file.length(io) catch return Journal.Error.FailedToOpenBase;
+            base_size = try base_file.length(io);
         }
     } else {
         // if there are no manifest yet, create one and write a live incr
-        const incr_name = Manifest.incrName(allocator, config.append_filename, incr_seq) catch return Journal.Error.FailedToWriteManifest;
+        const incr_name = try Manifest.incrName(allocator, config.append_filename, incr_seq);
         defer allocator.free(incr_name);
 
         const incr: Manifest.Entry = .{
@@ -135,27 +136,28 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
             .name = incr_name,
         };
         var incrs = [_]Manifest.Entry{incr};
-        const write_manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Journal.Error.FailedToWriteManifest;
+        const write_manifest_name = try Manifest.manifestName(allocator, config.append_filename);
         defer allocator.free(write_manifest_name);
 
-        Manifest.write(
+        try Manifest.write(
             io,
             allocator,
             dir,
             write_manifest_name,
             .{ .base = null, .incrs = &incrs },
-        ) catch return Journal.Error.FailedToWriteManifest;
+        );
     }
 
-    const incr_name = Manifest.incrName(allocator, config.append_filename, incr_seq) catch return Journal.Error.FailedToWriteManifest;
+    const incr_name = try Manifest.incrName(allocator, config.append_filename, incr_seq);
     defer allocator.free(incr_name);
 
     const file = dir.openFile(io, incr_name, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => dir.createFile(io, incr_name, .{}) catch return Journal.Error.FailedToOpenIncrFile,
-        else => return Journal.Error.FailedToOpenIncrFile,
+        error.FileNotFound => try dir.createFile(io, incr_name, .{}),
+        else => return err,
     };
+    errdefer file.close(io);
 
-    const file_offset = file.length(io) catch return Journal.Error.FailedToOpenIncrFile;
+    const file_offset = try file.length(io);
 
     return .{
         ._lock = Lock.init(io),
@@ -172,20 +174,20 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
     };
 }
 
-pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!Journal.Record {
+pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) anyerror!Journal.Record {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     if (self._loading) return Journal.Record.init(ptr, event, ignoreWrite, ignoreAbort);
 
-    const prepared = self._allocator.create(PreparedRecord) catch return Journal.Error.OutOfMemory;
+    if (self._last_write_failed) return Journal.Error.JournalWriteBlocked;
+
+    const prepared = try self._allocator.create(PreparedRecord);
     errdefer self._allocator.destroy(prepared);
 
-    if (self._last_write_failed) return Journal.Error.UnableToRecordWrite;
-
-    const encoded = self._encoder.encodeWriteEvent(self._allocator, event) catch return Journal.Error.OutOfMemory;
+    const encoded = try self._encoder.encodeWriteEvent(self._allocator, event);
     errdefer self._encoder.deinit(self._allocator, encoded.bytes);
 
-    self._buffer.ensureUnusedCapacity(self._allocator, encoded.bytes.len) catch return Journal.Error.FailedBufferAppend;
+    try self._buffer.ensureUnusedCapacity(self._allocator, encoded.bytes.len);
 
     prepared.* = .{
         .backend = self,
@@ -196,11 +198,11 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) Journal.Error!J
     return Journal.Record.init(prepared, event, publishPreparedRecord, abortPreparedRecord);
 }
 
-pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) Journal.Error!void {
+pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     {
-        var state_tx = self._persistence_state.begin() catch return error.FailedToRewriteAof;
+        var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
         if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
     }
@@ -208,13 +210,12 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
     var child_started = false;
 
-    errdefer |err| {
+    errdefer {
         if (!child_started) {
             var state_tx = self._persistence_state.beginUncancelable();
             self._persistence_state.finishAof();
             state_tx.end();
         }
-        helpers.logStderr(self._io, "aof: failed to start rewrite: {s}\n", .{@errorName(err)});
     }
 
     try flushLocked(self, time.nowMs(self._io));
@@ -222,43 +223,43 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     const cwd = std.Io.Dir.cwd();
     cwd.createDir(self._io, self._config.append_dirname, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
-        else => return error.FailedToOpenDir,
+        else => return err,
     };
 
     // read existing manifest
-    const manifest_name = Manifest.manifestName(self._allocator, self._config.append_filename) catch return error.FailedToReadManifest;
+    const manifest_name = try Manifest.manifestName(self._allocator, self._config.append_filename);
     defer self._allocator.free(manifest_name);
-    const dir = cwd.openDir(self._io, self._config.append_dirname, .{}) catch return error.FailedToOpenDir;
+    const dir = try cwd.openDir(self._io, self._config.append_dirname, .{});
     defer dir.close(self._io);
 
-    const maybe_manifest = Manifest.read(
+    const maybe_manifest = try Manifest.read(
         self._io,
         self._allocator,
         dir,
         manifest_name,
-    ) catch return error.FailedToReadManifest;
+    );
 
     if (maybe_manifest == null) {
-        helpers.logStdout(self._io, "aof: cannot find existing manifest file: {s}\n", .{@errorName(Journal.Error.FailedToRewriteAof)});
-        return error.FailedToRewriteAof;
+        return Journal.Error.MissingAofManifest;
     }
     const manifest = maybe_manifest.?;
     defer manifest.deinit(self._allocator);
 
     const base_seq = Manifest.nextSeq(manifest);
     const new_incr_seq = base_seq + 1;
-    const new_incr_name = Manifest.incrName(
+    const new_incr_name = try Manifest.incrName(
         self._allocator,
         self._config.append_filename,
         new_incr_seq,
-    ) catch return error.FailedToWriteIncrFile;
+    );
     defer self._allocator.free(new_incr_name);
 
     const new_incr_file = dir.openFile(self._io, new_incr_name, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => dir.createFile(self._io, new_incr_name, .{}) catch return error.FailedToOpenIncrFile,
-        else => return error.FailedToOpenIncrFile,
+        error.FileNotFound => try dir.createFile(self._io, new_incr_name, .{}),
+        else => return err,
     };
-    errdefer new_incr_file.close(self._io);
+    var new_incr_owned = true;
+    errdefer if (new_incr_owned) new_incr_file.close(self._io);
 
     // add new incr file to the list by allocating memory
     const updated_incrs = try self._allocator.alloc(Manifest.Entry, manifest.incrs.len + 1);
@@ -270,22 +271,20 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
         .seq = new_incr_seq,
         .kind = .incr,
     };
-    Manifest.write(
+    try Manifest.write(
         self._io,
         self._allocator,
         dir,
         manifest_name,
         .{ .base = manifest.base, .incrs = updated_incrs },
-    ) catch {
-        helpers.logStderr(self._io, "aof: failed to rewrite manifest file: {s}\n", .{@errorName(Journal.Error.FailedToWriteManifest)});
-        return error.FailedToWriteManifest;
-    };
+    );
     // Startup reconciliation deletes generated files absent from the manifest,
     // so the new incremental must be published before any writes can reach it.
 
     // switch file handle and reset db so that we can start from scratch for new incr file
     const old_file = self._file;
     self._file = new_incr_file;
+    new_incr_owned = false;
     self._incr_seq = new_incr_seq;
     self._file_offset = 0;
     self._encoder.resetDbTracking();
@@ -295,23 +294,22 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     const rc = std.posix.system.fork();
     const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
         .SUCCESS => @intCast(rc),
-        .AGAIN, .NOMEM => return error.FailedToRewriteAof,
-        else => return error.FailedToRewriteAof,
+        .AGAIN => return error.SystemResources,
+        .NOMEM => return error.OutOfMemory,
+        else => return error.Unexpected,
     };
 
     if (pid == 0) {
-        // A background child has no business holding the parent's stdin/stdout
-        // open -- besides not needing them, keeping a duplicate fd around
-        // delays the OS from ever delivering EOF on them to whatever the
-        // parent's other end is (a terminal, a log pipe, or -- as seen under
-        // `zig build test` -- the build system's own IPC channel), even
-        // after the parent itself has moved on. stderr stays open since the
-        // failure path below deliberately writes to it.
+        // The child inherits stdin, stdout, and stderr from the parent.
+        // It needs no stdin. Close stdout so tests waiting for output can finish.
+        // Keep stderr open to report child errors.
         _ = std.c.close(std.posix.STDIN_FILENO);
         _ = std.c.close(std.posix.STDOUT_FILENO);
 
         self.writeBase(storages, base_seq) catch |err| {
-            helpers.logStderr(self._io, "aof: background rewrite failed: {s}\n", .{@errorName(err)});
+            // TODO: Send the source error to the parent through a pipe so the
+            // child does not lock logger state copied during fork.
+            self._logger.err("aof: background rewrite failed", err, @errorReturnTrace());
             std.c._exit(1);
         };
 
@@ -333,12 +331,12 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     child_started = true;
 }
 
-pub fn dueForRewrite(ptr: *anyopaque, config: Config) bool {
+pub fn dueForRewrite(ptr: *anyopaque, config: Config) anyerror!bool {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     if (!config.append_only or config.auto_aof_rewrite_percentage == 0) return false;
     {
-        var state_tx = self._persistence_state.begin() catch return false;
+        var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
         if (self._persistence_state.aofInProgress()) return false;
     }
@@ -370,7 +368,7 @@ const BaseEntryVisitor = struct {
 
 // TODO: we are doing command based `base rewrite`for simplicity sake.
 // For faster load time, Refactor to .kgc dump rewrite.
-fn writeBase(self: *AofBackend, storages: []const Storage, base_seq: u32) Journal.Error!void {
+fn writeBase(self: *AofBackend, storages: []const Storage, base_seq: u32) !void {
     try self.beginBase(base_seq);
 
     for (storages, 0..) |storage, db_index| {
@@ -380,39 +378,39 @@ fn writeBase(self: *AofBackend, storages: []const Storage, base_seq: u32) Journa
             .backend = self,
             .db_index = @intCast(db_index),
         };
-        storage.forEach(&visitor, visitBaseEntry) catch return Journal.Error.FailedToRewriteAof;
+        try storage.forEach(&visitor, visitBaseEntry);
     }
 
     try self.endBase();
 }
 
-fn beginBase(self: *AofBackend, seq: u32) Journal.Error!void {
+fn beginBase(self: *AofBackend, seq: u32) !void {
     if (self._base_file != null) {
-        return Journal.Error.FailedToOpenBase;
+        return Journal.Error.BaseAlreadyOpen;
     }
 
-    const base_name = Manifest.baseName(
+    const base_name = try Manifest.baseName(
         self._allocator,
         self._config.append_filename,
         seq,
-    ) catch return Journal.Error.OutOfMemory;
+    );
     defer self._allocator.free(base_name);
 
     const cwd = std.Io.Dir.cwd();
-    const dir = cwd.openDir(
+    const dir = try cwd.openDir(
         self._io,
         self._config.append_dirname,
         .{},
-    ) catch return Journal.Error.FailedToOpenDir;
+    );
     defer dir.close(self._io);
 
     // createFile will truncates an existing file with the same name.
     // This is intentional to clean up any previous failed rewrite
-    const base_file = dir.createFile(
+    const base_file = try dir.createFile(
         self._io,
         base_name,
         .{},
-    ) catch return Journal.Error.FailedToOpenBase;
+    );
     errdefer base_file.close(self._io);
 
     // NOTE: This is to make sure the following things
@@ -436,35 +434,35 @@ fn visitBaseEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?
     try visitor.backend.writeBaseEntry(visitor.db_index, key, value, exp);
 }
 
-fn writeBaseEntry(self: *AofBackend, db_index: u32, key: []const u8, value: object.Object, exp: ?time.UnixMs) Journal.Error!void {
+fn writeBaseEntry(self: *AofBackend, db_index: u32, key: []const u8, value: object.Object, exp: ?time.UnixMs) !void {
     const encoder = if (self._base_encoder) |*base_encoder|
         base_encoder
     else
-        return Journal.Error.FailedToRewriteAof;
+        return Journal.Error.BaseEncoderMissing;
 
-    const encoded = encoder.encodeRewriteEntry(self._allocator, .{
+    const encoded = try encoder.encodeRewriteEntry(self._allocator, .{
         .db_index = db_index,
         .key = key,
         .value = value,
         .expires_at = exp,
-    }) catch return Journal.Error.OutOfMemory;
+    });
     defer encoder.deinit(self._allocator, encoded.bytes);
 
-    self._base_buffer.appendSlice(self._allocator, encoded.bytes) catch return Journal.Error.FailedBufferAppend;
+    try self._base_buffer.appendSlice(self._allocator, encoded.bytes);
     encoder.commitDb(encoded.db_index);
 }
 
 // TODO: Refactor this and flushLocked. some of the logics are duplciated
-fn endBase(self: *AofBackend) Journal.Error!void {
-    const file = self._base_file orelse return Journal.Error.FailedToRewriteAof;
+fn endBase(self: *AofBackend) !void {
+    const file = self._base_file orelse return Journal.Error.BaseFileMissing;
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
 
-    file_writer.seekTo(self._base_file_offset) catch return Journal.Error.FailedToWriteIncrFile;
-    file_writer.interface.writeAll(self._base_buffer.items) catch return Journal.Error.FailedToWriteIncrFile;
-    file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
+    try file_writer.seekTo(self._base_file_offset);
+    try file_writer.interface.writeAll(self._base_buffer.items);
+    try file_writer.interface.flush();
 
-    file.sync(self._io) catch return Journal.Error.FailedToRewriteAof;
+    try file.sync(self._io);
 
     file.close(self._io);
     self._base_file = null;
@@ -473,76 +471,73 @@ fn endBase(self: *AofBackend) Journal.Error!void {
     self._base_encoder = null;
 }
 
-pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) Journal.Error!void {
+pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) anyerror!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    if (reap_result == .running) return Journal.Error.FailedToRewriteAof;
+    if (reap_result == .running) return Journal.Error.RewriteStillRunning;
 
-    const base_seq = self._pending_base_seq orelse return Journal.Error.FailedToRewriteAof;
+    const base_seq = self._pending_base_seq orelse return Journal.Error.MissingPendingBase;
     defer self._pending_base_seq = null;
 
     const cwd = std.Io.Dir.cwd();
-    const dir = cwd.openDir(
+    const dir = try cwd.openDir(
         self._io,
         self._config.append_dirname,
         .{},
-    ) catch return Journal.Error.FailedToOpenDir;
+    );
     defer dir.close(self._io);
 
-    const base_name = Manifest.baseName(
+    const base_name = try Manifest.baseName(
         self._allocator,
         self._config.append_filename,
         base_seq,
-    ) catch return Journal.Error.OutOfMemory;
+    );
     defer self._allocator.free(base_name);
 
     if (reap_result == .failed) {
         self._last_rewrite_attempt_ms = time.nowMs(self._io);
         dir.deleteFile(self._io, base_name) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => return Journal.Error.FailedToRewriteAof,
+            else => return err,
         };
-        helpers.logStderr(self._io, "aof: rewrite failed; keeping the cut manifest and live incremental file\n", .{});
         return;
     }
 
-    const manifest_name = Manifest.manifestName(
+    const manifest_name = try Manifest.manifestName(
         self._allocator,
         self._config.append_filename,
-    ) catch return Journal.Error.OutOfMemory;
+    );
     defer self._allocator.free(manifest_name);
 
-    const maybe_manifest = Manifest.read(
+    const maybe_manifest = try Manifest.read(
         self._io,
         self._allocator,
         dir,
         manifest_name,
-    ) catch return Journal.Error.FailedToReadManifest;
+    );
     const manifest = maybe_manifest orelse
-        return Journal.Error.FailedToReadManifest;
+        return Journal.Error.MissingAofManifest;
     defer manifest.deinit(self._allocator);
 
     const live_incr = Manifest.liveIncr(manifest) orelse
-        return Journal.Error.FailedToRewriteAof;
+        return Journal.Error.MissingLiveAofFile;
 
     if (live_incr.seq != self._incr_seq or live_incr.seq != base_seq + 1) {
-        return Journal.Error.FailedToRewriteAof;
+        return Journal.Error.InvalidManifestSequence;
     }
 
-    const base_file = dir.openFile(
+    const base_file = try dir.openFile(
         self._io,
         base_name,
         .{},
-    ) catch return Journal.Error.FailedToOpenBase;
+    );
     defer base_file.close(self._io);
 
     // A command-based base can legitimately be empty when there are no live
     // entries, so existence and readable metadata are the sanity checks.
-    const base_size = base_file.length(self._io) catch
-        return Journal.Error.FailedToOpenBase;
+    const base_size = try base_file.length(self._io);
 
-    const live_file = self._file orelse return Journal.Error.FailedToOpenIncrFile;
-    const live_incr_size = live_file.length(self._io) catch
-        return Journal.Error.FailedToOpenIncrFile;
+    const live_file = self._file orelse return Journal.Error.MissingLiveAofFile;
+    const live_incr_size = try live_file.length(self._io);
 
     const new_base: Manifest.Entry = .{
         .name = base_name,
@@ -551,27 +546,31 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     };
     var new_incrs = [_]Manifest.Entry{live_incr};
 
-    Manifest.write(
+    try Manifest.write(
         self._io,
         self._allocator,
         dir,
         manifest_name,
         .{ .base = new_base, .incrs = &new_incrs },
-    ) catch return Journal.Error.FailedToWriteManifest;
+    );
 
     // delete old base and incrs files
-    var delete_failed = false;
+    var delete_error: ?anyerror = null;
     if (manifest.base) |old_base| {
         dir.deleteFile(self._io, old_base.name) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => delete_failed = true,
+            else => if (delete_error == null) {
+                delete_error = err;
+            },
         };
     }
     for (manifest.incrs) |old_incr| {
         if (old_incr.seq == live_incr.seq) continue;
         dir.deleteFile(self._io, old_incr.name) catch |err| switch (err) {
             error.FileNotFound => {},
-            else => delete_failed = true,
+            else => if (delete_error == null) {
+                delete_error = err;
+            },
         };
     }
 
@@ -580,14 +579,13 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     self._incr_bytes = live_incr_size;
     self._last_rewrite_attempt_ms = null;
 
-    if (delete_failed) return Journal.Error.FailedToRewriteAof;
+    if (delete_error) |err| return err;
 }
 
-pub fn flush(ptr: *anyopaque, now_ms: i64) Journal.Error!void {
+pub fn flush(ptr: *anyopaque, now_ms: i64) anyerror!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    errdefer |err| {
+    errdefer {
         self._last_write_failed = true;
-        helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
     }
 
     try flushLocked(self, now_ms);
@@ -610,12 +608,11 @@ pub fn reconcile(
     dir: std.Io.Dir,
     filename: []const u8,
     manifest: ?Manifest.Manifest,
-) Journal.Error!void {
+) anyerror!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    const loaded_manifest = manifest orelse return Journal.Error.FailedToReadManifest;
+    const loaded_manifest = manifest orelse return Journal.Error.MissingAofManifest;
 
-    const manifest_name = Manifest.manifestName(allocator, filename) catch
-        return Journal.Error.OutOfMemory;
+    const manifest_name = try Manifest.manifestName(allocator, filename);
     defer allocator.free(manifest_name);
 
     // Safe only because rewrite publishes a newly cut incremental before using
@@ -624,10 +621,10 @@ pub fn reconcile(
     defer referenced.deinit();
 
     if (loaded_manifest.base) |base| {
-        referenced.put(base.name, {}) catch return Journal.Error.OutOfMemory;
+        try referenced.put(base.name, {});
     }
     for (loaded_manifest.incrs) |incr| {
-        referenced.put(incr.name, {}) catch return Journal.Error.OutOfMemory;
+        try referenced.put(incr.name, {});
     }
 
     var new_incr_name: ?[]u8 = null;
@@ -640,22 +637,20 @@ pub fn reconcile(
 
         // The file opened during init must be the same incremental we are about
         // to publish otherwise the manifest would not describe future writes
-        if (incr_seq != self._incr_seq) return Journal.Error.FailedToReconcileAof;
+        if (incr_seq != self._incr_seq) return Journal.Error.InvalidManifestSequence;
 
-        const incr_name = Manifest.incrName(allocator, filename, incr_seq) catch
-            return Journal.Error.OutOfMemory;
+        const incr_name = try Manifest.incrName(allocator, filename, incr_seq);
         new_incr_name = incr_name;
 
         // reset existing file related things
         if (self._file) |file| file.close(io);
         self._file = null;
-        self._file = dir.createFile(io, incr_name, .{}) catch
-            return Journal.Error.FailedToReconcileAof;
+        self._file = try dir.createFile(io, incr_name, .{});
         self._file_offset = 0;
         self._incr_bytes = 0;
         self._encoder.resetDbTracking();
 
-        Manifest.write(
+        try Manifest.write(
             io,
             allocator,
             dir,
@@ -668,21 +663,20 @@ pub fn reconcile(
                     .kind = .incr,
                 }},
             },
-        ) catch return Journal.Error.FailedToWriteManifest;
+        );
 
-        referenced.put(incr_name, {}) catch return Journal.Error.OutOfMemory;
+        try referenced.put(incr_name, {});
     }
 
-    const tmp_manifest_name = std.fmt.allocPrint(
+    const tmp_manifest_name = try std.fmt.allocPrint(
         allocator,
         "{s}.tmp",
         .{manifest_name},
-    ) catch return Journal.Error.OutOfMemory;
+    );
     defer allocator.free(tmp_manifest_name);
 
-    var deleted_count: usize = 0;
     var iterator = dir.iterate();
-    while (iterator.next(io) catch return Journal.Error.FailedToReconcileAof) |entry| {
+    while (try iterator.next(io)) |entry| {
         // NOTE: later if we have nested structure, this can change
         if (entry.kind != .file) continue;
 
@@ -691,12 +685,7 @@ pub fn reconcile(
             !referenced.contains(entry.name);
         if (!is_stale_manifest and !is_orphan_data) continue;
 
-        dir.deleteFile(io, entry.name) catch return Journal.Error.FailedToReconcileAof;
-        deleted_count += 1;
-    }
-
-    if (deleted_count > 0) {
-        helpers.logStderr(io, "aof: removed {d} unreferenced file(s)\n", .{deleted_count});
+        try dir.deleteFile(io, entry.name);
     }
 }
 
@@ -727,26 +716,26 @@ fn isAofDataFilename(name: []const u8, append_filename: []const u8) bool {
     return true;
 }
 
-pub fn deinit(ptr: *anyopaque) Journal.Error!void {
+pub fn deinit(ptr: *anyopaque) anyerror!void {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     const now_ms = time.nowMs(self._io);
-    var close_error: ?Journal.Error = null;
+    var close_error: ?anyerror = null;
 
     flush(ptr, now_ms) catch |err| {
-        helpers.logStderr(self._io, "aof: failed to close: {s}\n", .{@errorName(err)});
         close_error = err;
     };
 
-    const file = self._file orelse return Journal.Error.FailedToCloseAof;
-    if (close_error == null and self._config.append_fsync == .everysec) {
-        file.sync(self._io) catch {
-            close_error = Journal.Error.FailedToCloseAof;
-        };
-        if (close_error == null) self._last_fsync_ms = now_ms;
-    }
+    if (self._file) |file| {
+        if (close_error == null and self._config.append_fsync == .everysec) {
+            file.sync(self._io) catch |err| {
+                close_error = err;
+            };
+            if (close_error == null) self._last_fsync_ms = now_ms;
+        }
 
-    file.close(self._io);
-    self._file = null;
+        file.close(self._io);
+        self._file = null;
+    }
 
     self._buffer.deinit(self._allocator);
     if (close_error) |err| return err;
@@ -754,14 +743,14 @@ pub fn deinit(ptr: *anyopaque) Journal.Error!void {
 
 // TODO: this flush locked itself does not claim append lock but remind callers to claim it
 // Naming is confusing. Improve it.
-fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) Journal.Error!void {
-    const file = self._file orelse return Journal.Error.FailedToWriteIncrFile;
+fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) !void {
+    const file = self._file orelse return Journal.Error.MissingLiveAofFile;
     var write_buf: [1024]u8 = undefined;
     var file_writer = file.writer(self._io, &write_buf);
     // NOTE: We need to go to the exact bytes because new fresh writer starts at pos 0.
-    file_writer.seekTo(self._file_offset) catch return Journal.Error.FailedToWriteIncrFile;
-    file_writer.interface.writeAll(self._buffer.items) catch return Journal.Error.FailedToWriteIncrFile;
-    file_writer.interface.flush() catch return Journal.Error.FailedToWriteIncrFile;
+    try file_writer.seekTo(self._file_offset);
+    try file_writer.interface.writeAll(self._buffer.items);
+    try file_writer.interface.flush();
 
     const should_fsync = switch (self._config.append_fsync) {
         .always => true,
@@ -772,7 +761,7 @@ fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) Journal.Error!void {
         .no => false,
     };
     if (should_fsync) {
-        file.sync(self._io) catch return Journal.Error.FailedToWriteIncrFile;
+        try file.sync(self._io);
         self._last_fsync_ms = now_ms;
     }
 
@@ -782,7 +771,7 @@ fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) Journal.Error!void {
     self._last_write_failed = false;
 }
 
-fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) Journal.Error!void {
+fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) anyerror!void {
     const prepared: *PreparedRecord = @ptrCast(@alignCast(ptr));
     const self = prepared.backend;
     defer self._allocator.destroy(prepared);
@@ -794,7 +783,6 @@ fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) Journal.Error!v
     if (self._config.append_fsync == .always) {
         flushLocked(self, time.nowMs(self._io)) catch |err| {
             self._last_write_failed = true;
-            helpers.logStderr(self._io, "aof: failed to flush: {s}\n", .{@errorName(err)});
             return err;
         };
     }
@@ -808,7 +796,7 @@ fn abortPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) void {
     self._allocator.destroy(prepared);
 }
 
-fn ignoreWrite(_: *anyopaque, _: Journal.WriteEvent) Journal.Error!void {
+fn ignoreWrite(_: *anyopaque, _: Journal.WriteEvent) anyerror!void {
     return;
 }
 
@@ -839,34 +827,10 @@ fn withScratchDir(comptime name: []const u8, comptime testFn: fn (std.Io, std.Io
     try testFn(io, dir);
 }
 
-const TestStderrGuard = struct {
-    saved: std.posix.fd_t,
-    devnull: std.posix.fd_t,
-
-    fn silence() !TestStderrGuard {
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-        if (devnull < 0) return error.OpenDevNullFailed;
-        errdefer _ = std.c.close(devnull);
-
-        const saved = std.c.dup(std.posix.STDERR_FILENO);
-        if (saved < 0) return error.DupFailed;
-        errdefer _ = std.c.close(saved);
-
-        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
-        return .{ .saved = saved, .devnull = devnull };
-    }
-
-    fn restore(self: TestStderrGuard) void {
-        _ = std.c.dup2(self.saved, std.posix.STDERR_FILENO);
-        _ = std.c.close(self.saved);
-        _ = std.c.close(self.devnull);
-    }
-};
-
 test "ending a journal session allows another session to begin" {
     try withScratchDir("scratch-aof-journal-session-reentry", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-journal-session-reentry" };
             var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
@@ -897,7 +861,7 @@ test "journal begin serializes two concurrent callers" {
         }
 
         fn run(io: std.Io, _: std.Io.Dir) !void {
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-journal-session-serialization" };
             var backend = try AofBackend.init(io, std.testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
@@ -921,7 +885,7 @@ test "dueForRewrite is false below the min size even after huge growth" {
     try withScratchDir("scratch-aof-rewrite-below-min", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-below-min",
@@ -937,7 +901,7 @@ test "dueForRewrite is false below the min size even after huge growth" {
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
             defer tx.end();
-            try testing.expect(!journal_handle.dueForRewrite(config));
+            try testing.expect(!(try journal_handle.dueForRewrite(config)));
         }
     }.run);
 }
@@ -946,7 +910,7 @@ test "dueForRewrite is true once growth and min size are both met" {
     try withScratchDir("scratch-aof-rewrite-due", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-due",
@@ -962,7 +926,7 @@ test "dueForRewrite is true once growth and min size are both met" {
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
             defer tx.end();
-            try testing.expect(journal_handle.dueForRewrite(config));
+            try testing.expect(try journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -971,7 +935,7 @@ test "dueForRewrite treats a zero base size as reduce-to-min-size-only" {
     try withScratchDir("scratch-aof-rewrite-zero-base", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-zero-base",
@@ -987,7 +951,7 @@ test "dueForRewrite treats a zero base size as reduce-to-min-size-only" {
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
             defer tx.end();
-            try testing.expect(journal_handle.dueForRewrite(config));
+            try testing.expect(try journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -996,7 +960,7 @@ test "dueForRewrite is false when the percentage is zero" {
     try withScratchDir("scratch-aof-rewrite-disabled", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-disabled",
@@ -1012,7 +976,7 @@ test "dueForRewrite is false when the percentage is zero" {
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
             defer tx.end();
-            try testing.expect(!journal_handle.dueForRewrite(config));
+            try testing.expect(!(try journal_handle.dueForRewrite(config)));
         }
     }.run);
 }
@@ -1021,7 +985,7 @@ test "dueForRewrite is false while a rewrite is already running" {
     try withScratchDir("scratch-aof-rewrite-running", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-running",
@@ -1047,7 +1011,7 @@ test "dueForRewrite is false while a rewrite is already running" {
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
             defer tx.end();
-            try testing.expect(!journal_handle.dueForRewrite(config));
+            try testing.expect(!(try journal_handle.dueForRewrite(config)));
         }
     }.run);
 }
@@ -1056,7 +1020,7 @@ test "dueForRewrite backs off after a failed rewrite attempt" {
     try withScratchDir("scratch-aof-rewrite-backoff", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_only = true,
                 .append_dirname = "scratch-aof-rewrite-backoff",
@@ -1072,10 +1036,10 @@ test "dueForRewrite backs off after a failed rewrite attempt" {
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
             defer tx.end();
-            try testing.expect(!journal_handle.dueForRewrite(config));
+            try testing.expect(!(try journal_handle.dueForRewrite(config)));
 
             backend._last_rewrite_attempt_ms.? -= rewrite_retry_delay_ms;
-            try testing.expect(journal_handle.dueForRewrite(config));
+            try testing.expect(try journal_handle.dueForRewrite(config));
         }
     }.run);
 }
@@ -1085,7 +1049,7 @@ test "init creates the append directory and a seq-1 manifest on first boot" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-init-first-boot" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1112,7 +1076,7 @@ test "onWrite followed by flush puts the encoded command in the incr file" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-onwrite-flush" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1139,7 +1103,7 @@ test "prepared record is invisible until publish and abort keeps it invisible" {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-prepare-record" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1168,7 +1132,7 @@ test "always writes and fsyncs before onWrite returns" {
     try withScratchDir("scratch-aof-fsync-always", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-always",
                 .append_fsync = .always,
@@ -1194,7 +1158,7 @@ test "everysec does not fsync more than once per second" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             _ = dir;
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-everysec",
                 .append_fsync = .everysec,
@@ -1222,7 +1186,7 @@ test "everysec retries after a failed flush" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             _ = dir;
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-retry",
                 .append_fsync = .everysec,
@@ -1239,18 +1203,7 @@ test "everysec retries after a failed flush" {
                 const file = backend._file.?;
                 backend._file = null;
 
-                const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-                if (devnull < 0) return error.OpenDevNullFailed;
-                defer _ = std.c.close(devnull);
-                const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-                if (saved_stderr < 0) return error.DupFailed;
-                defer {
-                    _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-                    _ = std.c.close(saved_stderr);
-                }
-                _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
-                try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(1000));
+                try testing.expectError(Journal.Error.MissingLiveAofFile, j.flush(1000));
                 try testing.expectEqual(@as(?time.UnixMs, 0), backend._last_fsync_ms);
 
                 backend._file = file;
@@ -1263,11 +1216,67 @@ test "everysec retries after a failed flush" {
     }.run);
 }
 
+test "flush returns file source errors and retries the buffered write" {
+    try withScratchDir("scratch-aof-source-flush-retry", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            const Fail = struct {
+                fn write(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
+                    return error.InputOutput;
+                }
+
+                fn sync(_: ?*anyopaque, _: std.Io.File) std.Io.File.SyncError!void {
+                    return error.InputOutput;
+                }
+            };
+
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
+            const config: Config = .{
+                .append_dirname = "scratch-aof-source-flush-retry",
+                .append_fsync = .everysec,
+            };
+            var backend = try AofBackend.init(io, testing.allocator, &state, config);
+            defer backend.journal().deinit() catch {};
+            const journal_handle = backend.journal();
+            var tx = try journal_handle.begin();
+            defer tx.end();
+
+            const stages = [_]enum { write, sync }{ .write, .sync };
+            for (stages, 0..) |stage, index| {
+                try journal_handle.onWrite(sampleEvent());
+                var failed_vtable = io.vtable.*;
+                switch (stage) {
+                    .write => failed_vtable.fileWritePositional = Fail.write,
+                    .sync => failed_vtable.fileSync = Fail.sync,
+                }
+                backend._io = .{ .userdata = io.userdata, .vtable = &failed_vtable };
+                const flush_time: i64 = @intCast((index + 1) * 1000);
+                const source: anyerror = switch (stage) {
+                    .write => error.WriteFailed,
+                    .sync => error.InputOutput,
+                };
+                try testing.expectError(source, journal_handle.flush(flush_time));
+                try testing.expect(backend._last_write_failed);
+                try testing.expect(backend._buffer.items.len > 0);
+
+                backend._io = io;
+                try journal_handle.flush(flush_time);
+                try testing.expect(!backend._last_write_failed);
+                try testing.expectEqual(@as(usize, 0), backend._buffer.items.len);
+            }
+
+            const file = try dir.openFile(io, "appendonly.aof.1.incr", .{});
+            defer file.close(io);
+            try testing.expectEqual(backend._file_offset, try file.length(io));
+        }
+    }.run);
+}
+
 test "no policy flushes without fsync" {
     try withScratchDir("scratch-aof-fsync-no", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-fsync-no",
                 .append_fsync = .no,
@@ -1294,7 +1303,7 @@ test "onWrite alone leaves the file untouched" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-onwrite-buffers" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1317,7 +1326,7 @@ test "clean shutdown flushes no-policy writes without forcing fsync" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-shutdown-no-fsync",
                 .append_fsync = .no,
@@ -1346,7 +1355,7 @@ test "clean shutdown forces everysec writes to durable storage" {
             _ = dir;
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-shutdown-everysec-fsync",
                 .append_fsync = .everysec,
@@ -1374,7 +1383,7 @@ test "writeBaseEntry buffers reconstruction commands and commits the selected db
             _ = dir;
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-write-base-entry" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1406,7 +1415,7 @@ test "init reopens the existing live incr file and appends after its existing co
             const config: Config = .{ .append_dirname = "scratch-aof-reopen-no-truncate" };
 
             {
-                var state = PersistenceState.init(io, false);
+                var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
                 var backend = try AofBackend.init(io, testing.allocator, &state, config);
                 const journal_handle = backend.journal();
                 {
@@ -1422,7 +1431,7 @@ test "init reopens the existing live incr file and appends after its existing co
             defer testing.allocator.free(before);
             try testing.expect(before.len > 0);
 
-            var state2 = PersistenceState.init(io, false);
+            var state2 = PersistenceState.init(io, .{ .mutual_exclusive = false });
             var backend2 = try AofBackend.init(io, testing.allocator, &state2, config);
             defer backend2.journal().deinit() catch {};
 
@@ -1459,7 +1468,7 @@ test "init picks the highest-seq incr from a manifest with several" {
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.incr", .data = "older" });
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = "existing" });
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-picks-highest-seq" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1476,7 +1485,7 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
     try withScratchDir("scratch-aof-rewrite-cut-byte-accounting", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-rewrite-cut-byte-accounting" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1499,7 +1508,7 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
             var tries: usize = 0;
             while (reap_result == .running) {
                 var state_tx = try state.begin();
-                reap_result = state.reapAof();
+                reap_result = state.reapAof().status;
                 state_tx.end();
                 tries += 1;
                 if (tries > 10_000) return error.ChildNeverReaped;
@@ -1526,7 +1535,7 @@ test "successful finishRewrite publishes the new base and removes retired files"
     try withScratchDir("scratch-aof-finish-rewrite-success", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-finish-rewrite-success" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1588,7 +1597,7 @@ test "failed finishRewrite removes the orphan base and preserves the cut manifes
     try withScratchDir("scratch-aof-finish-rewrite-failure", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-finish-rewrite-failure" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1607,8 +1616,6 @@ test "failed finishRewrite removes the orphan base and preserves the cut manifes
             backend._pending_base_seq = 2;
             backend._last_rewrite_attempt_ms = 1;
 
-            const stderr_guard = try TestStderrGuard.silence();
-            defer stderr_guard.restore();
             const journal_handle = backend.journal();
             var tx = try journal_handle.begin();
             defer tx.end();
@@ -1637,7 +1644,7 @@ test "reconcile removes stale and orphaned AOF files only" {
     try withScratchDir("scratch-aof-reconcile", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-reconcile" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1663,8 +1670,6 @@ test "reconcile removes stale and orphaned AOF files only" {
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.x.incr", .data = "keep" });
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.manifest", .data = "keep" });
 
-            const stderr_guard = try TestStderrGuard.silence();
-            defer stderr_guard.restore();
             try backend.journal().reconcile(
                 io,
                 testing.allocator,
@@ -1692,7 +1697,7 @@ test "reconcile refuses to delete files without an authoritative manifest" {
     try withScratchDir("scratch-aof-reconcile-no-manifest", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-reconcile-no-manifest" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1700,7 +1705,7 @@ test "reconcile refuses to delete files without an authoritative manifest" {
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.base", .data = "evidence" });
 
             try testing.expectError(
-                Journal.Error.FailedToReadManifest,
+                Journal.Error.MissingAofManifest,
                 backend.journal().reconcile(
                     io,
                     testing.allocator,
@@ -1720,7 +1725,7 @@ test "a flush failure latches, and the next onWrite fails fast" {
             _ = dir;
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-flush-failure-latch" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1734,25 +1739,9 @@ test "a flush failure latches, and the next onWrite fails fast" {
                 const real_file = backend._file.?;
                 backend._file = null;
 
-                // flush's errdefer logs to the real stderr on failure -- exactly
-                // what this test exercises. Redirect it for the failing call,
-                // then restore it, same as cron.zig's/persistence_state.zig's
-                // own tests that trigger a logged failure path.
-                const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-                if (devnull < 0) return error.OpenDevNullFailed;
-                defer _ = std.c.close(devnull);
-
-                const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-                if (saved_stderr < 0) return error.DupFailed;
-                defer {
-                    _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-                    _ = std.c.close(saved_stderr);
-                }
-                _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
-                try testing.expectError(Journal.Error.FailedToWriteIncrFile, j.flush(0));
+                try testing.expectError(Journal.Error.MissingLiveAofFile, j.flush(0));
                 try testing.expect(backend._last_write_failed);
-                try testing.expectError(Journal.Error.UnableToRecordWrite, j.onWrite(sampleEvent()));
+                try testing.expectError(Journal.Error.JournalWriteBlocked, j.onWrite(sampleEvent()));
 
                 backend._file = real_file;
             }
@@ -1766,7 +1755,7 @@ test "concurrent onWrite from several threads loses no bytes" {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
-            var state = PersistenceState.init(io, false);
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{ .append_dirname = "scratch-aof-concurrent-onwrite" };
 
             var backend = try AofBackend.init(io, testing.allocator, &state, config);

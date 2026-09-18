@@ -56,14 +56,13 @@ const vtable = Store.VTable{
     .deinit = deinit,
 };
 
-pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!?object.Object {
+pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
-    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = try storage.begin();
     defer tx.end();
 
-    // TODO: Refactor with robust error propagation design
-    const maybe_value = storage.get(key) catch return Store.Error.SomethingWentWrong;
+    const maybe_value = try storage.get(key);
     const value = maybe_value orelse return null;
     return value.value;
 }
@@ -73,17 +72,16 @@ pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!?object.
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!?object.Object {
+pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Object {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
     try validateCondition(req.condition);
 
-    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = try storage.begin();
     defer tx.end();
 
-    // TODO: Refactor with robust error propagation design
-    const existing_entry = storage.get(req.key) catch return Store.Error.SomethingWentWrong;
+    const existing_entry = try storage.get(req.key);
     if (existing_entry != null and shouldSkipIfExist(req.condition)) {
         return makeSetResponse(req, existing_entry.?.value);
     }
@@ -92,35 +90,34 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) Store.Error!
         return makeSetResponse(req, null);
     }
 
-    // TODO: Refactor with robust error propagation design
-    const stored_entry = storage.put(req.key, .{
+    const stored_entry = try storage.put(req.key, .{
         .string = req.value,
     }, .{
         .expires_at = req.expires_at,
         .keepttl = req.keepttl,
-    }) catch return Store.Error.SomethingWentWrong;
+    });
 
     return makeSetResponse(req, stored_entry.value);
 }
 
-pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) Store.Error!bool {
+pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
-    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = try storage.begin();
     defer tx.end();
 
-    const existed = storage.get(key) catch return Store.Error.SomethingWentWrong;
-    storage.remove(key) catch return Store.Error.SomethingWentWrong;
+    const existed = try storage.get(key);
+    try storage.remove(key);
 
     return existed != null;
 }
 
-pub fn dbsize(ptr: *anyopaque, db_index: u32) Store.Error!u32 {
+pub fn dbsize(ptr: *anyopaque, db_index: u32) anyerror!u32 {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
-    var tx = storage.begin() catch return Store.Error.CancelledCommand;
+    var tx = try storage.begin();
     defer tx.end();
 
     return storage.size();
@@ -131,44 +128,39 @@ pub fn numDatabases(ptr: *anyopaque) u32 {
     return @intCast(self._storages.len);
 }
 
-pub fn save(ptr: *anyopaque) Store.Error!void {
+pub fn save(ptr: *anyopaque) anyerror!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    self._kgc.save(self._storages) catch return Store.Error.UnableToSave;
+    try self._kgc.save(self._storages);
 }
 
-pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {
+pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    self._kgc.bgsave(self._storages, origin) catch |err| {
-        return switch (err) {
-            error.SaveAlreadyInProgress => Store.Error.SaveAlreadyInProgress,
-            else => Store.Error.UnableToBackgroundSaveKgc,
-        };
-    };
+    try self._kgc.bgsave(self._storages, origin);
 }
 
-pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) Store.Error!void {
+pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
-    const aof = self._aof orelse return Store.Error.AofDisabled;
+    const aof = self._aof orelse return error.AofDisabled;
 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    var aof_tx = aof.begin() catch return Store.Error.UnableToRewriteAof;
+    var aof_tx = try aof.begin();
     defer aof_tx.end();
 
-    aof.bgRewrite(self._storages, origin) catch return Store.Error.UnableToRewriteAof;
+    try aof.bgRewrite(self._storages, origin);
 }
 
-fn beginStorageSessions(self: *MemoryStore) Store.Error![]Storage.Tx {
-    const sessions = self._allocator.alloc(Storage.Tx, self._storages.len) catch return Store.Error.OutOfMemory;
+fn beginStorageSessions(self: *MemoryStore) ![]Storage.Tx {
+    const sessions = try self._allocator.alloc(Storage.Tx, self._storages.len);
     errdefer self._allocator.free(sessions);
 
     var count: usize = 0;
@@ -178,7 +170,7 @@ fn beginStorageSessions(self: *MemoryStore) Store.Error![]Storage.Tx {
     };
 
     for (self._storages) |storage| {
-        sessions[count] = storage.begin() catch return Store.Error.CancelledCommand;
+        sessions[count] = try storage.begin();
         count += 1;
     }
 
@@ -216,7 +208,7 @@ fn shouldSkipIfNotExist(maybe_condition: ?Request.SetCondition) bool {
     return false;
 }
 
-fn validateCondition(maybe_condition: ?Request.SetCondition) Store.Error!void {
+fn validateCondition(maybe_condition: ?Request.SetCondition) error{UnsupportedCondition}!void {
     if (maybe_condition) |condition| switch (condition) {
         .nx, .xx => {},
         else => return error.UnsupportedCondition,
@@ -265,38 +257,38 @@ const BeginProbeStorage = struct {
         self.attempting.store(false, .release);
     }
 
-    fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
+    fn begin(ptr: *anyopaque) anyerror!Storage.Tx {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         self.attempting.store(true, .release);
         return self.inner.begin();
     }
 
-    fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
+    fn get(ptr: *anyopaque, key: []const u8) anyerror!?entry.Object {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.get(key);
     }
 
-    fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
+    fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) anyerror!entry.Object {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.put(key, value, options);
     }
 
-    fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
+    fn remove(ptr: *anyopaque, key: []const u8) anyerror!void {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.remove(key);
     }
 
-    fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
+    fn removeIfExpired(ptr: *anyopaque, key: []const u8) anyerror!bool {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.removeIfExpired(key);
     }
 
-    fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpiration {
+    fn getExp(ptr: *anyopaque, key: []const u8) anyerror!?entry.ObjectExpiration {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.getExp(key);
     }
 
-    fn setExp(ptr: *anyopaque, key: []const u8, expires_at: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {
+    fn setExp(ptr: *anyopaque, key: []const u8, expires_at: ?time.UnixMs) anyerror!entry.ObjectExpiration {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.setExp(key, expires_at);
     }
@@ -306,17 +298,17 @@ const BeginProbeStorage = struct {
         return self.inner.getExpirableCount();
     }
 
-    fn sampleExpirableKey(ptr: *anyopaque) Storage.Error!?[]const u8 {
+    fn sampleExpirableKey(ptr: *anyopaque) anyerror!?[]const u8 {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.sampleExpirableKey();
     }
 
-    fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
+    fn tryExpireRandom(ptr: *anyopaque) anyerror!?[]const u8 {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.tryExpireRandom();
     }
 
-    fn clearExp(ptr: *anyopaque, key: []const u8) Storage.Error!void {
+    fn clearExp(ptr: *anyopaque, key: []const u8) anyerror!void {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.clearExp(key);
     }
@@ -330,7 +322,7 @@ const BeginProbeStorage = struct {
         ptr: *anyopaque,
         ctx: *anyopaque,
         visit: *const fn (*anyopaque, []const u8, object.Object, ?time.UnixMs) anyerror!void,
-    ) Storage.Error!void {
+    ) anyerror!void {
         const self: *BeginProbeStorage = @ptrCast(@alignCast(ptr));
         return self.inner.forEach(ctx, visit);
     }
@@ -343,7 +335,7 @@ const BeginProbeStorage = struct {
 
 test "set stores a value and returns null" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
@@ -368,7 +360,7 @@ test "set stores a value and returns null" {
 
 test "set stores a value and returns value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
@@ -393,7 +385,7 @@ test "set stores a value and returns value" {
 
 test "get returns null for a missing key" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
@@ -406,7 +398,7 @@ test "get returns null for a missing key" {
 
 test "set replaces an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
@@ -441,7 +433,7 @@ test "set replaces an existing value" {
 
 test "set with NX does not replace an existing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
@@ -470,7 +462,7 @@ test "set with NX does not replace an existing value" {
 
 test "set with XX does not create a missing value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
@@ -490,7 +482,7 @@ test "set with XX does not create a missing value" {
 
 test "set owns the key and value bytes" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(
         testing.allocator,
@@ -524,7 +516,7 @@ test "set owns the key and value bytes" {
 test "databases are isolated from each other" {
     var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
     var backend_one = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(
         testing.allocator,
@@ -553,7 +545,7 @@ test "databases are isolated from each other" {
 test "save then load round-trips across databases" {
     var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
     var backend_one = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-roundtrip.kgc");
     var memory_store = MemoryStore.init(
         testing.allocator,
@@ -598,7 +590,7 @@ test "save resets the persistence change count" {
     const NotifierStorage = @import("../storage/notifier_storage.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-save-reset.kgc");
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var memory_store = MemoryStore.init(testing.allocator, &.{notifier.storage()}, kgc_backend.snapshot(), null);
@@ -616,13 +608,13 @@ test "save resets the persistence change count" {
 
 test "bgrewriteaof returns AofDisabled when no journal is configured" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    try testing.expectError(Store.Error.AofDisabled, data_store.bgrewriteaof(.manual));
+    try testing.expectError(error.AofDisabled, data_store.bgrewriteaof(.manual));
 }
 
 test "AOF rewrite reports progress until completion and replays writes" {
@@ -638,7 +630,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
     config.append_dirname = dirname;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
@@ -667,7 +659,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
     var tries: usize = 0;
     while (result == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapAof();
+        result = persistence_state.reapAof().status;
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -687,7 +679,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
     }
 
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
-    var fresh_state = PersistenceState.init(testing.io, false);
+    var fresh_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var fresh_kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &fresh_state, "test.kgc");
     var fresh_memory_store = MemoryStore.init(testing.allocator, &.{fresh_backend.storage()}, fresh_kgc.snapshot(), null);
     var fresh_store = fresh_memory_store.store();
@@ -712,7 +704,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     config.append_dirname = dirname;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
@@ -737,7 +729,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     var tries: usize = 0;
     while (result == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapAof();
+        result = persistence_state.reapAof().status;
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -753,7 +745,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     }
 
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
-    var fresh_state = PersistenceState.init(testing.io, false);
+    var fresh_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var fresh_kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &fresh_state, "test.kgc");
     var fresh_memory_store = MemoryStore.init(testing.allocator, &.{fresh_backend.storage()}, fresh_kgc.snapshot(), null);
     var fresh_store = fresh_memory_store.store();
@@ -778,7 +770,7 @@ test "concurrent KGC snapshot contains one complete submitted value" {
     @memset(second, 0xca);
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, path);
     var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
@@ -842,7 +834,7 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
 
     var backend_zero = DefaultStorage.init(testing.io, testing.allocator);
     var backend_one = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
@@ -878,7 +870,7 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
     var tries: usize = 0;
     while (result == .running) {
         var state_tx = try persistence_state.begin();
-        result = persistence_state.reapAof();
+        result = persistence_state.reapAof().status;
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -893,7 +885,7 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
 
     var fresh_zero = DefaultStorage.init(testing.io, testing.allocator);
     var fresh_one = DefaultStorage.init(testing.io, testing.allocator);
-    var fresh_state = PersistenceState.init(testing.io, false);
+    var fresh_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var fresh_kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &fresh_state, "test.kgc");
     var fresh_memory_store = MemoryStore.init(testing.allocator, &.{ fresh_zero.storage(), fresh_one.storage() }, fresh_kgc.snapshot(), null);
     var fresh_store = fresh_memory_store.store();
@@ -925,7 +917,7 @@ test "KGC bgsave waits for active Storage work and preserves all databases" {
     var backend_one = DefaultStorage.init(testing.io, testing.allocator);
     var probe_one: BeginProbeStorage = .{ .inner = backend_one.storage() };
     const storage_one = probe_one.storage();
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, path);
     var memory_store = MemoryStore.init(testing.allocator, &.{ backend_zero.storage(), storage_one }, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();

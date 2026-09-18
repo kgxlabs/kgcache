@@ -25,12 +25,12 @@ fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *
     const self: *Select = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len != 1) {
-        return .{ .simple_error = "Wrong number of arguments" };
+        return error.WrongNumberArguments;
     }
 
     const index = try command_arguments.bulkStringInt(u32, self.arguments[0]);
     if (index >= data_store.numDatabases()) {
-        return .{ .simple_error = "ERR DB index is out of range" };
+        return error.DbIndexOutOfRange;
     }
 
     client_state.db_index = index;
@@ -78,11 +78,7 @@ test "rejects an out-of-range database index" {
     var data_store = mock_store.store();
     var client_state: Commander.ClientState = .{};
 
-    const result = try command.execute(testing.io, &data_store, &client_state);
-    switch (result) {
-        .simple_error => |message| try testing.expectEqualStrings("ERR DB index is out of range", message),
-        else => return error.TestUnexpectedResult,
-    }
+    try testing.expectError(error.DbIndexOutOfRange, command.execute(testing.io, &data_store, &client_state));
     try testing.expectEqual(0, client_state.db_index);
 }
 
@@ -91,9 +87,5 @@ test "rejects wrong number of arguments" {
     var values = [_]resp.RESPValue{.{ .bulk_string = "SELECT" }};
     const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
 
-    const result = try TestHelpers.executeWithMemoryStore(command);
-    switch (result) {
-        .simple_error => |message| try testing.expectEqualStrings("Wrong number of arguments", message),
-        else => return error.TestUnexpectedResult,
-    }
+    try testing.expectError(error.WrongNumberArguments, TestHelpers.executeWithMemoryStore(command));
 }

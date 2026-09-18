@@ -20,31 +20,16 @@ pub const RESPValue = union(enum) {
     simple_error: []const u8,
 };
 
-const RESPError = error{
-    NotArray,
-    NotCRLF,
-    NotBulkString,
+pub const ParseError = std.mem.Allocator.Error || error{
     NotInteger,
     Incomplete,
     MalformedSize,
     ExceededSize,
-    TooLong,
     InvalidType,
     IncorrectToken,
     Malformed,
-    UnknownType,
-    SomethingWentWrong,
-    WrongNumberOfArgument,
 };
-
-fn errorMessage(err: RESPError) []const u8 {
-    return switch (err) {
-        error.Malformed => "malformed requst",
-        error.NotArray => "value is not an array",
-        error.UnknownType => "unknown type",
-        else => "something went wrong",
-    };
-}
+const RESPError = ParseError;
 
 fn ParseResult(comptime T: type) type {
     return struct {
@@ -78,19 +63,24 @@ pub const Parser = struct {
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator, value: RESPValue) void {
-        switch (value) {
-            .array => |optional_items| {
-                if (optional_items) |items| {
-                    for (items) |item| {
-                        self.deinit(allocator, item);
-                    }
-                    allocator.free(items);
-                }
-            },
-            else => {},
-        }
+        _ = self;
+        deinitValue(allocator, value);
     }
 };
+
+fn deinitValue(allocator: std.mem.Allocator, value: RESPValue) void {
+    switch (value) {
+        .array => |optional_items| {
+            if (optional_items) |items| {
+                for (items) |item| {
+                    deinitValue(allocator, item);
+                }
+                allocator.free(items);
+            }
+        },
+        else => {},
+    }
+}
 
 pub fn parser(data: []const u8) Parser {
     return .{ .data = data };
@@ -115,7 +105,10 @@ fn parseRESP(allocator: std.mem.Allocator, data: []const u8) RESPError!ParseResu
 
 fn parseArray(allocator: std.mem.Allocator, data: []const u8) RESPError!ParseResult(RESPValue) {
     var list: std.ArrayList(RESPValue) = .empty;
-    errdefer list.deinit(allocator);
+    errdefer {
+        for (list.items) |item| deinitValue(allocator, item);
+        list.deinit(allocator);
+    }
 
     var pos: usize = 0;
 
@@ -139,12 +132,15 @@ fn parseArray(allocator: std.mem.Allocator, data: []const u8) RESPError!ParseRes
 
         // Get first byte and match it with supported operators
         const parsed_item = try parseRESP(allocator, data[pos..]);
-        list.append(allocator, parsed_item.value) catch return RESPError.TooLong;
+        list.append(allocator, parsed_item.value) catch |err| {
+            deinitValue(allocator, parsed_item.value);
+            return err;
+        };
 
         pos += parsed_item.consumed;
     }
 
-    const items = list.toOwnedSlice(allocator) catch return RESPError.TooLong;
+    const items = try list.toOwnedSlice(allocator);
     return .{
         .value = .{ .array = items },
         .consumed = pos,
@@ -278,7 +274,7 @@ fn parseSize(data: []const u8, token: []const u8) RESPError!ParseResult(isize) {
 }
 
 pub const Serializer = struct {
-    pub fn serialize(_: Serializer, allocator: std.mem.Allocator, value: RESPValue) RESPError![]const u8 {
+    pub fn serialize(_: Serializer, allocator: std.mem.Allocator, value: RESPValue) std.mem.Allocator.Error![]const u8 {
         return switch (value) {
             .bulk_string => |bs_value| return serializeBulkString(allocator, bs_value),
             .simple_string => |str_value| return serializeSimpleString(allocator, str_value),
@@ -297,42 +293,42 @@ pub fn serializer() Serializer {
     return Serializer{};
 }
 
-fn serializeBulkString(allocator: std.mem.Allocator, maybe_value: ?[]const u8) RESPError![]const u8 {
+fn serializeBulkString(allocator: std.mem.Allocator, maybe_value: ?[]const u8) std.mem.Allocator.Error![]const u8 {
     if (maybe_value == null) {
         // TODO: Here we can simply use string literal but then the client code needs to know if the result is stack memory or heap memory.
         // This makes sure that we dont free urelated memory but this does heap allocator which is not ideal
         // Improve this if better approach is found
-        return std.fmt.allocPrint(allocator, "$-1\r\n", .{}) catch return RESPError.TooLong;
+        return std.fmt.allocPrint(allocator, "$-1\r\n", .{});
     }
 
     const value = maybe_value.?;
-    return std.fmt.allocPrint(allocator, "${d}\r\n{s}\r\n", .{ value.len, value }) catch RESPError.TooLong;
+    return std.fmt.allocPrint(allocator, "${d}\r\n{s}\r\n", .{ value.len, value });
 }
 
-fn serializeSimpleString(allocator: std.mem.Allocator, value: []const u8) RESPError![]const u8 {
-    return std.fmt.allocPrint(allocator, "+{s}\r\n", .{value}) catch RESPError.TooLong;
+fn serializeSimpleString(allocator: std.mem.Allocator, value: []const u8) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(allocator, "+{s}\r\n", .{value});
 }
 
-fn serializeInteger(allocator: std.mem.Allocator, value: i64) RESPError![]const u8 {
-    return std.fmt.allocPrint(allocator, ":{d}\r\n", .{value}) catch RESPError.TooLong;
+fn serializeInteger(allocator: std.mem.Allocator, value: i64) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(allocator, ":{d}\r\n", .{value});
 }
 
-fn serializeErrorString(allocator: std.mem.Allocator, err_msg: []const u8) RESPError![]const u8 {
-    return std.fmt.allocPrint(allocator, "-{s}\r\n", .{err_msg}) catch RESPError.TooLong;
+fn serializeErrorString(allocator: std.mem.Allocator, err_msg: []const u8) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(allocator, "-{s}\r\n", .{err_msg});
 }
 
-fn serializeArray(allocator: std.mem.Allocator, maybe_value: ?[]RESPValue) RESPError![]const u8 {
+fn serializeArray(allocator: std.mem.Allocator, maybe_value: ?[]RESPValue) std.mem.Allocator.Error![]const u8 {
     if (maybe_value == null) {
-        return std.fmt.allocPrint(allocator, "*0\r\n", .{}) catch RESPError.TooLong;
+        return std.fmt.allocPrint(allocator, "*0\r\n", .{});
     }
 
     var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(allocator);
 
     const values = maybe_value.?;
-    const header = std.fmt.allocPrint(allocator, "*{d}\r\n", .{values.len}) catch return RESPError.TooLong;
+    const header = try std.fmt.allocPrint(allocator, "*{d}\r\n", .{values.len});
     defer allocator.free(header);
-    list.appendSlice(allocator, header) catch return RESPError.TooLong;
+    try list.appendSlice(allocator, header);
     for (values) |item| {
         const serialized_value = try switch (item) {
             .bulk_string => |bs| serializeBulkString(allocator, bs),
@@ -343,34 +339,23 @@ fn serializeArray(allocator: std.mem.Allocator, maybe_value: ?[]RESPValue) RESPE
         };
         defer allocator.free(serialized_value);
 
-        list.appendSlice(allocator, serialized_value) catch return RESPError.TooLong;
+        try list.appendSlice(allocator, serialized_value);
     }
 
-    return list.toOwnedSlice(allocator) catch return RESPError.TooLong;
+    return list.toOwnedSlice(allocator);
 }
 
 fn isToken(data: []const u8, token: []const u8) bool {
     return std.mem.eql(u8, data, token);
 }
 
-pub fn parseErrorResponse(err: RESPError) []const u8 {
-    return switch (err) {
-        error.Incomplete => "-ERR protocol error: incomplete request\r\n",
-        error.MalformedSize => "-ERR protocol error: malformed size\r\n",
-        error.InvalidType => "-ERR protocol error: invalid RESP type\r\n",
-        error.IncorrectToken => "-ERR protocol error: incorrect token\r\n",
-        error.NotInteger => "-ERR protocol error: invalid integer\r\n",
-        error.Malformed => "-ERR protocol error: malformed request\r\n",
-        error.NotArray,
-        error.NotCRLF,
-        error.NotBulkString,
-        error.ExceededSize,
-        error.TooLong,
-        error.UnknownType,
-        error.SomethingWentWrong,
-        error.WrongNumberOfArgument,
-        => "-ERR protocol error\r\n",
-    };
+test "parser and serializer preserve allocation failure sources" {
+    var failing_parser_allocator = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var p = parser("*1\r\n$4\r\nPING\r\n");
+    try testing.expectError(error.OutOfMemory, p.parse(failing_parser_allocator.allocator()));
+
+    var failing_serializer_allocator = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, serializer().serialize(failing_serializer_allocator.allocator(), .{ .simple_string = "OK" }));
 }
 
 test "parse array with one bulk string" {

@@ -48,6 +48,9 @@ pub fn run(
             defer state_tx.end();
 
             const completed_save = persistence_state.reapKgc(time.nowMs(io));
+            if (completed_save.report_error) |err| {
+                logger.err("cron: KGC background child failed", err, @errorReturnTrace());
+            }
             _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch |err| {
                 logger.err("cron: failed to account for completed background save", err, @errorReturnTrace());
             };
@@ -66,7 +69,7 @@ pub fn run(
                 break :blk persistence_state.reapAof();
             };
             finishAofIfCompleted(logger, aof, aof_result);
-            triggerRewriteIfDue(logger, aof, persistence_state, data_store, config);
+            triggerRewriteIfDue(logger, aof, data_store, config);
         }
 
         triggerSaveIfDue(
@@ -111,9 +114,12 @@ fn flushAofIfDue(io: std.Io, logger: logging.Logger, aof: persistence.JournalPer
 fn finishAofIfCompleted(
     logger: logging.Logger,
     aof: persistence.JournalPersistence,
-    reap_result: PersistenceState.ReapResult,
+    reap_result: PersistenceState.AofReapResult,
 ) void {
-    if (reap_result == .running) return;
+    if (reap_result.report_error) |err| {
+        logger.err("cron: AOF background child failed", err, @errorReturnTrace());
+    }
+    if (reap_result.status == .running) return;
 
     var tx = aof.begin() catch |err| {
         logger.err("cron: failed to begin AOF rewrite completion session", err, @errorReturnTrace());
@@ -121,7 +127,7 @@ fn finishAofIfCompleted(
     };
     defer tx.end();
 
-    aof.finishRewrite(reap_result) catch |err| {
+    aof.finishRewrite(reap_result.status) catch |err| {
         logger.err("cron: failed to finish AOF rewrite", err, @errorReturnTrace());
     };
 }
@@ -169,7 +175,6 @@ fn triggerSaveIfDue(
 fn triggerRewriteIfDue(
     logger: logging.Logger,
     aof: persistence.JournalPersistence,
-    persistence_state: *PersistenceState,
     data_store: *store.Store,
     config: Config,
 ) void {
@@ -179,23 +184,16 @@ fn triggerRewriteIfDue(
             return;
         };
         defer tx.end();
-        if (!aof.dueForRewrite(config)) return;
+        const due = aof.dueForRewrite(config) catch |err| {
+            logger.err("cron: failed to check AOF rewrite eligibility", err, @errorReturnTrace());
+            return;
+        };
+        if (!due) return;
     }
 
     data_store.bgrewriteaof(.automatic) catch |err| {
-        if (err != error.UnableToRewriteAof) {
-            logger.err("cron: failed to trigger automatic AOF rewrite", err, @errorReturnTrace());
-            return;
-        }
-
-        // A manual client command rewrite can come in after due check and before bgRewrite call and can win the race.
-        // client command takes the highest priority so that refusal is expected and must not produce one log per cron tick.
-        var state_tx = persistence_state.beginUncancelable();
-        defer state_tx.end();
-        const rewrite_running = persistence_state.aofInProgress();
-        if (!rewrite_running) {
-            logger.err("cron: failed to trigger automatic AOF rewrite", err, @errorReturnTrace());
-        }
+        if (err == error.RewriteAlreadyInProgress) return;
+        logger.err("cron: failed to trigger automatic AOF rewrite", err, @errorReturnTrace());
     };
 }
 
@@ -243,33 +241,33 @@ const FinishRewriteJournal = struct {
         return .{ .ptr = self, .vtable = &vtable, ._lock = &self.lock };
     }
 
-    fn publishRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {}
-    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+    fn publishRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) anyerror!void {}
+    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) anyerror!persistence.JournalPersistence.Record {
         return persistence.JournalPersistence.Record.init(ptr, event, publishRecord, abortRecord);
     }
     fn abortRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
-    fn flush(ptr: *anyopaque, now_ms: i64) persistence.JournalPersistence.Error!void {
+    fn flush(ptr: *anyopaque, now_ms: i64) anyerror!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
         self.flush_calls += 1;
         self.last_flush_ms = now_ms;
-        if (self.fail_flush) return error.FailedToWriteIncrFile;
+        if (self.fail_flush) return error.TestFlushSource;
     }
-    fn bgRewrite(_: *anyopaque, _: []const storage.Interface, _: store.Store.TriggerOrigin) persistence.JournalPersistence.Error!void {}
-    fn dueForRewrite(_: *anyopaque, _: Config) bool {
+    fn bgRewrite(_: *anyopaque, _: []const storage.Interface, _: store.Store.TriggerOrigin) anyerror!void {}
+    fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
     }
 
-    fn finishRewrite(ptr: *anyopaque, result: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {
+    fn finishRewrite(ptr: *anyopaque, result: PersistenceState.ReapResult) anyerror!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
         self.calls += 1;
         self.last_result = result;
-        if (self.fail) return error.FailedToRewriteAof;
+        if (self.fail) return error.TestRewriteCompletion;
     }
 
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
-    fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) persistence.JournalPersistence.Error!void {}
-    fn deinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) anyerror!void {}
+    fn deinit(_: *anyopaque) anyerror!void {}
 };
 
 test "cron flushes the AOF and swallows flush errors" {
@@ -304,7 +302,7 @@ test "everysec cron flush drains buffered commands" {
     cwd.deleteTree(testing.io, dirname) catch {};
     defer cwd.deleteTree(testing.io, dirname) catch {};
 
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const config: Config = .{
         .append_dirname = dirname,
         .append_fsync = .everysec,
@@ -334,7 +332,7 @@ test "no cron flush drains buffered commands" {
     cwd.deleteTree(testing.io, dirname) catch {};
     defer cwd.deleteTree(testing.io, dirname) catch {};
 
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const config: Config = .{
         .append_dirname = dirname,
         .append_fsync = .no,
@@ -362,10 +360,10 @@ test "cron forwards failed AOF completion and ignores a running child" {
     var backend = FinishRewriteJournal.init(testing.io);
     const journal = backend.journal();
 
-    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .running);
+    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .{ .status = .running });
     try testing.expectEqual(@as(usize, 0), backend.calls);
 
-    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .failed);
+    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .{ .status = .failed });
     try testing.expectEqual(@as(usize, 1), backend.calls);
     try testing.expectEqual(PersistenceState.ReapResult.failed, backend.last_result.?);
 }
@@ -387,7 +385,7 @@ test "cron swallows finishRewrite errors" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
-    finishAofIfCompleted(logging.NoopLogger.logger(), backend.journal(), .succeeded);
+    finishAofIfCompleted(logging.NoopLogger.logger(), backend.journal(), .{ .status = .succeeded });
 
     try testing.expectEqual(@as(usize, 1), backend.calls);
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, backend.last_result.?);
@@ -401,7 +399,7 @@ test "triggerRewriteIfDue starts a rewrite when the rule is met" {
     cwd.deleteTree(testing.io, dirname) catch {};
     defer cwd.deleteTree(testing.io, dirname) catch {};
 
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const config: Config = .{
         .append_only = true,
         .append_dirname = dirname,
@@ -415,7 +413,7 @@ test "triggerRewriteIfDue starts a rewrite when the rule is met" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    triggerRewriteIfDue(logging.NoopLogger.logger(), journal, &state, &data_store, config);
+    triggerRewriteIfDue(logging.NoopLogger.logger(), journal, &data_store, config);
 
     {
         var state_tx = try state.begin();
@@ -427,7 +425,7 @@ test "triggerRewriteIfDue starts a rewrite when the rule is met" {
     var tries: usize = 0;
     while (result == .running) {
         var state_tx = try state.begin();
-        result = state.reapAof();
+        result = state.reapAof().status;
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -446,7 +444,7 @@ test "triggerRewriteIfDue does nothing when a rewrite is already running" {
     cwd.deleteTree(testing.io, dirname) catch {};
     defer cwd.deleteTree(testing.io, dirname) catch {};
 
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const config: Config = .{
         .append_only = true,
         .append_dirname = dirname,
@@ -468,11 +466,11 @@ test "triggerRewriteIfDue does nothing when a rewrite is already running" {
         state.finishAof();
     }
 
-    triggerRewriteIfDue(logging.NoopLogger.logger(), backend.journal(), &state, &data_store, config);
+    triggerRewriteIfDue(logging.NoopLogger.logger(), backend.journal(), &data_store, config);
 
     var state_tx = try state.begin();
     defer state_tx.end();
-    try testing.expectEqual(PersistenceState.ReapResult.running, state.reapAof());
+    try testing.expectEqual(PersistenceState.ReapResult.running, state.reapAof().status);
 }
 
 test "a failed rewrite is not retried immediately and wait for delay" {
@@ -483,7 +481,7 @@ test "a failed rewrite is not retried immediately and wait for delay" {
     cwd.deleteTree(testing.io, dirname) catch {};
     defer cwd.deleteTree(testing.io, dirname) catch {};
 
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const config: Config = .{
         .append_only = true,
         .append_dirname = dirname,
@@ -495,12 +493,12 @@ test "a failed rewrite is not retried immediately and wait for delay" {
     var mock_store = store.MockStore.init();
     var data_store = mock_store.store();
 
-    triggerRewriteIfDue(logging.NoopLogger.logger(), backend.journal(), &state, &data_store, config);
+    triggerRewriteIfDue(logging.NoopLogger.logger(), backend.journal(), &data_store, config);
 
     var state_tx = try state.begin();
     defer state_tx.end();
     try testing.expect(!state.aofInProgress());
-    try testing.expectEqual(PersistenceState.ReapResult.running, state.reapAof());
+    try testing.expectEqual(PersistenceState.ReapResult.running, state.reapAof().status);
 }
 
 test "a completed background save preserves changes made after its snapshot change count" {
@@ -510,7 +508,7 @@ test "a completed background save preserves changes made after its snapshot chan
     const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
@@ -557,7 +555,7 @@ test "a completed background save preserves changes made after its snapshot chan
 test "a failed background save leaves changes dirty" {
     const testing = std.testing;
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     persistence_state.recordChange();
 
     {
@@ -587,22 +585,6 @@ test "a failed background save leaves changes dirty" {
         });
     }
 
-    // reapKgc logs to the real stderr when it observes this non-zero exit --
-    // exactly what this test exercises. Redirect it for the reap loop, then
-    // restore it, same as persistence_state.zig's own
-    // "reapKgc clears state after the child exits with a failure status" test.
-    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-    if (devnull < 0) return error.OpenDevNullFailed;
-    defer _ = std.c.close(devnull);
-
-    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-    if (saved_stderr < 0) return error.DupFailed;
-    defer {
-        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-        _ = std.c.close(saved_stderr);
-    }
-    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
     const failure_ms = time.nowMs(testing.io);
     var reap_result: PersistenceState.KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
@@ -615,6 +597,7 @@ test "a failed background save leaves changes dirty" {
         if (tries > 10_000) return error.ChildNeverReaped;
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
+    try testing.expectEqual(error.ChildExitedAbnormally, reap_result.report_error.?);
 
     try testing.expectEqual(1, persistence_state.captureSnapshotChangeCount());
     {
@@ -631,7 +614,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
     const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
@@ -675,7 +658,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
     const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
@@ -708,7 +691,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
     const persistence_module = @import("persistence.zig");
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
@@ -733,38 +716,31 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
 
 test "triggerSaveIfDue waits after an automatic save start failure" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var test_logger = logging.TestLogger.init();
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     persistence_state.recordChange();
     var mock_store = store.MockStore.init();
-    mock_store.bgsave_result = error.UnableToBackgroundSaveKgc;
+    mock_store.bgsave_result = error.TestBackgroundStart;
     var data_store = mock_store.store();
     const config: Config = .{
         .save_rules = &.{.{ .seconds = 0, .changes = 1 }},
         .bgsave_retry_delay_ms = 5000,
     };
 
-    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-    if (devnull < 0) return error.OpenDevNullFailed;
-    defer _ = std.c.close(devnull);
-
-    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-    if (saved_stderr < 0) return error.DupFailed;
-    defer {
-        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-        _ = std.c.close(saved_stderr);
-    }
-    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
     const now_ms = time.nowMs(testing.io);
-    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
-    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(test_logger.logger(), &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(test_logger.logger(), &data_store, &persistence_state, now_ms, config);
 
     try testing.expectEqual(@as(usize, 1), mock_store.bgsave_calls);
+    const events = test_logger.recordedEvents();
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqual(error.TestBackgroundStart, events[0].source.?);
 }
 
 test "triggerSaveIfDue does not start cooldown for a busy save" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var test_logger = logging.TestLogger.init();
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     persistence_state.recordChange();
     var mock_store = store.MockStore.init();
     mock_store.bgsave_result = error.SaveAlreadyInProgress;
@@ -775,16 +751,17 @@ test "triggerSaveIfDue does not start cooldown for a busy save" {
     };
 
     const now_ms = time.nowMs(testing.io);
-    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(test_logger.logger(), &data_store, &persistence_state, now_ms, config);
     mock_store.bgsave_result = {};
-    triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, now_ms, config);
+    triggerSaveIfDue(test_logger.logger(), &data_store, &persistence_state, now_ms, config);
 
     try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
 }
 
 test "triggerSaveIfDue retries at the cooldown boundary without another write" {
     const testing = std.testing;
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     persistence_state.recordChange();
     const failure_ms = time.nowMs(testing.io);
     {

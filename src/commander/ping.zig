@@ -34,7 +34,7 @@ test "execute ping command" {
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
     var memory_store = store.MemoryStore.init(
         testing.allocator,

@@ -45,3 +45,28 @@ pub fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     if (runtime_error) |err| return err;
     if (cleanup_error) |err| return err;
 }
+
+test "application reports a configuration read source once" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const args = [_][*:0]const u8{ "kgcache", "scratch-missing-config-for-error-test.conf" };
+    const init: std.process.Init = .{
+        .minimal = .{
+            .args = .{ .vector = &args },
+            .environ = std.process.Environ.empty,
+        },
+        .arena = &arena,
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .environ_map = undefined,
+        .preopens = undefined,
+    };
+    var test_logger = logging.TestLogger.init();
+
+    try testing.expectError(error.FileNotFound, runApplication(init, test_logger.logger()));
+
+    const events = test_logger.recordedEvents();
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqual(error.FileNotFound, events[0].source.?);
+}

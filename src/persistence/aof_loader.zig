@@ -5,21 +5,11 @@ const ClientState = @import("../client_state.zig");
 const store = @import("../store.zig");
 const resp = @import("../resp.zig");
 const commander = @import("../commander.zig");
-const helpers = @import("../helpers.zig");
 
 pub const Error = error{
-    OutOfMemory,
-    FailedToLoadManifestDir,
-    FailedToLoadManifest,
-    FailedToReadManifest,
-    FailedToParseEntry,
-    FailedToInitCommander,
-    FailedToExecuteCommand,
-    CorruptAof,
     TruncatedAof,
-    CommandFailed,
     MissingAofFile,
-    FailedToTruncateAof,
+    InvalidAofCommandResult,
 };
 
 const ReplayResult = union(enum) {
@@ -35,27 +25,22 @@ pub const ReplayStats = struct {
     file_offset: u64 = 0,
 };
 
-pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) Error!ReplayStats {
+pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) !ReplayStats {
     const cwd = std.Io.Dir.cwd();
     var dir = cwd.openDir(io, config.append_dirname, .{}) catch |err| switch (err) {
-        error.FileNotFound => {
-            helpers.logStdout(io, "aof: manifest dir not found: {s}\n", .{@errorName(err)});
-            return .{};
-        },
-        else => {
-            return Error.FailedToLoadManifestDir;
-        },
+        error.FileNotFound => return .{},
+        else => return err,
     };
     defer dir.close(io);
 
-    const manifest_name = Manifest.manifestName(allocator, config.append_filename) catch return Error.FailedToLoadManifest;
+    const manifest_name = try Manifest.manifestName(allocator, config.append_filename);
     defer allocator.free(manifest_name);
-    const manifest = (Manifest.read(
+    const manifest = (try Manifest.read(
         io,
         allocator,
         dir,
         manifest_name,
-    ) catch return Error.FailedToReadManifest) orelse return .{};
+    )) orelse return .{};
     defer manifest.deinit(allocator);
 
     var client_state = ClientState.init();
@@ -85,11 +70,10 @@ fn replayFile(
     dir: std.Io.Dir,
     filename: []const u8,
     is_last: bool,
-) Error!u64 {
+) !u64 {
     const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return Error.MissingAofFile,
-        error.OutOfMemory => return Error.OutOfMemory,
-        else => return Error.FailedToReadManifest,
+        else => return err,
     };
     defer allocator.free(contents);
     const result = try replayContents(
@@ -98,14 +82,12 @@ fn replayFile(
         contents,
         data_store,
         client_state,
-        filename,
     );
 
     switch (result) {
         .complete => return @intCast(contents.len),
         .truncated => |safe_offset| {
             if (!is_last or !config.aof_load_truncated) {
-                helpers.logStderr(io, "aof: unfinished command in {s} at byte {d}\n", .{ filename, safe_offset });
                 return Error.TruncatedAof;
             }
 
@@ -113,15 +95,14 @@ fn replayFile(
                 io,
                 filename,
                 .{ .mode = .read_write },
-            ) catch return Error.MissingAofFile;
+            ) catch |err| switch (err) {
+                error.FileNotFound => return Error.MissingAofFile,
+                else => return err,
+            };
             defer file.close(io);
 
             // truncate the incomplete command from file
-            file.setLength(io, @intCast(safe_offset)) catch {
-                return Error.FailedToTruncateAof;
-            };
-
-            helpers.logStderr(io, "aof: removed unfinished command from {s} at byte {d}\n", .{ filename, safe_offset });
+            try file.setLength(io, @intCast(safe_offset));
             return @intCast(safe_offset);
         },
     }
@@ -133,8 +114,7 @@ fn replayContents(
     contents: []const u8,
     data_store: *store.Store,
     client_state: *ClientState,
-    filename: []const u8,
-) Error!ReplayResult {
+) !ReplayResult {
     var parser = resp.parser(contents);
     while (true) {
         // TODO: we are reaching to the implementation details here. refactor
@@ -143,58 +123,21 @@ fn replayContents(
             error.Incomplete => {
                 return .{ .truncated = command_start };
             },
-            else => {
-                helpers.logStderr(
-                    io,
-                    "aof: invalid command in {s} at byte {d}: {s}\n",
-                    .{ filename, command_start, @errorName(err) },
-                );
-                return Error.CorruptAof;
-            },
+            else => return err,
         };
         const value = maybe_value orelse return .complete;
         defer parser.deinit(allocator, value);
 
-        const c = commander.init(allocator, value) catch |err| {
-            helpers.logStderr(
-                io,
-                "aof: cannot initialize command in {s} at byte {d}: {s}\n",
-                .{ filename, command_start, @errorName(err) },
-            );
-            return Error.FailedToInitCommander;
-        };
+        const c = try commander.init(allocator, value);
         defer c.deinit();
 
-        const reply = c.execute(io, data_store, client_state) catch |err| {
-            helpers.logStderr(
-                io,
-                "aof: command failed in {s} at byte {d}: {s}\n",
-                .{ filename, command_start, @errorName(err) },
-            );
-            return Error.FailedToExecuteCommand;
-        };
+        const reply = try c.execute(io, data_store, client_state);
 
         switch (reply) {
-            .simple_error => |message| {
-                helpers.logStderr(
-                    io,
-                    "aof: command failed in {s} at byte {d}: {s}\n",
-                    .{ filename, command_start, message },
-                );
-                return Error.FailedToExecuteCommand;
-            },
+            .simple_error => return Error.InvalidAofCommandResult,
             else => {},
         }
     }
-}
-
-fn nextLegacyBulk(parser: *resp.Parser, allocator: std.mem.Allocator) Error!resp.RESPValue {
-    const value = parser.next(allocator) catch return Error.TruncatedAof;
-    const parsed = value orelse return Error.TruncatedAof;
-    return switch (parsed) {
-        .bulk_string => parsed,
-        else => Error.CorruptAof,
-    };
 }
 
 const MockStore = @import("../store/mock_store.zig");
@@ -237,30 +180,6 @@ fn writeSingleIncrManifest(io: std.Io, dir: std.Io.Dir) !void {
         .data = "file appendonly.aof.1.incr seq 1 type i\n",
     });
 }
-
-const StderrGuard = struct {
-    saved: std.posix.fd_t,
-    devnull: std.posix.fd_t,
-
-    fn silence() !StderrGuard {
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-        if (devnull < 0) return error.OpenDevNullFailed;
-        errdefer _ = std.c.close(devnull);
-
-        const saved = std.c.dup(std.posix.STDERR_FILENO);
-        if (saved < 0) return error.DupFailed;
-        errdefer _ = std.c.close(saved);
-
-        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
-        return .{ .saved = saved, .devnull = devnull };
-    }
-
-    fn restore(self: StderrGuard) void {
-        _ = std.c.dup2(self.saved, std.posix.STDERR_FILENO);
-        _ = std.c.close(self.saved);
-        _ = std.c.close(self.devnull);
-    }
-};
 
 test "replay of a base and two incrs applies them in manifest order" {
     try withReplayDir("scratch-aof-replay-manifest-order", struct {
@@ -315,8 +234,6 @@ test "a truncated final command is truncated away and the load succeeds" {
             var mock = MockStore.init();
             mock.num_databases_result = 16;
             var data_store = mock.store();
-            const stderr_guard = try StderrGuard.silence();
-            defer stderr_guard.restore();
             const stats = try replay(io, testing.allocator, &data_store, config);
 
             const file = try dir.openFile(io, "appendonly.aof.1.incr", .{});
@@ -338,8 +255,6 @@ test "a truncated final command fails the load when aof-load-truncated is no" {
             config.aof_load_truncated = false;
             var mock = MockStore.init();
             var data_store = mock.store();
-            const stderr_guard = try StderrGuard.silence();
-            defer stderr_guard.restore();
             try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
         }
     }.run);
@@ -358,8 +273,6 @@ test "truncation in the base file is fatal even with aof-load-truncated yes" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
-            const stderr_guard = try StderrGuard.silence();
-            defer stderr_guard.restore();
             try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
         }
     }.run);
@@ -388,9 +301,37 @@ test "an unknown command in the file is fatal" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
-            const stderr_guard = try StderrGuard.silence();
-            defer stderr_guard.restore();
-            try testing.expectError(Error.FailedToInitCommander, replay(io, testing.allocator, &data_store, config));
+            try testing.expectError(error.UnknownCommand, replay(io, testing.allocator, &data_store, config));
+        }
+    }.run);
+}
+
+test "replay preserves manifest parse errors" {
+    try withReplayDir("scratch-aof-replay-invalid-manifest", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try dir.writeFile(io, .{
+                .sub_path = "appendonly.aof.manifest",
+                .data = "invalid manifest line\n",
+            });
+
+            var mock = MockStore.init();
+            var data_store = mock.store();
+            try testing.expectError(Manifest.Error.MalformedLine, replay(io, testing.allocator, &data_store, config));
+        }
+    }.run);
+}
+
+test "replay preserves a command source error" {
+    try withReplayDir("scratch-aof-replay-store-error", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = set_key_final });
+
+            var mock = MockStore.init();
+            mock.set_result = error.TestReplayStoreFailure;
+            var data_store = mock.store();
+            try testing.expectError(error.TestReplayStoreFailure, replay(io, testing.allocator, &data_store, config));
+            try testing.expectEqual(@as(usize, 1), mock.set_calls);
         }
     }.run);
 }

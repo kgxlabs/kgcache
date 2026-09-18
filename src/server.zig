@@ -56,16 +56,23 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     self._aof = null;
 
     self._default_storages = try allocator.alloc(storage.DefaultStorage, num_databases);
-    errdefer allocator.free(self._default_storages);
     for (self._default_storages) |*s| s.* = storage.DefaultStorage.init(io, allocator);
+    errdefer {
+        for (self._default_storages) |*s| s.storage().deinit();
+        allocator.free(self._default_storages);
+    }
 
-    self._persistence_state = PersistenceState.init(io, config.exclusive_bg_persistence);
+    self._persistence_state = PersistenceState.init(io, .{ .mutual_exclusive = config.exclusive_bg_persistence });
 
     self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, config.snapshot_path);
+    self._kgc._logger = logger;
     if (config.append_only) {
         self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
+        self._aof.?._logger = logger;
     }
-    errdefer if (self._aof) |*aof| aof.journal().deinit() catch {};
+    errdefer if (self._aof) |*aof| aof.journal().deinit() catch |err| {
+        logger.err("server: failed to close AOF after startup failure", err, @errorReturnTrace());
+    };
 
     const kgc_snapshot = self._kgc.snapshot();
     const maybe_aof_journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
@@ -118,7 +125,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
 }
 
 fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
-    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
+    const aof = if (self._aof) |*backend| backend else unreachable;
 
     const journal = aof.journal();
     journal.beginLoading();
@@ -139,7 +146,7 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
 }
 
 fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, config: Config) !void {
-    const aof = if (self._aof) |*backend| backend else return error.FailedToReplayAof;
+    const aof = if (self._aof) |*backend| backend else unreachable;
     const journal = aof.journal();
 
     const cwd = std.Io.Dir.cwd();
@@ -160,10 +167,10 @@ fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, con
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
 /// Returns the AOF close source after freeing the rest of the server.
-pub fn destroy(self: *Server) persistence.JournalPersistence.Error!void {
+pub fn destroy(self: *Server) anyerror!void {
     self.stopCron();
 
-    var cleanup_error: ?persistence.JournalPersistence.Error = null;
+    var cleanup_error: ?anyerror = null;
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {
             cleanup_error = err;
@@ -256,7 +263,7 @@ fn writeKgcSnapshotWithFooBar(io: std.Io, allocator: std.mem.Allocator, path: []
     var backend_storage = backend.storage();
     defer backend_storage.deinit();
 
-    var persistence_state = PersistenceState.init(io, false);
+    var persistence_state = PersistenceState.init(io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(io, allocator, &persistence_state, path);
     var tx = try backend_storage.begin();
     defer tx.end();
@@ -307,8 +314,6 @@ test "destroy releases server state after AOF close failure" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();
     const dirname = "scratch-server-aof-close-failure";
-    const stderr_guard = try TestStderrGuard.silence();
-    defer stderr_guard.restore();
 
     cwd.deleteTree(testing.io, dirname) catch {};
     defer cwd.deleteTree(testing.io, dirname) catch {};
@@ -323,7 +328,7 @@ test "destroy releases server state after AOF close failure" {
     file.close(testing.io);
     aof._file = null;
 
-    try testing.expectError(error.FailedToCloseAof, server.destroy());
+    try testing.expectError(error.MissingLiveAofFile, server.destroy());
 }
 
 test "create with appendonly on does not load the kgc snapshot" {
@@ -387,30 +392,6 @@ fn writeReplayFixture(io: std.Io, dirname: []const u8, contents: []const u8) !vo
     });
 }
 
-const TestStderrGuard = struct {
-    saved: std.posix.fd_t,
-    devnull: std.posix.fd_t,
-
-    fn silence() !TestStderrGuard {
-        const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-        if (devnull < 0) return error.OpenDevNullFailed;
-        errdefer _ = std.c.close(devnull);
-
-        const saved = std.c.dup(std.posix.STDERR_FILENO);
-        if (saved < 0) return error.DupFailed;
-        errdefer _ = std.c.close(saved);
-
-        if (std.c.dup2(devnull, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
-        return .{ .saved = saved, .devnull = devnull };
-    }
-
-    fn restore(self: TestStderrGuard) void {
-        _ = std.c.dup2(self.saved, std.posix.STDERR_FILENO);
-        _ = std.c.close(self.saved);
-        _ = std.c.close(self.devnull);
-    }
-};
-
 test "replay does not append to the file it is replaying" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();
@@ -458,7 +439,7 @@ test "replay leaves the dirty count at zero" {
     try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
 }
 
-test "failed AOF replay leaves orphaned files untouched" {
+test "failed AOF replay frees loaded entries and leaves orphaned files untouched" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();
     const dirname = "scratch-server-aof-failed-replay-keeps-orphans";
@@ -468,7 +449,8 @@ test "failed AOF replay leaves orphaned files untouched" {
     try writeReplayFixture(
         testing.io,
         dirname,
-        "*1\r\n$7\r\nUNKNOWN\r\n",
+        "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n" ++
+            "*1\r\n$7\r\nUNKNOWN\r\n",
     );
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
@@ -482,10 +464,8 @@ test "failed AOF replay leaves orphaned files untouched" {
     config.append_only = true;
     config.append_dirname = dirname;
 
-    const stderr_guard = try TestStderrGuard.silence();
-    defer stderr_guard.restore();
     try testing.expectError(
-        persistence.AofLoader.Error.FailedToInitCommander,
+        error.UnknownCommand,
         Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger()),
     );
     try dir.access(testing.io, "appendonly.aof.2.base", .{});

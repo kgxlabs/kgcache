@@ -28,10 +28,26 @@ pub const KgcReapResult = struct {
     status: ReapResult,
     saved_change_count: ?u64 = null,
     origin: ?Store.TriggerOrigin = null,
+    report_error: ?anyerror = null,
 };
 
-_io: std.Io,
+pub const AofReapResult = struct {
+    status: ReapResult,
+    report_error: ?anyerror = null,
+};
+
+pub const Process = struct {
+    wait_pid: *const fn (std.posix.pid_t) anyerror!?u32 = waitPidSystem,
+};
+
+pub const Options = struct {
+    mutual_exclusive: bool,
+    process: Process = .{},
+};
+
 _lock: Lock,
+// pulling out as field so we can test it without having to rely on real waitpid
+_process: Process,
 _kgc_in_progress: bool = false,
 _aof_in_progress: bool = false,
 _mutual_exclusive: bool = false,
@@ -45,11 +61,11 @@ _change_count: std.atomic.Value(u64) = .init(0),
 /// look like it's infinitely overdue.
 _last_save_ms: std.atomic.Value(i64),
 
-pub fn init(io: std.Io, mutual_exclusive: bool) PersistenceState {
+pub fn init(io: std.Io, options: Options) PersistenceState {
     return .{
-        ._io = io,
         ._lock = Lock.init(io),
-        ._mutual_exclusive = mutual_exclusive,
+        ._process = options.process,
+        ._mutual_exclusive = options.mutual_exclusive,
         ._last_save_ms = .init(time.nowMs(io)),
     };
 }
@@ -116,8 +132,9 @@ pub fn kgcInProgress(self: *PersistenceState) bool {
 
 pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
     const save = self._in_flight_kgc_save orelse return .{ .status = .running };
-    const status = self.reapPid("kgc", save.pid);
-    if (status == .running) return .{ .status = .running };
+    const child = self.reapPid(save.pid);
+    const status = child.status;
+    if (status == .running) return .{ .status = .running, .report_error = child.report_error };
 
     // only start cooldown if failed and started by cron
     if (status == .failed and save.origin == .automatic) {
@@ -133,17 +150,62 @@ pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
         .status = status,
         .saved_change_count = saved_change_count,
         .origin = save.origin,
+        .report_error = child.report_error,
     };
 }
 
-pub fn reapAof(self: *PersistenceState) ReapResult {
-    const rewrite = self._in_flight_aof_rewrite orelse return .running;
-    const status = self.reapPid("aof", rewrite.pid);
-    if (status == .running) return .running;
+const ChildResult = struct {
+    status: ReapResult,
+    report_error: ?anyerror = null,
+};
+
+fn reapPid(self: *PersistenceState, pid: std.posix.pid_t) ChildResult {
+    const maybe_status = self._process.wait_pid(pid) catch |err| {
+        return .{
+            .status = if (err == error.NoChildProcess) .failed else .running,
+            .report_error = err,
+        };
+    };
+
+    const bits = maybe_status orelse return .{ .status = .running };
+
+    if (!std.c.W.IFEXITED(bits)) {
+        return .{ .status = .failed, .report_error = error.ChildTerminatedAbnormally };
+    }
+
+    return switch (std.c.W.EXITSTATUS(bits)) {
+        0 => .{ .status = .succeeded },
+        1 => .{ .status = .failed },
+        else => .{ .status = .failed, .report_error = error.ChildExitedAbnormally },
+    };
+}
+
+fn waitPidSystem(pid: std.posix.pid_t) anyerror!?u32 {
+    var status: c_int = undefined;
+    while (true) {
+        const result = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
+        if (result == 0) return null;
+
+        if (result < 0) {
+            switch (std.posix.errno(result)) {
+                .INTR => continue,
+                .CHILD => return error.NoChildProcess,
+                else => return error.Unexpected,
+            }
+        }
+
+        return @bitCast(status);
+    }
+}
+
+pub fn reapAof(self: *PersistenceState) AofReapResult {
+    const rewrite = self._in_flight_aof_rewrite orelse return .{ .status = .running };
+    const child = self.reapPid(rewrite.pid);
+    if (child.status == .running) return .{ .status = .running, .report_error = child.report_error };
 
     self._in_flight_aof_rewrite = null;
     self._aof_in_progress = false;
-    return status;
+    return .{ .status = child.status, .report_error = child.report_error };
 }
 
 pub fn recordChange(self: *PersistenceState) void {
@@ -177,42 +239,9 @@ pub fn markSaved(self: *PersistenceState, saved_change_count: u64, now_ms: i64) 
     self._last_save_ms.store(now_ms, .monotonic);
 }
 
-// A completed child is reported exactly once. With no pid there is no
-// completion event, so callers receive .running and do no follow-up work.
-fn reapPid(self: *PersistenceState, name: []const u8, pid: std.posix.pid_t) ReapResult {
-    var status: c_int = undefined;
-    const r = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
-    // Child porcess is still running
-    if (r == 0) return .running;
-
-    const status_bits: u32 = @bitCast(status);
-    // Only a normal zero exit proves the child completed its persistence
-    // work. A non-zero exit or signal termination must never publish output.
-    if (!std.c.W.IFEXITED(status_bits) or std.c.W.EXITSTATUS(status_bits) != 0) {
-        var buf: [128]u8 = undefined;
-        const message = if (std.c.W.IFEXITED(status_bits))
-            std.fmt.bufPrint(
-                &buf,
-                "kgcache: {s} background save child exited with status {d}\n",
-                .{ name, std.c.W.EXITSTATUS(status_bits) },
-            ) catch "kgcache: background save child exited with a failure status\n"
-        else
-            std.fmt.bufPrint(
-                &buf,
-                "kgcache: {s} background save child terminated abnormally\n",
-                .{name},
-            ) catch "kgcache: background save child terminated abnormally\n";
-
-        std.Io.File.writeStreamingAll(std.Io.File.stderr(), self._io, message) catch {};
-        return .failed;
-    }
-
-    return .succeeded;
-}
-
 test "ending a PersistenceState session allows another session to begin" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     var first = try state.begin();
     first.end();
@@ -236,7 +265,7 @@ test "PersistenceState begin serializes two concurrent callers" {
         }
     };
 
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var first = try state.begin();
     var context: Context = .{ .state = &state };
     const thread = try std.Thread.spawn(.{}, Context.run, .{&context});
@@ -251,7 +280,7 @@ test "PersistenceState begin serializes two concurrent callers" {
 
 test "tryStartKgc blocks a second start until finishKgc releases it" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     {
         var tx = try state.begin();
@@ -277,7 +306,7 @@ test "tryStartKgc blocks a second start until finishKgc releases it" {
 
 test "bgsave cooldown uses the failure time and clears explicitly" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var tx = try state.begin();
     defer tx.end();
     const failure_ms = time.nowMs(testing.io);
@@ -296,7 +325,7 @@ test "bgsave cooldown uses the failure time and clears explicitly" {
 
 test "tryStartAof blocks a second start until finishAof releases it" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     {
         var tx = try state.begin();
@@ -322,7 +351,7 @@ test "tryStartAof blocks a second start until finishAof releases it" {
 
 test "mutual exclusion blocks kgc while aof is in progress" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, true);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = true });
 
     {
         var tx = try state.begin();
@@ -351,7 +380,7 @@ test "mutual exclusion blocks kgc while aof is in progress" {
 
 test "mutual exclusion blocks aof while kgc is in progress" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, true);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = true });
 
     {
         var tx = try state.begin();
@@ -380,7 +409,7 @@ test "mutual exclusion blocks aof while kgc is in progress" {
 
 test "without mutual exclusion kgc and aof can be in progress at the same time" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     {
         var tx = try state.begin();
@@ -399,7 +428,7 @@ test "without mutual exclusion kgc and aof can be in progress at the same time" 
 
 test "reapKgc reports running until background save completes" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     {
         var tx = try state.begin();
         defer tx.end();
@@ -473,9 +502,33 @@ test "reapKgc reports running until background save completes" {
     }
 }
 
+test "waitpid source reaches the parent reaper without reading status" {
+    const testing = std.testing;
+    const FakeWaitPid = struct {
+        fn wait(_: std.posix.pid_t) anyerror!?u32 {
+            return error.NoChildProcess;
+        }
+    };
+
+    var state = PersistenceState.init(testing.io, .{
+        .mutual_exclusive = false,
+        .process = .{ .wait_pid = FakeWaitPid.wait },
+    });
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.tryStartKgc());
+        state.setInFlightKgcSave(.{ .pid = 123, .captured_change_count = 1, .origin = .manual });
+        const result = state.reapKgc(time.nowMs(testing.io));
+        try testing.expectEqual(ReapResult.failed, result.status);
+        try testing.expectEqual(error.NoChildProcess, result.report_error.?);
+        try testing.expect(result.saved_change_count == null);
+    }
+}
+
 test "failed manual background save preserves cooldown and allows a later save" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const retry_delay_ms = 5000;
     const failure_ms = time.nowMs(testing.io) - retry_delay_ms;
     {
@@ -502,24 +555,6 @@ test "failed manual background save preserves cooldown and allows a later save" 
         state.setInFlightKgcSave(.{ .pid = pid, .captured_change_count = 23, .origin = .manual });
     }
 
-    // reapKgc logs to the real stderr when it observes a non-zero exit --
-    // exactly what this test exercises. Left alone, that write lands in the
-    // test binary's own stderr, and `zig build test` flags an otherwise
-    // fully-passing run as a "failed command" because of it. Redirect
-    // stderr to /dev/null only for the reap loop, then restore it, so the
-    // logging code still runs for real without polluting captured output.
-    const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
-    if (devnull < 0) return error.OpenDevNullFailed;
-    defer _ = std.c.close(devnull);
-
-    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-    if (saved_stderr < 0) return error.DupFailed;
-    defer {
-        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-        _ = std.c.close(saved_stderr);
-    }
-    _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
-
     const reap_ms = failure_ms + 100;
     var result: KgcReapResult = .{ .status = .running };
     var tries: usize = 0;
@@ -533,6 +568,7 @@ test "failed manual background save preserves cooldown and allows a later save" 
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     try testing.expectEqual(ReapResult.failed, result.status);
+    try testing.expectEqual(error.ChildExitedAbnormally, result.report_error.?);
     try testing.expect(result.saved_change_count == null);
     {
         var tx = try state.begin();
@@ -545,7 +581,7 @@ test "failed manual background save preserves cooldown and allows a later save" 
 
 test "dueForSave is false with no rules configured" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     state.recordChange();
     try testing.expect(!state.dueForSave(time.nowMs(testing.io), &.{}));
@@ -553,7 +589,7 @@ test "dueForSave is false with no rules configured" {
 
 test "dueForSave is false before the seconds threshold elapses even with enough changes" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     for (0..100) |_| state.recordChange();
 
@@ -563,7 +599,7 @@ test "dueForSave is false before the seconds threshold elapses even with enough 
 
 test "dueForSave is false before enough changes even after the seconds threshold elapses" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     for (0..99) |_| state.recordChange();
 
@@ -574,7 +610,7 @@ test "dueForSave is false before enough changes even after the seconds threshold
 
 test "dueForSave is true once both thresholds are met" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     for (0..100) |_| state.recordChange();
 
@@ -585,7 +621,7 @@ test "dueForSave is true once both thresholds are met" {
 
 test "dueForSave is true when any configured rule matches" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     for (0..5) |_| state.recordChange();
 
@@ -600,7 +636,7 @@ test "dueForSave is true when any configured rule matches" {
 
 test "markSaved resets the change count and last-save time" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     for (0..100) |_| state.recordChange();
 
@@ -619,7 +655,7 @@ test "markSaved resets the change count and last-save time" {
 
 test "markSaved preserves changes recorded after capture" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     for (0..3) |_| state.recordChange();
     const snapshot_change_count = state.captureSnapshotChangeCount();
@@ -636,7 +672,7 @@ test "markSaved preserves changes recorded after capture" {
 
 test "markSaved rejects a count greater than the current change count" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     state.recordChange();
 
     {
@@ -653,7 +689,7 @@ test "markSaved rejects a count greater than the current change count" {
 
 test "concurrent recordChange calls are never lost" {
     const testing = std.testing;
-    var state = PersistenceState.init(testing.io, false);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
 
     const thread_count = 8;
     const increments_per_thread = 10_000;

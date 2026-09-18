@@ -75,11 +75,11 @@ tick 2: waitpid(WNOHANG) → still running → no-op
 tick 3: waitpid(WNOHANG) → still running → no-op
 tick 4: waitpid(WNOHANG) → exited
           ├─ success: account for the captured changes
-          └─ failure: keep all changes dirty and log to stderr
+          └─ failure: keep all changes dirty; the child reports its source through the logger
         then clear the in-progress flag
 ```
 
-If the child has not exited yet, the poll is a no-op. Once it has, `PersistenceState` clears the recorded child, returns its status and captured change count, and keeps the save claim active until the cron loop finishes accounting for the result. A successful child marks the captured changes as saved. A failed child leaves every change dirty and logs the failure to stderr. The cron loop releases the save claim only after this work is complete.
+If the child has not exited yet, the poll is a no-op. Once it has, `PersistenceState` clears the recorded child, returns its status and captured change count, and keeps the save claim active until the cron loop finishes accounting for the result. A successful child marks the captured changes as saved. A failed child leaves every change dirty. The child reports a failed save through the logger before exiting; cron does not report that exit again. Cron does report a reaper error if waiting for the child fails. The cron loop releases the save claim only after this work is complete.
 
 ### `exclusive-bg-persistence`
 

@@ -16,22 +16,21 @@ pub fn commander(self: *Get) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!resp.RESPValue {
     const self: *Get = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 0) {
-        return .{ .simple_error = "Wrong number of arguments" };
+        return error.WrongNumberArguments;
     }
 
     const key = try command_arguments.bulkString(self.arguments[0]);
-    // TODO: refactor the error to get more descriptive error message
-    const maybe_object = data_store.get(key, client_state.db_index) catch return Commander.Error.SomethingWentWrong;
+    const maybe_object = try data_store.get(key, client_state.db_index);
 
     if (maybe_object == null) {
         return .{ .bulk_string = null };
     }
 
-    return object.toRESP(maybe_object.?) catch Commander.Error.UnableToConvertObject;
+    return try object.toRESP(maybe_object.?);
 }
 
 fn deinit(ptr: *anyopaque) void {

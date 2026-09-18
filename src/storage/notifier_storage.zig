@@ -76,7 +76,7 @@ pub fn init(
     };
 }
 
-pub fn begin(ptr: *anyopaque) Storage.Error!Storage.Tx {
+pub fn begin(ptr: *anyopaque) anyerror!Storage.Tx {
     var self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.begin();
 }
@@ -87,24 +87,24 @@ pub fn deinit(ptr: *anyopaque) void {
     return self._inner.deinit();
 }
 
-pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
+pub fn get(ptr: *anyopaque, key: []const u8) anyerror!?entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     if (self._aof) |aof| {
         const maybe_exp = try self._inner.getExp(key);
         if (maybe_exp) |exp| {
             if (time.isPastTime(self._inner._io, exp.expires_at)) {
-                var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+                var aof_tx = try aof.begin();
                 defer aof_tx.end();
 
-                var record = aof.prepareRecord(.{
+                var record = try aof.prepareRecord(.{
                     .remove = .{ .db_index = self._db_index, .key = key },
-                }) catch return Storage.Error.UnableToRecordWrite;
+                });
                 errdefer record.abort();
 
                 const is_removed = try self._inner.removeIfExpired(key);
                 if (is_removed) {
                     self._persistence_state.recordChange();
-                    record.publish() catch return Storage.Error.UnableToRecordWrite;
+                    try record.publish();
                     return null;
                 }
 
@@ -120,7 +120,7 @@ pub fn get(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.Object {
     return self._inner.get(key);
 }
 
-pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) Storage.Error!entry.Object {
+pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Storage.PutOptions) anyerror!entry.Object {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
 
     if (self._aof) |aof| {
@@ -132,20 +132,20 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
             break :blk if (maybe_exp) |exp| exp.expires_at else null;
         } else null;
 
-        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        var aof_tx = try aof.begin();
         defer aof_tx.end();
 
-        var record = aof.prepareRecord(.{ .put = .{
+        var record = try aof.prepareRecord(.{ .put = .{
             .db_index = self._db_index,
             .key = key,
             .value = value,
             .expires_at = expires_at,
-        } }) catch return Storage.Error.UnableToRecordWrite;
+        } });
         errdefer record.abort();
 
         const result = try self._inner.put(key, value, options);
         self._persistence_state.recordChange();
-        record.publish() catch return Storage.Error.UnableToRecordWrite;
+        try record.publish();
         return result;
     }
 
@@ -157,21 +157,21 @@ pub fn put(ptr: *anyopaque, key: []const u8, value: object.Object, options: Stor
 // remove returns void meaning it cannot say if anything was actually deleted.
 // DEL for a missing key gets journaled too. DEL on missing key is idempotent on replay. We have to accept this
 // TODO: make report whether or not if removed something or not.
-pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
+pub fn remove(ptr: *anyopaque, key: []const u8) anyerror!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
 
     if (self._aof) |aof| {
-        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        var aof_tx = try aof.begin();
         defer aof_tx.end();
 
-        var record = aof.prepareRecord(.{
+        var record = try aof.prepareRecord(.{
             .remove = .{ .db_index = self._db_index, .key = key },
-        }) catch return Storage.Error.UnableToRecordWrite;
+        });
         errdefer record.abort();
 
         try self._inner.remove(key);
         self._persistence_state.recordChange();
-        record.publish() catch return Storage.Error.UnableToRecordWrite;
+        try record.publish();
         return;
     }
 
@@ -179,12 +179,12 @@ pub fn remove(ptr: *anyopaque, key: []const u8) Storage.Error!void {
     self._persistence_state.recordChange();
 }
 
-pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) Storage.Error!bool {
+pub fn removeIfExpired(ptr: *anyopaque, key: []const u8) anyerror!bool {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.removeIfExpired(key);
 }
 
-pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpiration {
+pub fn getExp(ptr: *anyopaque, key: []const u8) anyerror!?entry.ObjectExpiration {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.getExp(key);
 }
@@ -192,31 +192,31 @@ pub fn getExp(ptr: *anyopaque, key: []const u8) Storage.Error!?entry.ObjectExpir
 // TODO: setExp doesn't journal. Harmless today since no command reaches this
 // without also writing a value; EXPIRE/PERSIST/GETEX will need to journal
 // from here once they exist.
-pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) Storage.Error!entry.ObjectExpiration {
+pub fn setExp(ptr: *anyopaque, key: []const u8, exp: ?time.UnixMs) anyerror!entry.ObjectExpiration {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.setExp(key, exp);
 }
 
-pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
+pub fn tryExpireRandom(ptr: *anyopaque) anyerror!?[]const u8 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
 
     if (self._aof) |aof| {
-        const maybe_key = self._inner.sampleExpirableKey() catch return Storage.Error.UnableToExpire;
+        const maybe_key = try self._inner.sampleExpirableKey();
         const key = maybe_key orelse return null;
         errdefer self._allocator.free(key);
 
-        var aof_tx = aof.begin() catch return Storage.Error.UnableToRecordWrite;
+        var aof_tx = try aof.begin();
         defer aof_tx.end();
 
-        var record = aof.prepareRecord(.{
+        var record = try aof.prepareRecord(.{
             .remove = .{
                 .key = key,
                 .db_index = self._db_index,
             },
-        }) catch return Storage.Error.UnableToRecordWrite;
+        });
         errdefer record.abort();
 
-        const is_removed = self._inner.removeIfExpired(key) catch return Storage.Error.UnableToExpire;
+        const is_removed = try self._inner.removeIfExpired(key);
         if (!is_removed) {
             record.abort();
             self._allocator.free(key);
@@ -224,11 +224,11 @@ pub fn tryExpireRandom(ptr: *anyopaque) Storage.Error!?[]const u8 {
         }
 
         self._persistence_state.recordChange();
-        record.publish() catch return Storage.Error.UnableToRecordWrite;
+        try record.publish();
         return key;
     }
 
-    const maybe_key = self._inner.tryExpireRandom() catch return Storage.Error.UnableToExpire;
+    const maybe_key = try self._inner.tryExpireRandom();
     if (maybe_key != null) self._persistence_state.recordChange();
     return maybe_key;
 }
@@ -238,13 +238,13 @@ pub fn getExpirableCount(ptr: *anyopaque) u32 {
     return self._inner.getExpirableCount();
 }
 
-pub fn sampleExpirableKey(ptr: *anyopaque) Storage.Error!?[]const u8 {
+pub fn sampleExpirableKey(ptr: *anyopaque) anyerror!?[]const u8 {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.sampleExpirableKey();
 }
 
 // TODO: same gap as setExp. PERSIST will need to journal from here.
-pub fn clearExp(ptr: *anyopaque, key: []const u8) Storage.Error!void {
+pub fn clearExp(ptr: *anyopaque, key: []const u8) anyerror!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.clearExp(key);
 }
@@ -254,7 +254,7 @@ pub fn size(ptr: *anyopaque) u32 {
     return self._inner.size();
 }
 
-pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) Storage.Error!void {
+pub fn forEach(ptr: *anyopaque, ctx: *anyopaque, visit: *const fn (ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void) anyerror!void {
     const self: *NotifierStorage = @ptrCast(@alignCast(ptr));
     return self._inner.forEach(ctx, visit);
 }
@@ -263,7 +263,7 @@ test "put increments the persistence change count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -280,7 +280,7 @@ test "remove increments the persistence change count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -298,7 +298,7 @@ test "a lazy-expiration removal during get increments the persistence change cou
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
     var wrapped = notifier.storage();
     defer wrapped.deinit();
@@ -339,27 +339,27 @@ const FailingJournal = struct {
         return .{ .ptr = self, .vtable = &journal_vtable, ._lock = &self.lock };
     }
 
-    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
-        return error.UnableToRecordWrite;
+    fn prepareRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) anyerror!persistence.JournalPersistence.Record {
+        return error.TestPrepareRecord;
     }
 
-    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
-    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) persistence.JournalPersistence.Error!void {}
-    fn dueForRewrite(_: *anyopaque, _: Config) bool {
+    fn flush(_: *anyopaque, _: i64) anyerror!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!void {}
+    fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
     }
-    fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {}
+    fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) anyerror!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
-    fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) persistence.JournalPersistence.Error!void {}
-    fn journalDeinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) anyerror!void {}
+    fn journalDeinit(_: *anyopaque) anyerror!void {}
 };
 
 test "a journal that fails to record a write fails the put" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -374,7 +374,7 @@ test "a journal that fails to record a write fails the put" {
     var tx = try wrapped.begin();
     defer tx.end();
 
-    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null }));
+    try testing.expectError(error.TestPrepareRecord, wrapped.put("foo", .{ .string = "bar" }, .{ .expires_at = null }));
     try testing.expect(try wrapped.get("foo") == null);
     try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
@@ -390,7 +390,7 @@ test "a journal preparation failure leaves a removed key unchanged" {
         _ = try inner.put("foo", .{ .string = "bar" }, .{ .expires_at = null });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -399,7 +399,7 @@ test "a journal preparation failure leaves a removed key unchanged" {
     var tx = try wrapped.begin();
     defer tx.end();
 
-    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.remove("foo"));
+    try testing.expectError(error.TestPrepareRecord, wrapped.remove("foo"));
     try testing.expect((try wrapped.get("foo")) != null);
     try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
 }
@@ -417,7 +417,7 @@ test "a journal preparation failure leaves a lazy-expired key stored" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -426,7 +426,7 @@ test "a journal preparation failure leaves a lazy-expired key stored" {
     var tx = try wrapped.begin();
     defer tx.end();
 
-    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.get("expired"));
+    try testing.expectError(error.TestPrepareRecord, wrapped.get("expired"));
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
     try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
@@ -445,7 +445,7 @@ test "a journal preparation failure leaves an active-expiration key stored" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -454,7 +454,7 @@ test "a journal preparation failure leaves an active-expiration key stored" {
     var tx = try wrapped.begin();
     defer tx.end();
 
-    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.tryExpireRandom());
+    try testing.expectError(error.TestPrepareRecord, wrapped.tryExpireRandom());
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
     try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
@@ -473,7 +473,7 @@ test "a journal preparation failure leaves a lazily expired key unchanged" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -482,7 +482,7 @@ test "a journal preparation failure leaves a lazily expired key unchanged" {
     var tx = try wrapped.begin();
     defer tx.end();
 
-    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.get("expired"));
+    try testing.expectError(error.TestPrepareRecord, wrapped.get("expired"));
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
     try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
@@ -501,7 +501,7 @@ test "a journal preparation failure leaves an actively expired key unchanged" {
         });
     }
 
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var failing_journal = FailingJournal.init(testing.io);
     var notifier = NotifierStorage.init(testing.allocator, inner, failing_journal.journal(), &persistence_state, 0);
     var wrapped = notifier.storage();
@@ -510,7 +510,7 @@ test "a journal preparation failure leaves an actively expired key unchanged" {
     var tx = try wrapped.begin();
     defer tx.end();
 
-    try testing.expectError(Storage.Error.UnableToRecordWrite, wrapped.tryExpireRandom());
+    try testing.expectError(error.TestPrepareRecord, wrapped.tryExpireRandom());
     try testing.expectEqual(1, wrapped.size());
     try testing.expectEqual(1, wrapped.getExpirableCount());
     try testing.expectEqual(0, persistence_state.captureSnapshotChangeCount());
@@ -520,7 +520,7 @@ test "a read that finds no expired key does not increment the dirty count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var notifier = NotifierStorage.init(
         testing.allocator,
         backend.storage(),
@@ -566,34 +566,34 @@ const RecordingJournal = struct {
         return .{ .ptr = self, .vtable = &journal_vtable, ._lock = &self.lock };
     }
 
-    fn publishRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!void {
+    fn publishRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) anyerror!void {
         const self: *RecordingJournal = @ptrCast(@alignCast(ptr));
         self.last_event = event;
     }
 
-    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) persistence.JournalPersistence.Error!persistence.JournalPersistence.Record {
+    fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) anyerror!persistence.JournalPersistence.Record {
         return persistence.JournalPersistence.Record.init(ptr, event, publishRecord, abortRecord);
     }
 
     fn abortRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
 
-    fn flush(_: *anyopaque, _: i64) persistence.JournalPersistence.Error!void {}
-    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) persistence.JournalPersistence.Error!void {}
-    fn dueForRewrite(_: *anyopaque, _: Config) bool {
+    fn flush(_: *anyopaque, _: i64) anyerror!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!void {}
+    fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
     }
-    fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) persistence.JournalPersistence.Error!void {}
+    fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) anyerror!void {}
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
-    fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) persistence.JournalPersistence.Error!void {}
-    fn journalDeinit(_: *anyopaque) persistence.JournalPersistence.Error!void {}
+    fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) anyerror!void {}
+    fn journalDeinit(_: *anyopaque) anyerror!void {}
 };
 
 test "KEEPTTL over an existing expiry journals the existing absolute expiry" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -622,7 +622,7 @@ test "remove journals a DEL" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -650,7 +650,7 @@ test "an active-expiration removal journals a DEL and increments the dirty count
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,
@@ -686,7 +686,7 @@ test "sampling a live key does not increment the dirty count" {
     const testing = std.testing;
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
-    var persistence_state = PersistenceState.init(testing.io, false);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var recording_journal = RecordingJournal.init(testing.io);
     var notifier = NotifierStorage.init(
         testing.allocator,

@@ -47,6 +47,7 @@ pub const Error = error{
 pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
     var config = Config.default();
     var save_rules: std.ArrayList(Config.SaveRule) = .empty;
+    errdefer save_rules.deinit(allocator);
 
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw_line| {
@@ -78,10 +79,10 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
                 const changes_str = tokens.next() orelse return Error.MalformedLine;
                 if (tokens.next() != null) return Error.MalformedLine;
 
-                save_rules.append(allocator, .{
+                try save_rules.append(allocator, .{
                     .seconds = try parseInt(i64, seconds_str),
                     .changes = try parseInt(u32, changes_str),
-                }) catch return Error.OutOfMemory;
+                });
             },
             .appendonly => config.append_only = try parseBool(value),
             .appendfsync => config.append_fsync = try parseEnum(Config.AppendFsync, value),
@@ -98,7 +99,7 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
         }
     }
 
-    config.save_rules = save_rules.toOwnedSlice(allocator) catch return Error.OutOfMemory;
+    config.save_rules = try save_rules.toOwnedSlice(allocator);
     return config;
 }
 
@@ -251,6 +252,14 @@ test "parse rejects a save line with more than two values" {
 test "parse rejects a save line with a non-numeric value" {
     const testing = std.testing;
     try testing.expectError(Error.InvalidValue, parse(testing.allocator, "save 300 many"));
+}
+
+test "parse frees collected save rules if a later directive is invalid" {
+    const testing = std.testing;
+    try testing.expectError(
+        Error.InvalidValue,
+        parse(testing.allocator, "save 300 100\nport invalid"),
+    );
 }
 
 test "parse reads every aof directive" {

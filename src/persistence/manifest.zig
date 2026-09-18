@@ -43,7 +43,6 @@ pub const Error = error{
     UnknownType,
     NonAscendingIncrSeq,
     OutOfMemory,
-    FailedToReadManifest,
 };
 
 /// Returns `null` when `filename` does not exist. for example, a first boot with
@@ -55,8 +54,7 @@ pub fn read(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename:
         error.FileNotFound => {
             return null;
         },
-        error.OutOfMemory => return Error.OutOfMemory,
-        else => return Error.FailedToReadManifest,
+        else => return err,
     };
     defer allocator.free(contents);
 
@@ -116,7 +114,7 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Manifest 
             .incr => {
                 if (last_incr_seq != null and seq <= last_incr_seq.?) return Error.NonAscendingIncrSeq;
                 last_incr_seq = seq;
-                incrs.append(allocator, entry) catch return Error.OutOfMemory;
+                try incrs.append(allocator, entry);
             },
         }
     }
@@ -138,6 +136,8 @@ pub fn write(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, filename
 
     const tmp_filename = try std.fmt.allocPrint(allocator, "{s}.tmp", .{filename});
     defer allocator.free(tmp_filename);
+    // Keep the original write error if removing the temporary file also fails.
+    errdefer dir.deleteFile(io, tmp_filename) catch {};
 
     try dir.writeFile(io, .{
         .data = serialized_string,
@@ -392,6 +392,35 @@ test "write leaves no .tmp file behind on success" {
             try write(io, testing.allocator, dir, "appendonly.aof.manifest", manifest);
 
             try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.manifest.tmp", .{}));
+        }
+    }.run);
+}
+
+test "failed manifest publication preserves its source error and previous file" {
+    try withScratchDir("scratch-manifest-rename-failure", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            const testing = std.testing;
+            const Fail = struct {
+                fn rename(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
+                    return error.CrossDevice;
+                }
+            };
+
+            const original: Manifest = .{ .base = null, .incrs = &.{} };
+            try write(io, testing.allocator, dir, "appendonly.aof.manifest", original);
+
+            var incrs = [_]Entry{.{ .name = "appendonly.aof.1.incr", .seq = 1, .kind = .incr }};
+            const replacement: Manifest = .{ .base = null, .incrs = &incrs };
+            var failed_vtable = io.vtable.*;
+            failed_vtable.dirRename = Fail.rename;
+            const failed_io: std.Io = .{ .userdata = io.userdata, .vtable = &failed_vtable };
+
+            try testing.expectError(error.CrossDevice, write(failed_io, testing.allocator, dir, "appendonly.aof.manifest", replacement));
+            try testing.expectError(error.FileNotFound, dir.access(io, "appendonly.aof.manifest.tmp", .{}));
+
+            const loaded = try read(io, testing.allocator, dir, "appendonly.aof.manifest") orelse return error.TestUnexpectedResult;
+            defer loaded.deinit(testing.allocator);
+            try testing.expectEqual(@as(usize, 0), loaded.incrs.len);
         }
     }.run);
 }

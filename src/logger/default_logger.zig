@@ -1,8 +1,8 @@
 const std = @import("std");
 const Logger = @import("interface.zig");
 
-/// Logger for normal application threads. It is not the fork-safe child sink
-/// required by persistence work.
+/// Logger for application threads. Persistence children also use it until child
+/// errors can be sent to the parent through a pipe.
 const DefaultLogger = @This();
 
 _io: std.Io,
@@ -80,6 +80,7 @@ fn err(ptr: *anyopaque, message: []const u8, source: anyerror, trace: Logger.Err
     }
 }
 
+// A sink failure cannot be reported through the same sink without recursion.
 fn writeStdout(self: *DefaultLogger, bytes: []const u8) void {
     std.Io.File.writeStreamingAll(std.Io.File.stdout(), self._io, bytes) catch {};
 }

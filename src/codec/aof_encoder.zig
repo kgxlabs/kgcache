@@ -131,10 +131,10 @@ fn appendSerialized(self: *AofEncoder, allocator: std.mem.Allocator, out: *std.A
     defer allocator.free(command_item.items);
     defer if (command_item.owned) |owned| allocator.free(owned);
 
-    const bytes = self._serializer.serialize(allocator, .{ .array = command_item.items }) catch return Error.OutOfMemory;
+    const bytes = try self._serializer.serialize(allocator, .{ .array = command_item.items });
     defer self._serializer.deinit(allocator, bytes);
 
-    out.appendSlice(allocator, bytes) catch return Error.OutOfMemory;
+    try out.appendSlice(allocator, bytes);
 }
 
 fn eventDbIndex(event: Journal.WriteEvent) u32 {
