@@ -66,8 +66,15 @@ On a clean shutdown:
 - `always` and `everysec` finish with an fsync.
 - `no` writes pending commands and closes the file without fsync.
 
-SIGINT and SIGTERM do not yet run the clean shutdown path. The accept loop
-must first gain a safe way to wake up and drain connection threads.
+SIGINT and SIGTERM now start the shutdown path. The signal handler only
+records the signal and wakes the application. Normal application code then
+cancels the blocked accept task, stops cron, closes the listener, and closes
+the AOF backend using the policy above.
+
+Active connection threads are still detached and are not yet drained before
+shared state is released. Signal-triggered shutdown must not be treated as
+fully graceful while clients are still connected. Connection tracking and
+draining are planned follow-up work.
 
 ## Files on disk
 

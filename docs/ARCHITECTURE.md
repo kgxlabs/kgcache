@@ -21,7 +21,17 @@ RESP client
 
 The TCP server runs one detached thread per connection. The storage backend owns its copied keys and string values, and protects operations with a mutex-backed transaction boundary.
 
-On a server runtime failure, the listener closes and cron is joined before AOF and Store cleanup. Active detached connection workers are not yet stopped or drained, so they may still use shared state during teardown. Signal-driven shutdown and connection draining are separate planned work.
+The application supervises `Server.run` and a SIGINT/SIGTERM waiter with
+`std.Io.Select`. The signal handler only records the signal and wakes the
+waiter. Normal application code cancels and waits for `Server.run`, which
+stops cron and closes the listener before AOF and Store cleanup begins. A
+server runtime failure reaches the same cleanup boundary and is reported as
+an error, while a requested signal shutdown is a normal exit.
+
+Active detached connection workers are not yet stopped or drained, so they
+may still use shared state during teardown. Connection tracking and draining
+remain planned work. Until they are implemented, signal-triggered shutdown is
+not fully graceful while clients are connected.
 
 ## Storage and concurrency trade-offs
 
