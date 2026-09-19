@@ -125,6 +125,53 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     return self;
 }
 
+/// The listener is bound here rather than in `create` so `create` can be
+/// exercised in tests without touching the network.
+pub fn run(self: *Server) !void {
+    const address = try std.Io.net.IpAddress.parseIp4(self._config.bind_address, self._config.port);
+
+    self._listener = try address.listen(self._io, .{
+        .reuse_address = self._config.reuse_address,
+    });
+    defer self._listener.?.deinit(self._io);
+
+    try self.startCron();
+    defer self.stopCron();
+
+    try connection.acceptLoop(
+        self._io,
+        self._logger,
+        &self._listener.?,
+        &self._store,
+        self._allocator,
+        self._config,
+    );
+}
+
+/// Unwinds `create` in reverse. `_store.deinit()` chains through
+/// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
+/// so the storage backends must not be deinitialized separately here.
+/// Returns the AOF close source after freeing the rest of the server.
+pub fn destroy(self: *Server) anyerror!void {
+    self.stopCron();
+
+    var cleanup_error: ?anyerror = null;
+    if (self._aof) |*aof| {
+        aof.journal().deinit() catch |err| {
+            cleanup_error = err;
+        };
+    }
+
+    self._store.deinit();
+
+    self._allocator.free(self._data_storages);
+    self._allocator.free(self._notifier_storages);
+    self._allocator.free(self._default_storages);
+    self._allocator.destroy(self);
+
+    if (cleanup_error) |err| return err;
+}
+
 fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
     const aof = if (self._aof) |*backend| backend else unreachable;
 
@@ -164,30 +211,6 @@ fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, con
     try journal.reconcile(io, allocator, dir, config.append_filename, manifest);
 }
 
-/// Unwinds `create` in reverse. `_store.deinit()` chains through
-/// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
-/// so the storage backends must not be deinitialized separately here.
-/// Returns the AOF close source after freeing the rest of the server.
-pub fn destroy(self: *Server) anyerror!void {
-    self.stopCron();
-
-    var cleanup_error: ?anyerror = null;
-    if (self._aof) |*aof| {
-        aof.journal().deinit() catch |err| {
-            cleanup_error = err;
-        };
-    }
-
-    self._store.deinit();
-
-    self._allocator.free(self._data_storages);
-    self._allocator.free(self._notifier_storages);
-    self._allocator.free(self._default_storages);
-    self._allocator.destroy(self);
-
-    if (cleanup_error) |err| return err;
-}
-
 fn startCron(self: *Server) !void {
     std.debug.assert(self._cron_thread == null);
     self._cron_stop_requested.store(false, .release);
@@ -211,29 +234,6 @@ fn stopCron(self: *Server) void {
     self._cron_stop_requested.store(true, .release);
     thread.join();
     self._cron_thread = null;
-}
-
-/// The listener is bound here rather than in `create` so `create` can be
-/// exercised in tests without touching the network.
-pub fn run(self: *Server) !void {
-    const address = try std.Io.net.IpAddress.parseIp4(self._config.bind_address, self._config.port);
-
-    self._listener = try address.listen(self._io, .{
-        .reuse_address = self._config.reuse_address,
-    });
-    defer self._listener.?.deinit(self._io);
-
-    try self.startCron();
-    defer self.stopCron();
-
-    try connection.acceptLoop(
-        self._io,
-        self._logger,
-        &self._listener.?,
-        &self._store,
-        self._allocator,
-        self._config,
-    );
 }
 
 test "create builds the full object graph and destroy leaks nothing" {
