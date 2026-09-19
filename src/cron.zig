@@ -106,7 +106,7 @@ fn flushAofIfDue(io: std.Io, logger: logging.Logger, aof: persistence.JournalPer
     };
     defer tx.end();
 
-    aof.flush(time.nowMs(io)) catch |err| {
+    aof.flush(time.nowMs(io), .{}) catch |err| {
         logger.err("cron: failed to flush AOF", err, @errorReturnTrace());
     };
 }
@@ -241,12 +241,12 @@ const FinishRewriteJournal = struct {
         return .{ .ptr = self, .vtable = &vtable, ._lock = &self.lock };
     }
 
-    fn publishRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) anyerror!void {}
+    fn publishRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
     fn prepareRecord(ptr: *anyopaque, event: persistence.JournalPersistence.WriteEvent) anyerror!persistence.JournalPersistence.Record {
         return persistence.JournalPersistence.Record.init(ptr, event, publishRecord, abortRecord);
     }
     fn abortRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
-    fn flush(ptr: *anyopaque, now_ms: i64) anyerror!void {
+    fn flush(ptr: *anyopaque, now_ms: i64, _: persistence.JournalPersistence.FlushOptions) anyerror!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
         self.flush_calls += 1;
         self.last_flush_ms = now_ms;
@@ -509,7 +509,7 @@ test "a completed background save preserves changes made after its snapshot chan
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
+    var notifier = NotifierStorage.init(testing.io, testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-reap-reset.kgc");
@@ -615,7 +615,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
+    var notifier = NotifierStorage.init(testing.io, testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-trigger.kgc");
@@ -659,7 +659,7 @@ test "triggerSaveIfDue does nothing when writes through the real store don't mee
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
+    var notifier = NotifierStorage.init(testing.io, testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-trigger.kgc");
@@ -692,7 +692,7 @@ test "triggerSaveIfDue does nothing when no save rules are configured" {
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
+    var notifier = NotifierStorage.init(testing.io, testing.allocator, backend.storage(), null, &persistence_state, 0);
     const notified_storage = notifier.storage();
 
     var kgc_backend = try persistence_module.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-cron-no-rules.kgc");

@@ -592,7 +592,7 @@ test "save resets the persistence change count" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "scratch-save-reset.kgc");
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), null, &persistence_state, 0);
+    var notifier = NotifierStorage.init(testing.io, testing.allocator, backend.storage(), null, &persistence_state, 0);
     var memory_store = MemoryStore.init(testing.allocator, &.{notifier.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -709,7 +709,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
     defer journal.deinit() catch {};
-    var notifier = NotifierStorage.init(testing.allocator, backend.storage(), journal, &persistence_state, 0);
+    var notifier = NotifierStorage.init(testing.io, testing.allocator, backend.storage(), journal, &persistence_state, 0);
     var memory_store = MemoryStore.init(testing.allocator, &.{notifier.storage()}, kgc_backend.snapshot(), journal);
     var data_store = memory_store.store();
     defer data_store.deinit();
@@ -741,7 +741,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
         var tx = try journal.begin();
         defer tx.end();
         try journal.finishRewrite(result);
-        try journal.flush(time.nowMs(testing.io));
+        try journal.flush(time.nowMs(testing.io), .{});
     }
 
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
@@ -839,8 +839,8 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
     var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &persistence_state, config);
     const journal = aof_backend.journal();
     defer journal.deinit() catch {};
-    var notifier_zero = NotifierStorage.init(testing.allocator, backend_zero.storage(), journal, &persistence_state, 0);
-    var notifier_one = NotifierStorage.init(testing.allocator, backend_one.storage(), journal, &persistence_state, 1);
+    var notifier_zero = NotifierStorage.init(testing.io, testing.allocator, backend_zero.storage(), journal, &persistence_state, 0);
+    var notifier_one = NotifierStorage.init(testing.io, testing.allocator, backend_one.storage(), journal, &persistence_state, 1);
     var probe_one: BeginProbeStorage = .{ .inner = notifier_one.storage() };
     const storage_one = probe_one.storage();
     var memory_store = MemoryStore.init(testing.allocator, &.{ notifier_zero.storage(), storage_one }, kgc_backend.snapshot(), journal);

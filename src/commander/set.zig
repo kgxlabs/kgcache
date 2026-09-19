@@ -108,7 +108,12 @@ fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) anyerror!Request.SetRequest
     return req;
 }
 
-fn applyOption(req: *Request.SetRequest, definition: *const Schema.Interface.OptionDefinition, args: []const resp.RESPValue, now_ms: time.UnixMs) anyerror!usize {
+fn applyOption(
+    req: *Request.SetRequest,
+    definition: *const Schema.Interface.OptionDefinition,
+    args: []const resp.RESPValue,
+    now_ms: time.UnixMs,
+) anyerror!usize {
     return Schema.Set.apply(req, definition, args, now_ms) catch |err| switch (err) {
         error.Syntax,
         error.InvalidCharacter,
@@ -123,7 +128,6 @@ fn applyOption(req: *Request.SetRequest, definition: *const Schema.Interface.Opt
 // NOTE: The caller must only provide arguments after "key" and "value"
 fn assertValidOptions(_: []resp.RESPValue) Commander.Error!void {
     // option of the same group with repeatable `false` must never repeat
-
 }
 
 fn deinit(ptr: *anyopaque) void {

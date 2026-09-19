@@ -19,10 +19,12 @@ its own event. Repeated cron attempts are separate operations. A peer closing
 its connection, malformed client input, and expected command validation errors
 do not create internal error events.
 
-A write can change memory before a later journal operation fails. A failed
-response therefore does not prove that the write was rolled back. If AOF
-writing becomes blocked, later writes return `JournalWriteBlocked` until the
-server recovers or restarts. See [AOF](AOF.md) for persistence behavior.
+A write can change memory and publish its AOF record before the separate flush
+or sync fails. Publication itself cannot return an error. The connection
+handler reports the flush or sync failure with a generic client error, which
+does not mean that the write was rolled back. If AOF writing becomes blocked,
+later writes return `JournalWriteBlocked` until the server recovers or restarts.
+See [AOF](AOF.md#write-failures) for persistence behavior.
 
 ## Logger and traces
 
