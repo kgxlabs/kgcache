@@ -78,7 +78,8 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     };
 
     var runtime_error: ?anyerror = null;
-    const received_signal = superviseServer(init.io, server) catch |err| blk: {
+    logger.info("app: starting server");
+    const received_signal = superviseServer(init.io, server, logger) catch |err| blk: {
         logger.err("app: server runtime failed", err, @errorReturnTrace());
         runtime_error = err;
         break :blk null;
@@ -89,6 +90,7 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     // Server state.
 
     var cleanup_error: ?anyerror = null;
+    logger.info("app: cleaning up server");
     server.destroy() catch |err| {
         logger.err("app: server shutdown failed", err, @errorReturnTrace());
         cleanup_error = err;
@@ -96,9 +98,10 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
 
     if (runtime_error) |err| return err;
     if (cleanup_error) |err| return err;
+    logger.info("app: server stopped");
 }
 
-fn superviseServer(io: std.Io, server: *Server) !?std.posix.SIG {
+fn superviseServer(io: std.Io, server: *Server, logger: logging.Logger) !?std.posix.SIG {
     var result_buffer: [2]RunOutcome = undefined;
     var select = std.Io.Select(RunOutcome).init(io, &result_buffer);
 
@@ -109,7 +112,11 @@ fn superviseServer(io: std.Io, server: *Server) !?std.posix.SIG {
 
     const first = try select.await();
     switch (first) {
-        .shutdown_signal => |signal_result| return try signal_result,
+        .shutdown_signal => |signal_result| {
+            const signal = try signal_result;
+            logger.info("app: stopping server");
+            return signal;
+        },
         .server => |server_result| {
             try server_result;
             return null;

@@ -138,6 +138,14 @@ pub fn run(self: *Server) !void {
     try self.startCron();
     defer self.stopCron();
 
+    var log_buffer: [96]u8 = undefined;
+    const started_message = std.fmt.bufPrint(
+        &log_buffer,
+        "server: started and listening on {s}:{d}",
+        .{ self._config.bind_address, self._config.port },
+    ) catch "server: started and listening";
+    self._logger.info(started_message);
+
     try connection.acceptLoop(
         self._io,
         self._logger,
