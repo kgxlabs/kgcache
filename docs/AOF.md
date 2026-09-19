@@ -112,19 +112,28 @@ time keeps the original expiry time.
 Every AOF-backed data change must follow this order:
 
 1. Prepare the AOF record.
-2. Change storage.
-3. Abort the record if the storage change fails.
-4. Publish the record if the storage change succeeds.
+2. Change storage. If this fails, abort the prepared record and return the error.
+3. Publish the record after the storage change succeeds.
+4. Request a separate flush with `.if_required`.
 
 Preparation encodes the command and reserves buffer space before storage is
 changed. It does not publish the command. Publishing then appends the prepared
-bytes without allocating memory.
+bytes without allocating memory or doing disk I/O. `Record.publish()` returns
+`void` and cannot return an error. `NotifierStorage` requests the flush after
+publication.
 
 This flow is used by `PUT`, `REMOVE`, lazy expiration, and active expiration.
 It keeps storage and the AOF buffer in the same command order.
 
-With `appendfsync always`, publishing also tries to flush and sync the buffer
-before returning. With the other policies, cron handles the flush.
+The internal flush call supports two modes:
+
+| Mode | Behavior | Used by |
+| --- | --- | --- |
+| `.unconditional` (default) | Flush buffered records now. Fsync still follows the configured `appendfsync` policy. | Cron and AOF cleanup |
+| `.if_required` | Flush and sync immediately for `appendfsync always`. For `everysec` and `no`, leave the records buffered for cron. | `NotifierStorage` after publication |
+
+With `appendfsync always`, the separate flush and sync must succeed before the
+write command returns success.
 
 ## Startup
 
@@ -223,11 +232,16 @@ unchanged.
 If the storage change fails, the prepared record is aborted. AOF stays
 unchanged.
 
-After preparation succeeds, publishing to the AOF buffer does not allocate and
-must not fail. With `appendfsync always`, the following flush can still fail.
-At that point, memory and the AOF buffer contain the change, but the disk state
-is uncertain. The client currently receives an error even though the live value
-changed.
+Publication cannot return an error. With `appendfsync always`, the separate
+flush or sync after publication can still fail. At that point, memory and the
+AOF buffer contain the change, but the disk state is uncertain. Calling
+`abort()` on an already published record does nothing, so the change stays
+applied and the record stays buffered for retry.
+
+When this happens during a client command, the connection handler logs the
+cause and sends the generic `ERR something went wrong` response before closing
+the connection. The response does not tell the client that the change was
+already applied or that its durability is unconfirmed.
 
 kgcache records a flush failure. New writes then fail during preparation, so no
 more data changes are accepted while the journal is in the failed state.
