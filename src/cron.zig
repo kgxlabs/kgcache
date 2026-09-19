@@ -106,7 +106,7 @@ fn flushAofIfDue(io: std.Io, logger: logging.Logger, aof: persistence.JournalPer
     };
     defer tx.end();
 
-    aof.flush(time.nowMs(io)) catch |err| {
+    aof.flush(time.nowMs(io), .{}) catch |err| {
         logger.err("cron: failed to flush AOF", err, @errorReturnTrace());
     };
 }
@@ -246,7 +246,7 @@ const FinishRewriteJournal = struct {
         return persistence.JournalPersistence.Record.init(ptr, event, publishRecord, abortRecord);
     }
     fn abortRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
-    fn flush(ptr: *anyopaque, now_ms: i64) anyerror!void {
+    fn flush(ptr: *anyopaque, now_ms: i64, _: persistence.JournalPersistence.FlushOptions) anyerror!void {
         const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
         self.flush_calls += 1;
         self.last_flush_ms = now_ms;

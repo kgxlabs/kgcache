@@ -343,7 +343,7 @@ const FailingJournal = struct {
         return error.TestPrepareRecord;
     }
 
-    fn flush(_: *anyopaque, _: i64) anyerror!void {}
+    fn flush(_: *anyopaque, _: i64, _: persistence.JournalPersistence.FlushOptions) anyerror!void {}
     fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!void {}
     fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
@@ -577,7 +577,7 @@ const RecordingJournal = struct {
 
     fn abortRecord(_: *anyopaque, _: persistence.JournalPersistence.WriteEvent) void {}
 
-    fn flush(_: *anyopaque, _: i64) anyerror!void {}
+    fn flush(_: *anyopaque, _: i64, _: persistence.JournalPersistence.FlushOptions) anyerror!void {}
     fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!void {}
     fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;

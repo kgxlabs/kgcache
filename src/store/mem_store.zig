@@ -741,7 +741,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
         var tx = try journal.begin();
         defer tx.end();
         try journal.finishRewrite(result);
-        try journal.flush(time.nowMs(testing.io));
+        try journal.flush(time.nowMs(testing.io), .{});
     }
 
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);

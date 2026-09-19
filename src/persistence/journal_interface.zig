@@ -32,6 +32,17 @@ pub const Error = error{
     RewriteStillRunning,
 };
 
+pub const FlushMode = enum {
+    /// Flush buffered records now. Fsync still follows the configured policy.
+    unconditional,
+    /// Flush only when appendfsync always requires it before replying to a write.
+    if_required,
+};
+
+pub const FlushOptions = struct {
+    mode: FlushMode = .unconditional,
+};
+
 pub const Tx = Lock.Tx;
 
 pub const WriteEvent = union(enum) {
@@ -75,7 +86,7 @@ pub const Record = struct {
 
 pub const VTable = struct {
     prepareRecord: *const fn (*anyopaque, WriteEvent) anyerror!Record,
-    flush: *const fn (*anyopaque, i64) anyerror!void,
+    flush: *const fn (*anyopaque, i64, FlushOptions) anyerror!void,
     bgRewrite: *const fn (*anyopaque, []const Storage, origin: Store.TriggerOrigin) anyerror!void,
     dueForRewrite: *const fn (*anyopaque, Config) anyerror!bool,
     finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) anyerror!void,
@@ -98,8 +109,8 @@ pub fn prepareRecord(self: JournalPersistence, event: WriteEvent) anyerror!Recor
     return self.vtable.prepareRecord(self.ptr, event);
 }
 
-pub fn flush(self: JournalPersistence, now_ms: i64) anyerror!void {
-    return self.vtable.flush(self.ptr, now_ms);
+pub fn flush(self: JournalPersistence, now_ms: i64, options: FlushOptions) anyerror!void {
+    return self.vtable.flush(self.ptr, now_ms, options);
 }
 
 pub fn bgRewrite(self: JournalPersistence, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!void {
