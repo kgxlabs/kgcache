@@ -53,14 +53,14 @@ pub const WriteEvent = union(enum) {
 pub const Record = struct {
     ptr: *anyopaque,
     event: WriteEvent,
-    publish_fn: *const fn (*anyopaque, WriteEvent) anyerror!void,
+    publish_fn: *const fn (*anyopaque, WriteEvent) void,
     abort_fn: *const fn (*anyopaque, WriteEvent) void,
     state: enum { pending, published, aborted } = .pending,
 
     pub fn init(
         ptr: *anyopaque,
         event: WriteEvent,
-        publish_fn: *const fn (*anyopaque, WriteEvent) anyerror!void,
+        publish_fn: *const fn (*anyopaque, WriteEvent) void,
         abort_fn: *const fn (*anyopaque, WriteEvent) void,
     ) Record {
         return .{
@@ -71,7 +71,7 @@ pub const Record = struct {
         };
     }
 
-    pub fn publish(self: *Record) anyerror!void {
+    pub fn publish(self: *Record) void {
         std.debug.assert(self.state == .pending);
         self.state = .published;
         return self.publish_fn(self.ptr, self.event);

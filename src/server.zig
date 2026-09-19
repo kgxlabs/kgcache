@@ -96,6 +96,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
 
     for (0..num_databases) |i| {
         self._notifier_storages[i] = storage.NotifierStorage.init(
+            io,
             allocator,
             self._default_storages[i].storage(),
             maybe_aof_journal,

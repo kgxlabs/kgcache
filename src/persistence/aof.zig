@@ -773,7 +773,7 @@ fn flushLocked(self: *AofBackend, now_ms: time.UnixMs) !void {
     self._last_write_failed = false;
 }
 
-fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) anyerror!void {
+fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) void {
     const prepared: *PreparedRecord = @ptrCast(@alignCast(ptr));
     const self = prepared.backend;
     defer self._allocator.destroy(prepared);
@@ -781,13 +781,6 @@ fn publishPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) anyerror!void {
 
     self._buffer.appendSliceAssumeCapacity(prepared.bytes);
     self._encoder.commitDb(prepared.db_index);
-
-    if (self._config.append_fsync == .always) {
-        flushLocked(self, time.nowMs(self._io)) catch |err| {
-            self._last_write_failed = true;
-            return err;
-        };
-    }
 }
 
 fn abortPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) void {
@@ -798,7 +791,7 @@ fn abortPreparedRecord(ptr: *anyopaque, _: Journal.WriteEvent) void {
     self._allocator.destroy(prepared);
 }
 
-fn ignoreWrite(_: *anyopaque, _: Journal.WriteEvent) anyerror!void {
+fn ignoreWrite(_: *anyopaque, _: Journal.WriteEvent) void {
     return;
 }
 
@@ -1122,7 +1115,9 @@ test "prepared record is invisible until publish and abort keeps it invisible" {
             var published = try j.prepareRecord(sampleEvent());
             defer published.abort();
             try testing.expectEqual(0, backend._buffer.items.len);
-            try published.publish();
+            published.publish();
+            published.abort();
+            try testing.expectEqual(.published, published.state);
 
             try testing.expect(std.mem.indexOf(u8, backend._buffer.items, "SELECT") != null);
             try testing.expect(std.mem.indexOf(u8, backend._buffer.items, "SET") != null);
@@ -1130,7 +1125,7 @@ test "prepared record is invisible until publish and abort keeps it invisible" {
     }.run);
 }
 
-test "always writes and fsyncs before onWrite returns" {
+test "always publication stays buffered until an explicit required flush" {
     try withScratchDir("scratch-aof-fsync-always", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
@@ -1147,6 +1142,13 @@ test "always writes and fsyncs before onWrite returns" {
             defer tx.end();
             try journal_handle.onWrite(sampleEvent());
 
+            try testing.expect(backend._buffer.items.len > 0);
+            try testing.expectEqual(0, try backend._file.?.length(io));
+            try testing.expect(backend._last_fsync_ms == null);
+
+            try journal_handle.flush(1000, .{ .mode = .if_required });
+
+            try testing.expectEqual(0, backend._buffer.items.len);
             try testing.expect(backend._last_fsync_ms != null);
             const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
             defer testing.allocator.free(contents);
@@ -1163,7 +1165,7 @@ test "if_required flush leaves everysec and no writes for unconditional flush" {
                 var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
                 const config: Config = .{
                     .append_dirname = "scratch-aof-flush-mode-" ++ @tagName(policy),
-                    .append_fsync = .everysec,
+                    .append_fsync = policy,
                 };
 
                 var backend = try AofBackend.init(io, testing.allocator, &state, config);
@@ -1172,11 +1174,9 @@ test "if_required flush leaves everysec and no writes for unconditional flush" {
                 var tx = try journal_handle.begin();
                 defer tx.end();
 
-                // Buffer the record before selecting the policy to test flush separately from publication.
                 try journal_handle.onWrite(sampleEvent());
                 const expected = try testing.allocator.dupe(u8, backend._buffer.items);
                 defer testing.allocator.free(expected);
-                backend._config.append_fsync = policy;
 
                 try journal_handle.flush(1000, .{ .mode = .if_required });
 
@@ -1261,7 +1261,7 @@ test "everysec retries after a failed flush" {
     }.run);
 }
 
-test "flush returns file source errors and retries the buffered write" {
+test "required flush returns file source errors and retries the published write" {
     try withScratchDir("scratch-aof-source-flush-retry", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
@@ -1278,7 +1278,7 @@ test "flush returns file source errors and retries the buffered write" {
             var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
             const config: Config = .{
                 .append_dirname = "scratch-aof-source-flush-retry",
-                .append_fsync = .everysec,
+                .append_fsync = .always,
             };
             var backend = try AofBackend.init(io, testing.allocator, &state, config);
             defer backend.journal().deinit() catch {};
@@ -1295,17 +1295,18 @@ test "flush returns file source errors and retries the buffered write" {
                     .sync => failed_vtable.fileSync = Fail.sync,
                 }
                 backend._io = .{ .userdata = io.userdata, .vtable = &failed_vtable };
+                defer backend._io = io;
                 const flush_time: i64 = @intCast((index + 1) * 1000);
                 const source: anyerror = switch (stage) {
                     .write => error.WriteFailed,
                     .sync => error.InputOutput,
                 };
-                try testing.expectError(source, journal_handle.flush(flush_time, .{}));
+                try testing.expectError(source, journal_handle.flush(flush_time, .{ .mode = .if_required }));
                 try testing.expect(backend._last_write_failed);
                 try testing.expect(backend._buffer.items.len > 0);
 
                 backend._io = io;
-                try journal_handle.flush(flush_time, .{});
+                try journal_handle.flush(flush_time, .{ .mode = .if_required });
                 try testing.expect(!backend._last_write_failed);
                 try testing.expectEqual(@as(usize, 0), backend._buffer.items.len);
             }
