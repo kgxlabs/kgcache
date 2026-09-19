@@ -16,6 +16,8 @@ const ShutdownHandlers = struct {
         shutdown_signal_number.store(0, .release);
         shutdown_event.reset();
 
+        // this tells OS to block SIGINT and SIGTERM signals temporarily while shutdown handler is executing
+        // so that when one of the signals wont get interrupted by another.
         var mask = std.posix.sigemptyset();
         std.posix.sigaddset(&mask, .INT);
         std.posix.sigaddset(&mask, .TERM);
