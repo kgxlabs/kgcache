@@ -15,6 +15,7 @@ test {
     _ = @import("expiration.zig");
     _ = @import("cron.zig");
     _ = @import("connection.zig");
+    _ = @import("connection_manager.zig");
     _ = @import("logger/test_logger.zig");
     _ = @import("config.zig");
     _ = @import("config_parser.zig");

@@ -81,6 +81,7 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
 
     var runtime_error: ?anyerror = null;
     logger.info("app: starting server");
+
     const received_signal = superviseServer(init.io, server, logger) catch |err| blk: {
         logger.err("app: server runtime failed", err, @errorReturnTrace());
         runtime_error = err;
@@ -103,6 +104,7 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     logger.info("app: server stopped");
 }
 
+// create tasks and listen on their cancellation
 fn superviseServer(io: std.Io, server: *Server, logger: logging.Logger) !?std.posix.SIG {
     var result_buffer: [2]RunOutcome = undefined;
     var select = std.Io.Select(RunOutcome).init(io, &result_buffer);

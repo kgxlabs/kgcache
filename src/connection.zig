@@ -41,6 +41,22 @@ pub fn handle(
 ) void {
     defer connection.close(io);
 
+    serve(io, logger, connection, data_store, con_allocator, connection_buffer_size);
+}
+
+/// Serves one client session using a borrowed stream.
+///
+/// The caller owns the stream and must close it after this function returns.
+/// Thread creation, shutdown, joining, and worker reaping belong outside this
+/// lower-level connection boundary.
+pub fn serve(
+    io: std.Io,
+    logger: logging.Logger,
+    connection: std.Io.net.Stream,
+    data_store: *store.Store,
+    con_allocator: std.mem.Allocator,
+    connection_buffer_size: usize,
+) void {
     const buf = con_allocator.alloc(u8, connection_buffer_size) catch |err| {
         logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
         return;
