@@ -29,7 +29,7 @@ _connection_buffer_size: usize,
 // Coordinates worker registration, completion, shutdown, and stream close.
 _lock: Lock,
 _workers: std.ArrayList(*ClientWorker) = .empty,
-_stopping: bool = false,
+_stopping: std.atomic.Value(bool) = .init(false),
 
 pub fn init(
     io: std.Io,
@@ -48,8 +48,8 @@ pub fn init(
     };
 }
 
-/// NOTE: ConnectionManager is responsible for closing the stream on every return
-/// path. Since we are spwaning a thread, a successful start transfers the final close to the worker. A failed
+/// ConnectionManager consumes the stream on every return path. A successful
+/// start transfers the final close to the worker completion path. A failed
 /// start closes the stream before returning the source error.
 pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     errdefer stream.close(self._io);
@@ -61,7 +61,7 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     var lock_tx = try self._lock.begin();
     defer lock_tx.end();
 
-    if (self._stopping) return error.ConnectionManagerStopping;
+    if (self._stopping.load(.acquire)) return error.ConnectionManagerStopping;
 
     try self._workers.append(self._allocator, worker);
     errdefer std.debug.assert(self._workers.pop().? == worker);
@@ -70,10 +70,64 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     worker.lifecycle = .running;
 }
 
-pub fn reapFinished(_: *ConnectionManager) !void {}
+pub fn reapFinished(self: *ConnectionManager) !void {
+    while (true) {
+        const worker = blk: {
+            var lock_tx = try self._lock.begin();
+            defer lock_tx.end();
 
-pub fn deinit(_: *ConnectionManager) !void {
-    // Worker draining and record cleanup are implemented in step 4.
+            for (self._workers.items, 0..) |candidate, index| {
+                if (candidate.lifecycle == .finished) {
+                    break :blk self._workers.swapRemove(index);
+                }
+            }
+            break :blk null;
+        };
+
+        const finished_worker = worker orelse return;
+        finished_worker.thread.?.join();
+        self._allocator.destroy(finished_worker);
+    }
+}
+
+pub fn deinit(self: *ConnectionManager) !void {
+    var first_error: ?anyerror = null;
+    var draining_workers: std.ArrayList(*ClientWorker) = .empty;
+
+    {
+        var lock_tx = self._lock.beginUncancelable();
+        defer lock_tx.end();
+
+        self._stopping.store(true, .release);
+
+        for (self._workers.items) |worker| {
+            switch (worker.lifecycle) {
+                .starting, .running => worker.lifecycle = .stopping,
+                .stopping, .finished => {},
+            }
+        }
+
+        for (self._workers.items) |worker| {
+            if (worker.lifecycle != .stopping) continue;
+            worker.stream.shutdown(self._io, .recv) catch |err| switch (err) {
+                error.SocketUnconnected => {},
+                else => if (first_error == null) {
+                    first_error = err;
+                },
+            };
+        }
+
+        draining_workers = self._workers;
+        self._workers = .empty;
+    }
+
+    for (draining_workers.items) |worker| {
+        worker.thread.?.join();
+        self._allocator.destroy(worker);
+    }
+    draining_workers.deinit(self._allocator);
+
+    if (first_error) |err| return err;
 }
 
 fn runWorker(self: *ConnectionManager, worker: *ClientWorker) void {
@@ -84,12 +138,13 @@ fn runWorker(self: *ConnectionManager, worker: *ClientWorker) void {
         self._store,
         self._allocator,
         self._connection_buffer_size,
+        &self._stopping,
     );
     self.finishWorker(worker);
 }
 
-// NOTE: we must not join the thread here because this itself will run in a thread so it will be deadlocked.
-// The responsibility of joining and removing from the list will be handled by cron reap
+// This runs on the worker thread, so joining here would wait on itself.
+// The accept-loop reaper or deinit joins and frees the finished record.
 fn finishWorker(self: *ConnectionManager, worker: *ClientWorker) void {
     var lock_tx = self._lock.beginUncancelable();
     defer lock_tx.end();

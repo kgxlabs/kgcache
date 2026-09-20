@@ -160,6 +160,7 @@ pub fn run(self: *Server) !void {
     while (true) {
         const client_stream = try self._listener.?.accept(self._io);
         try self._connection_manager.start(client_stream);
+        try self._connection_manager.reapFinished();
     }
 }
 

@@ -89,9 +89,6 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     };
     _ = received_signal;
 
-    // TODO: Drain active connection threads before destroying their shared
-    // Server state.
-
     var cleanup_error: ?anyerror = null;
     logger.info("app: cleaning up server");
     server.destroy() catch |err| {
