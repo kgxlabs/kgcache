@@ -3,10 +3,18 @@ const connection = @import("connection.zig");
 const Lock = @import("lock.zig");
 const logging = @import("logger.zig");
 const store = @import("store.zig");
+const TestHelpers = @import("tests/helpers.zig");
 
 const ConnectionManager = @This();
 // TODO: If this is too much, reduce it.
 const max_reaped_workers_per_pass: usize = 64;
+
+pub const SpawnWorkerFn = *const fn (*ConnectionManager, *ClientWorker) std.Thread.SpawnError!std.Thread;
+
+const Options = struct {
+    /// Allows deterministic thread-spawn failure injection in lifecycle tests.
+    spawn_worker: SpawnWorkerFn = spawnWorkerThread,
+};
 
 /// A stable, heap-allocated record owned by ConnectionManager.
 pub const ClientWorker = struct {
@@ -32,6 +40,7 @@ _connection_buffer_size: usize,
 _lock: Lock,
 _workers: std.ArrayList(*ClientWorker) = .empty,
 _stopping: std.atomic.Value(bool) = .init(false),
+_spawn_worker: SpawnWorkerFn,
 
 pub fn init(
     io: std.Io,
@@ -40,6 +49,17 @@ pub fn init(
     data_store: *store.Store,
     connection_buffer_size: usize,
 ) ConnectionManager {
+    return initWithOptions(io, allocator, logger, data_store, connection_buffer_size, .{});
+}
+
+fn initWithOptions(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    logger: logging.Logger,
+    data_store: *store.Store,
+    connection_buffer_size: usize,
+    options: Options,
+) ConnectionManager {
     return .{
         ._io = io,
         ._allocator = allocator,
@@ -47,6 +67,7 @@ pub fn init(
         ._store = data_store,
         ._connection_buffer_size = connection_buffer_size,
         ._lock = Lock.init(io),
+        ._spawn_worker = options.spawn_worker,
     };
 }
 
@@ -68,7 +89,7 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     try self._workers.append(self._allocator, worker);
     errdefer std.debug.assert(self._workers.pop().? == worker);
 
-    worker.thread = try std.Thread.spawn(.{}, runWorker, .{ self, worker });
+    worker.thread = try self._spawn_worker(self, worker);
     worker.lifecycle = .running;
 }
 
@@ -152,6 +173,10 @@ fn runWorker(self: *ConnectionManager, worker: *ClientWorker) void {
     self.finishWorker(worker);
 }
 
+fn spawnWorkerThread(self: *ConnectionManager, worker: *ClientWorker) std.Thread.SpawnError!std.Thread {
+    return std.Thread.spawn(.{}, runWorker, .{ self, worker });
+}
+
 // This runs on the worker thread, so joining here would wait on itself.
 // The accept-loop reaper or deinit joins and frees the finished record.
 fn finishWorker(self: *ConnectionManager, worker: *ClientWorker) void {
@@ -165,4 +190,108 @@ fn finishWorker(self: *ConnectionManager, worker: *ClientWorker) void {
 test "connection manager boundary compiles" {
     std.testing.refAllDecls(ConnectionManager);
     std.testing.refAllDecls(ClientWorker);
+}
+
+test "deinit wakes an idle worker and closes its stream once" {
+    const testing = std.testing;
+    var network = TestHelpers.TestNetwork.init(testing.io, 1);
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.init(
+        network.io(),
+        testing.allocator,
+        logging.NoopLogger.logger(),
+        &data_store,
+        1024,
+    );
+    errdefer manager.deinit() catch {};
+
+    try manager.start(TestHelpers.TestNetwork.stream(1));
+    network.all_reads_started.waitUncancelable(testing.io);
+    try manager.deinit();
+    try manager.deinit();
+
+    try testing.expectEqual(1, network.shutdown_calls.load(.acquire));
+    try testing.expectEqual(1, network.close_calls.load(.acquire));
+}
+
+test "deinit wakes every idle worker before any worker closes" {
+    const testing = std.testing;
+    const worker_count = 4;
+    var network = TestHelpers.TestNetwork.init(testing.io, worker_count);
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.init(
+        network.io(),
+        testing.allocator,
+        logging.NoopLogger.logger(),
+        &data_store,
+        1024,
+    );
+    errdefer manager.deinit() catch {};
+
+    for (1..worker_count + 1) |handle| {
+        try manager.start(TestHelpers.TestNetwork.stream(handle));
+    }
+    network.all_reads_started.waitUncancelable(testing.io);
+    try manager.deinit();
+
+    try testing.expectEqual(worker_count, network.shutdown_calls.load(.acquire));
+    try testing.expectEqual(worker_count, network.close_calls.load(.acquire));
+    try testing.expect(!network.close_before_all_shutdown.load(.acquire));
+}
+
+test "reapFinished reclaims a completed worker without closing an active worker" {
+    const testing = std.testing;
+    var network = TestHelpers.TestNetwork.init(testing.io, 1);
+    network.immediate_eof_handle = @intCast(1);
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.init(
+        network.io(),
+        testing.allocator,
+        logging.NoopLogger.logger(),
+        &data_store,
+        1024,
+    );
+    errdefer manager.deinit() catch {};
+
+    try manager.start(TestHelpers.TestNetwork.stream(1));
+    network.immediate_closed.waitUncancelable(testing.io);
+    try manager.start(TestHelpers.TestNetwork.stream(2));
+    network.all_reads_started.waitUncancelable(testing.io);
+
+    try manager.reapFinished();
+    try testing.expectEqual(1, network.close_calls.load(.acquire));
+    try testing.expectEqual(0, network.shutdown_calls.load(.acquire));
+
+    try manager.deinit();
+    try testing.expectEqual(2, network.close_calls.load(.acquire));
+    try testing.expectEqual(1, network.shutdown_calls.load(.acquire));
+}
+
+test "thread spawn failure returns its source and closes the stream once" {
+    const testing = std.testing;
+    const failSpawn = struct {
+        fn spawn(_: *ConnectionManager, _: *ClientWorker) std.Thread.SpawnError!std.Thread {
+            return error.ThreadQuotaExceeded;
+        }
+    }.spawn;
+
+    var network = TestHelpers.TestNetwork.init(testing.io, 0);
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.initWithOptions(
+        network.io(),
+        testing.allocator,
+        logging.NoopLogger.logger(),
+        &data_store,
+        1024,
+        .{ .spawn_worker = failSpawn },
+    );
+    errdefer manager.deinit() catch {};
+
+    try testing.expectError(error.ThreadQuotaExceeded, manager.start(TestHelpers.TestNetwork.stream(1)));
+    try testing.expectEqual(1, network.close_calls.load(.acquire));
+    try manager.deinit();
 }
