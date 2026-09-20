@@ -19,7 +19,19 @@ RESP client
 └─────────────────┘     └────────────────┘     └─────────────────────┘
 ```
 
-The TCP server runs one detached thread per connection. The storage backend owns its copied keys and string values, and protects operations with a mutex-backed transaction boundary.
+The TCP server has three layers for client connections:
+
+1. `Server` owns the listener, accepts client streams, and owns the shared
+   server object graph.
+2. `ConnectionManager` owns each worker from registration through completion.
+   Workers are joinable. Completed workers are reaped in bounded passes during
+   normal runtime, and all remaining workers are joined during shutdown.
+3. `Connection` serves one client session using borrowed Store, Logger, and
+   stream references. The worker closes its stream exactly once when the
+   session ends.
+
+The storage backend owns its copied keys and string values, and protects
+operations with a mutex-backed transaction boundary.
 
 The application supervises `Server.run` and a SIGINT/SIGTERM waiter with
 `std.Io.Select`. The signal handler only records the signal and wakes the
@@ -28,16 +40,28 @@ stops cron and closes the listener before AOF and Store cleanup begins. A
 server runtime failure reaches the same cleanup boundary and is reported as
 an error, while a requested signal shutdown is a normal exit.
 
-Active detached connection workers are not yet stopped or drained, so they
-may still use shared state during teardown. Connection tracking and draining
-remain planned work. Until they are implemented, signal-triggered shutdown is
-not fully graceful while clients are connected.
+At shutdown, the accept loop is stopped first. `ConnectionManager` then marks
+connection shutdown, wakes blocked receives with socket shutdown, and joins
+every worker. Only after the workers have exited does `Server` release AOF,
+Store, Storage, persistence, and allocator-owned state. The logger owner keeps
+the logger alive through worker shutdown. A requested shutdown of an idle
+connection is cooperative and does not produce an error event.
 
 ## Storage and concurrency trade-offs
 
 The default backend is intentionally straightforward today: a `StringHashMap` stores values, an `ArrayList` holds TTL bookkeeping, and each expiring entry keeps an index into that list for O(1) updates. Full layout, memory cost, and the planned redesign toward larger keyspaces are in [Expiration bookkeeping](EXPIRATION.md).
 
-Concurrency is similarly a deliberate trade-off. The server currently uses detached threads and mutex-protected storage transactions, which keeps the code easy to reason about but can move contention to the storage lock under load. If profiling shows that lock contention is the bottleneck, likely next steps are finer-grained/shared locking or a return to an event-loop-oriented architecture.
+Concurrency is similarly a deliberate trade-off. The server currently uses a
+joinable thread per connection and mutex-protected storage transactions. This
+keeps ownership and shutdown explicit, but can move contention to the storage
+lock and can create many threads under load. Runtime reaping prevents finished
+worker records from accumulating without bound.
+
+The current design is separate from the future [fixed worker event-loop
+refactor (#123)](https://github.com/kgxlabs/kgcache/issues/123). That refactor
+may replace per-connection threads with a fixed number of workers that each
+serve many connections. Until that work begins, the current connection manager
+remains the ownership and shutdown boundary.
 
 ## Persistence
 
@@ -59,7 +83,8 @@ and trace availability.
 ├── src/
 │   ├── main.zig                 # Entry point: load config, create/destroy Server
 │   ├── server.zig               # Owns the object graph; create/destroy/run
-│   ├── connection.zig           # Accept loop and per-connection request loop
+│   ├── connection.zig           # One client session and request loop
+│   ├── connection_manager.zig   # Worker ownership, shutdown, joining, reaping
 │   ├── cron.zig                 # Background housekeeping loop (tick schedule)
 │   ├── expiration.zig           # Active expiration round/batch policy
 │   ├── config.zig               # Config struct, defaults, and CLI/file loading

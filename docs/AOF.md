@@ -71,10 +71,10 @@ records the signal and wakes the application. Normal application code then
 cancels the blocked accept task, stops cron, closes the listener, and closes
 the AOF backend using the policy above.
 
-Active connection threads are still detached and are not yet drained before
-shared state is released. Signal-triggered shutdown must not be treated as
-fully graceful while clients are still connected. Connection tracking and
-draining are planned follow-up work.
+Connection workers are tracked by `ConnectionManager`. During shutdown, the
+manager wakes blocked client receives, joins every worker, and only then lets
+the server release shared state and close the AOF backend. This connection
+draining is separate from the signal handler and listener wake-up behavior.
 
 ## Files on disk
 

@@ -1,12 +1,14 @@
 const std = @import("std");
 const storage = @import("storage.zig");
 const store = @import("store.zig");
+const object = @import("object.zig");
+const Request = @import("commander/request.zig");
 const persistence = @import("persistence.zig");
 const PersistenceState = @import("persistence_state.zig");
 const Manifest = @import("persistence/manifest.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
-const connection = @import("connection.zig");
+const ConnectionManager = @import("connection_manager.zig");
 const time = @import("time.zig");
 const logging = @import("logger.zig");
 
@@ -27,19 +29,20 @@ _notifier_storages: []storage.NotifierStorage,
 _data_storages: []storage.Interface,
 _mem_store: store.MemoryStore,
 _store: store.Store,
+_connection_manager: ConnectionManager,
 
 _listener: ?std.Io.net.Server = null,
 _cron_stop_requested: std.atomic.Value(bool) = .init(false),
 _cron_thread: ?std.Thread = null,
 
 /// Builds the whole object graph on the heap and returns a stable `*Server`.
-/// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`, and
-/// `_mem_store` (via `_kgc`/`_data_storages`) capture pointers back into
-/// `self`'s own fields. Returning `Server` by value would copy those fields
-/// to a new address while the captured pointers kept pointing at this
-/// function's now-dead stack frame => silent memory corruption, not a
-/// compile error. Heap allocation gives `self` a permanent address before
-/// any self-referential field is built.
+/// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`,
+/// `_mem_store` (via `_kgc`/`_data_storages`), and `_connection_manager`
+/// capture pointers back into `self`'s own fields. Returning `Server` by value
+/// would copy those fields to a new address while the captured pointers kept
+/// pointing at this function's now-dead stack frame, causing silent memory
+/// corruption. Heap allocation gives `self` a permanent address before any
+/// self-referential field is built.
 pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: logging.Logger) !*Server {
     const self = try allocator.create(Server);
     errdefer allocator.destroy(self);
@@ -113,6 +116,16 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
         maybe_aof_journal,
     );
     self._store = self._mem_store.store();
+    self._connection_manager = ConnectionManager.init(
+        io,
+        allocator,
+        logger,
+        &self._store,
+        config.connection_buffer_size,
+    );
+    errdefer self._connection_manager.deinit() catch |err| {
+        logger.err("server: failed to deinitialize connection manager after startup failure", err, @errorReturnTrace());
+    };
 
     // start aof replay
     if (config.append_only) {
@@ -146,27 +159,28 @@ pub fn run(self: *Server) !void {
     ) catch "server: started and listening";
     self._logger.info(started_message);
 
-    try connection.acceptLoop(
-        self._io,
-        self._logger,
-        &self._listener.?,
-        &self._store,
-        self._allocator,
-        self._config,
-    );
+    while (true) {
+        const client_stream = try self._listener.?.accept(self._io);
+        try self._connection_manager.start(client_stream);
+        try self._connection_manager.reapFinished();
+    }
 }
 
 /// Unwinds `create` in reverse. `_store.deinit()` chains through
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
-/// Returns the AOF close source after freeing the rest of the server.
+/// Returns the first cleanup source after freeing the rest of the server.
 pub fn destroy(self: *Server) anyerror!void {
     self.stopCron();
 
     var cleanup_error: ?anyerror = null;
+    self._connection_manager.deinit() catch |err| {
+        cleanup_error = err;
+    };
+
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {
-            cleanup_error = err;
+            if (cleanup_error == null) cleanup_error = err;
         };
     }
 
@@ -244,11 +258,187 @@ fn stopCron(self: *Server) void {
     self._cron_thread = null;
 }
 
+const BlockingStore = struct {
+    inner: store.Store,
+    io: std.Io,
+    command_entered: std.Io.Event = .unset,
+    release_command: std.Io.Event = .unset,
+    deinit_called: std.atomic.Value(bool) = .init(false),
+
+    fn interface(self: *BlockingStore) store.Store {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = store.Store.VTable{
+        .get = get,
+        .set = set,
+        .remove = remove,
+        .dbsize = dbsize,
+        .numDatabases = numDatabases,
+        .save = save,
+        .bgsave = bgsave,
+        .bgrewriteaof = bgrewriteaof,
+        .deinit = deinit,
+    };
+
+    fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Object {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.get(key, db_index);
+    }
+
+    fn set(ptr: *anyopaque, request: Request.SetRequest, db_index: u32) anyerror!?object.Object {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.set(request, db_index);
+    }
+
+    fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.remove(key, db_index);
+    }
+
+    fn dbsize(ptr: *anyopaque, db_index: u32) anyerror!u32 {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        self.command_entered.set(self.io);
+        self.release_command.waitUncancelable(self.io);
+        return self.inner.dbsize(db_index);
+    }
+
+    fn numDatabases(ptr: *anyopaque) u32 {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.numDatabases();
+    }
+
+    fn save(ptr: *anyopaque) anyerror!void {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.save();
+    }
+
+    fn bgsave(ptr: *anyopaque, origin: store.Store.TriggerOrigin) anyerror!void {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.bgsave(origin);
+    }
+
+    fn bgrewriteaof(ptr: *anyopaque, origin: store.Store.TriggerOrigin) anyerror!void {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.bgrewriteaof(origin);
+    }
+
+    fn deinit(ptr: *anyopaque) void {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        self.deinit_called.store(true, .release);
+        self.inner.deinit();
+    }
+};
+
+const BlockingCommandIo = struct {
+    base_io: std.Io,
+    request_sent: std.atomic.Value(bool) = .init(false),
+    shutdown_calls: std.atomic.Value(usize) = .init(0),
+    close_calls: std.atomic.Value(usize) = .init(0),
+    shutdown_called: std.Io.Event = .unset,
+    vtable: std.Io.VTable = undefined,
+
+    const request = "*1\r\n$6\r\nDBSIZE\r\n";
+
+    fn io(self: *BlockingCommandIo) std.Io {
+        self.vtable = self.base_io.vtable.*;
+        self.vtable.netRead = netRead;
+        self.vtable.netWrite = netWrite;
+        self.vtable.netClose = netClose;
+        self.vtable.netShutdown = netShutdown;
+        return .{ .userdata = self, .vtable = &self.vtable };
+    }
+
+    fn stream() std.Io.net.Stream {
+        return .{ .socket = .{ .handle = 1, .address = undefined } };
+    }
+
+    fn netRead(
+        userdata: ?*anyopaque,
+        _: std.Io.net.Socket.Handle,
+        data: [][]u8,
+    ) std.Io.net.Stream.Reader.Error!usize {
+        const self: *BlockingCommandIo = @ptrCast(@alignCast(userdata));
+        if (self.request_sent.swap(true, .acq_rel)) return 0;
+        @memcpy(data[0][0..request.len], request);
+        return request.len;
+    }
+
+    fn netWrite(
+        _: ?*anyopaque,
+        _: std.Io.net.Socket.Handle,
+        header: []const u8,
+        data: []const []const u8,
+        splat: usize,
+    ) std.Io.net.Stream.Writer.Error!usize {
+        var bytes_written = header.len;
+        for (data[0 .. data.len - 1]) |part| bytes_written += part.len;
+        if (splat > 0) bytes_written += data[data.len - 1].len * splat;
+        return bytes_written;
+    }
+
+    fn netShutdown(
+        userdata: ?*anyopaque,
+        _: std.Io.net.Socket.Handle,
+        _: std.Io.net.ShutdownHow,
+    ) std.Io.net.ShutdownError!void {
+        const self: *BlockingCommandIo = @ptrCast(@alignCast(userdata));
+        _ = self.shutdown_calls.fetchAdd(1, .acq_rel);
+        self.shutdown_called.set(self.base_io);
+    }
+
+    fn netClose(userdata: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
+        const self: *BlockingCommandIo = @ptrCast(@alignCast(userdata));
+        _ = self.close_calls.fetchAdd(handles.len, .acq_rel);
+    }
+};
+
 test "create builds the full object graph and destroy leaks nothing" {
     const testing = std.testing;
 
     const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
     try server.destroy();
+}
+
+test "server destroy keeps Store alive until a connection command finishes" {
+    const testing = std.testing;
+    const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
+    var server_destroyed = false;
+    defer if (!server_destroyed) server.destroy() catch unreachable;
+
+    var blocking_store: BlockingStore = .{ .inner = server._store, .io = testing.io };
+    server._store = blocking_store.interface();
+    defer blocking_store.release_command.set(testing.io);
+
+    var connection_io: BlockingCommandIo = .{ .base_io = testing.io };
+    server._connection_manager._io = connection_io.io();
+    try server._connection_manager.start(BlockingCommandIo.stream());
+    blocking_store.command_entered.waitUncancelable(testing.io);
+
+    const DestroyContext = struct {
+        server: *Server,
+        result: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.server.destroy() catch |err| {
+                self.result = err;
+            };
+        }
+    };
+    var destroy_context: DestroyContext = .{ .server = server };
+    const destroy_thread = try std.Thread.spawn(.{}, DestroyContext.run, .{&destroy_context});
+
+    connection_io.shutdown_called.waitUncancelable(testing.io);
+    const store_was_alive_during_command = !blocking_store.deinit_called.load(.acquire);
+    blocking_store.release_command.set(testing.io);
+    destroy_thread.join();
+    server_destroyed = true;
+
+    try testing.expect(store_was_alive_during_command);
+    try testing.expect(blocking_store.deinit_called.load(.acquire));
+    try testing.expectEqual(null, destroy_context.result);
+    try testing.expectEqual(1, connection_io.shutdown_calls.load(.acquire));
+    try testing.expectEqual(1, connection_io.close_calls.load(.acquire));
 }
 
 test "server owns and joins the cron thread" {

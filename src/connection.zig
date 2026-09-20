@@ -3,43 +3,23 @@ const resp = @import("resp.zig");
 const commander = @import("commander.zig");
 const ClientState = @import("client_state.zig");
 const store = @import("store.zig");
-const Config = @import("config.zig");
 const logging = @import("logger.zig");
 
-pub fn acceptLoop(
-    io: std.Io,
-    logger: logging.Logger,
-    server: *std.Io.net.Server,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    config: Config,
-) !void {
-    while (true) {
-        const connection = try server.accept(io);
-        const handle_thread = std.Thread.spawn(.{}, handle, .{
-            io,
-            logger,
-            connection,
-            data_store,
-            con_allocator,
-            config.connection_buffer_size,
-        }) catch |err| {
-            connection.close(io);
-            return err;
-        };
-        handle_thread.detach();
-    }
-}
-
-pub fn handle(
+/// Serves one client session using a borrowed stream.
+///
+/// The caller owns the stream and must close it after this function returns.
+/// Thread creation, shutdown, joining, and worker reaping belong outside this
+/// lower-level connection boundary.
+pub fn serve(
     io: std.Io,
     logger: logging.Logger,
     connection: std.Io.net.Stream,
     data_store: *store.Store,
     con_allocator: std.mem.Allocator,
     connection_buffer_size: usize,
+    stop_requested: *const std.atomic.Value(bool),
 ) void {
-    defer connection.close(io);
+    if (stop_requested.load(.acquire)) return;
 
     const buf = con_allocator.alloc(u8, connection_buffer_size) catch |err| {
         logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
@@ -47,7 +27,7 @@ pub fn handle(
     };
     defer con_allocator.free(buf);
 
-    handleConnection(io, logger, connection, data_store, buf) catch |err| {
+    handleConnection(io, logger, connection, data_store, buf, stop_requested) catch |err| {
         logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
 }
@@ -58,18 +38,24 @@ fn handleConnection(
     connection: std.Io.net.Stream,
     data_store: *store.Store,
     buf: []u8,
+    stop_requested: *const std.atomic.Value(bool),
 ) !void {
     var client_state = ClientState.init();
 
     while (true) {
+        if (stop_requested.load(.acquire)) return;
+
         // TODO: use buffered writer
         var connection_writer = connection.writer(io, &.{});
         var data = [_][]u8{buf};
 
         // TODO: We are directly doing syscall to OS which is expensive. Refactor this to use buffered reader
-        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| switch (err) {
-            error.ConnectionResetByPeer => return,
-            else => return err,
+        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| {
+            if (stop_requested.load(.acquire)) return;
+            switch (err) {
+                error.ConnectionResetByPeer => return,
+                else => return err,
+            }
         };
 
         if (bytes_read == 0) return;
@@ -87,9 +73,9 @@ fn handleConnection(
         const commands = parser.parse(req_allocator) catch |err| {
             if (err == error.OutOfMemory) {
                 logger.err("connection: request parsing failed", err, @errorReturnTrace());
-                _ = writeResponse(logger, &connection_writer, internal_error_response);
+                _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
             } else {
-                _ = writeResponse(logger, &connection_writer, parseErrorResponse(err));
+                _ = writeResponse(logger, &connection_writer, parseErrorResponse(err), stop_requested);
             }
             return;
         };
@@ -98,10 +84,10 @@ fn handleConnection(
         const c = commander.init(req_allocator, commands) catch |err| {
             const response = initErrorResponse(err) orelse {
                 logger.err("connection: command initialization failed", err, @errorReturnTrace());
-                _ = writeResponse(logger, &connection_writer, internal_error_response);
+                _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
                 return;
             };
-            if (!writeResponse(logger, &connection_writer, response)) return;
+            if (!writeResponse(logger, &connection_writer, response, stop_requested)) return;
             continue;
         };
         defer c.deinit();
@@ -112,25 +98,25 @@ fn handleConnection(
 
         const result = c.execute(io, data_store, &client_state) catch |err| {
             if (executeErrorResponse(err, commands)) |response| {
-                if (!writeResponse(logger, &connection_writer, response)) return;
+                if (!writeResponse(logger, &connection_writer, response, stop_requested)) return;
                 continue;
             }
 
             logger.err("connection: command execution failed", err, @errorReturnTrace());
-            _ = writeResponse(logger, &connection_writer, internal_error_response);
+            _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
             return;
         };
 
         const serialized_result = serializer.serialize(req_allocator, result) catch |err| {
             logger.err("connection: response serialization failed", err, @errorReturnTrace());
-            _ = writeResponse(logger, &connection_writer, internal_error_response);
+            _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
             return;
         };
 
         defer serializer.deinit(req_allocator, serialized_result);
 
         // Write serialized string
-        if (!writeResponse(logger, &connection_writer, serialized_result)) return;
+        if (!writeResponse(logger, &connection_writer, serialized_result, stop_requested)) return;
     }
 }
 
@@ -149,9 +135,16 @@ fn parseErrorResponse(err: resp.ParseError) []const u8 {
     };
 }
 
-fn writeResponse(logger: logging.Logger, writer: *std.Io.net.Stream.Writer, bytes: []const u8) bool {
+fn writeResponse(
+    logger: logging.Logger,
+    writer: *std.Io.net.Stream.Writer,
+    bytes: []const u8,
+    stop_requested: *const std.atomic.Value(bool),
+) bool {
     writer.interface.writeAll(bytes) catch |err| {
-        logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+        if (!stop_requested.load(.acquire)) {
+            logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+        }
         return false;
     };
     return true;
@@ -206,7 +199,9 @@ fn usesLegacyArgumentResponse(request: resp.RESPValue) bool {
         std.ascii.eqlIgnoreCase(keyword, "ECHO");
 }
 
-test "buffer allocation failure is reported once and closes the connection" {
+const never_stop_requested: std.atomic.Value(bool) = .init(false);
+
+test "buffer allocation failure is reported once without closing the borrowed stream" {
     const CloseRecorder = struct {
         calls: usize = 0,
 
@@ -230,20 +225,21 @@ test "buffer allocation failure is reported once and closes the connection" {
     var test_logger = logging.TestLogger.init();
     var unused_store: store.Store = undefined;
 
-    handle(
+    serve(
         io,
         test_logger.logger(),
         .{ .socket = .{ .handle = 1, .address = undefined } },
         &unused_store,
         failing_allocator.allocator(),
         1024,
+        &never_stop_requested,
     );
 
     const events = test_logger.recordedEvents();
     try std.testing.expectEqual(1, events.len);
     try std.testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
     try std.testing.expectEqual(error.OutOfMemory, events[0].source.?);
-    try std.testing.expectEqual(1, close_recorder.calls);
+    try std.testing.expectEqual(0, close_recorder.calls);
 }
 
 const TestConnectionIo = struct {
@@ -333,10 +329,10 @@ test "a Storage source crosses Store and Commander to the connection logger" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings(internal_error_response, fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     const events = test_logger.recordedEvents();
     try testing.expectEqual(1, events.len);
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
@@ -352,12 +348,12 @@ test "command input errors keep their wire response and allow another request" {
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("-Wrong number of arguments\r\n+PONG\r\n", fake_io.written());
     try testing.expectEqual(2, fake_io.next_request);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
 }
 
 test "a malformed protocol request gets its fixed response without an error event" {
@@ -367,10 +363,10 @@ test "a malformed protocol request gets its fixed response without an error even
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("-ERR protocol error: invalid RESP type\r\n", fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
 }
 
@@ -384,24 +380,24 @@ test "an unknown command gets its fixed response and the connection continues" {
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("-ERR unknown command\r\n+PONG\r\n", fake_io.written());
     try testing.expectEqual(2, fake_io.next_request);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
 }
 
-test "a response write source is reported once and closes the connection" {
+test "a response write source is reported once without closing the borrowed stream" {
     const testing = std.testing;
     var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$4\r\nPING\r\n"}, .fail_write = true };
     var test_logger = logging.TestLogger.init();
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("", fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     const events = test_logger.recordedEvents();
     try testing.expectEqual(1, events.len);
     try testing.expectEqual(error.NetworkDown, events[0].source.?);
@@ -415,10 +411,10 @@ test "an internal failure and failed error response report both sources" {
     mock.dbsize_result = error.TestStorageSource;
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("", fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     const events = test_logger.recordedEvents();
     try testing.expectEqual(2, events.len);
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
