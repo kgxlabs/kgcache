@@ -5,6 +5,8 @@ const logging = @import("logger.zig");
 const store = @import("store.zig");
 
 const ConnectionManager = @This();
+// TODO: If this is too much, reduce it.
+const max_reaped_workers_per_pass: usize = 64;
 
 /// A stable, heap-allocated record owned by ConnectionManager.
 pub const ClientWorker = struct {
@@ -71,20 +73,27 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 }
 
 pub fn reapFinished(self: *ConnectionManager) !void {
-    while (true) {
-        const worker = blk: {
-            var lock_tx = try self._lock.begin();
-            defer lock_tx.end();
+    var finished_workers: [max_reaped_workers_per_pass]*ClientWorker = undefined;
+    var finished_count: usize = 0;
 
-            for (self._workers.items, 0..) |candidate, index| {
-                if (candidate.lifecycle == .finished) {
-                    break :blk self._workers.swapRemove(index);
-                }
+    {
+        var lock_tx = try self._lock.begin();
+        defer lock_tx.end();
+
+        var index: usize = 0;
+        while (index < self._workers.items.len and finished_count < max_reaped_workers_per_pass) {
+            const worker = self._workers.items[index];
+
+            if (worker.lifecycle == .finished) {
+                finished_workers[finished_count] = self._workers.swapRemove(index);
+                finished_count += 1;
+            } else {
+                index += 1;
             }
-            break :blk null;
-        };
+        }
+    }
 
-        const finished_worker = worker orelse return;
+    for (finished_workers[0..finished_count]) |finished_worker| {
         finished_worker.thread.?.join();
         self._allocator.destroy(finished_worker);
     }
