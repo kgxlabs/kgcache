@@ -6,7 +6,7 @@ const PersistenceState = @import("persistence_state.zig");
 const Manifest = @import("persistence/manifest.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
-const connection = @import("connection.zig");
+const ConnectionManager = @import("connection_manager.zig");
 const time = @import("time.zig");
 const logging = @import("logger.zig");
 
@@ -27,19 +27,20 @@ _notifier_storages: []storage.NotifierStorage,
 _data_storages: []storage.Interface,
 _mem_store: store.MemoryStore,
 _store: store.Store,
+_connection_manager: ConnectionManager,
 
 _listener: ?std.Io.net.Server = null,
 _cron_stop_requested: std.atomic.Value(bool) = .init(false),
 _cron_thread: ?std.Thread = null,
 
 /// Builds the whole object graph on the heap and returns a stable `*Server`.
-/// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`, and
-/// `_mem_store` (via `_kgc`/`_data_storages`) capture pointers back into
-/// `self`'s own fields. Returning `Server` by value would copy those fields
-/// to a new address while the captured pointers kept pointing at this
-/// function's now-dead stack frame => silent memory corruption, not a
-/// compile error. Heap allocation gives `self` a permanent address before
-/// any self-referential field is built.
+/// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`,
+/// `_mem_store` (via `_kgc`/`_data_storages`), and `_connection_manager`
+/// capture pointers back into `self`'s own fields. Returning `Server` by value
+/// would copy those fields to a new address while the captured pointers kept
+/// pointing at this function's now-dead stack frame, causing silent memory
+/// corruption. Heap allocation gives `self` a permanent address before any
+/// self-referential field is built.
 pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: logging.Logger) !*Server {
     const self = try allocator.create(Server);
     errdefer allocator.destroy(self);
@@ -113,6 +114,16 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
         maybe_aof_journal,
     );
     self._store = self._mem_store.store();
+    self._connection_manager = ConnectionManager.init(
+        io,
+        allocator,
+        logger,
+        &self._store,
+        config.connection_buffer_size,
+    );
+    errdefer self._connection_manager.deinit() catch |err| {
+        logger.err("server: failed to deinitialize connection manager after startup failure", err, @errorReturnTrace());
+    };
 
     // start aof replay
     if (config.append_only) {
@@ -146,27 +157,27 @@ pub fn run(self: *Server) !void {
     ) catch "server: started and listening";
     self._logger.info(started_message);
 
-    try connection.acceptLoop(
-        self._io,
-        self._logger,
-        &self._listener.?,
-        &self._store,
-        self._allocator,
-        self._config,
-    );
+    while (true) {
+        const client_stream = try self._listener.?.accept(self._io);
+        try self._connection_manager.start(client_stream);
+    }
 }
 
 /// Unwinds `create` in reverse. `_store.deinit()` chains through
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
-/// Returns the AOF close source after freeing the rest of the server.
+/// Returns the first cleanup source after freeing the rest of the server.
 pub fn destroy(self: *Server) anyerror!void {
     self.stopCron();
 
     var cleanup_error: ?anyerror = null;
+    self._connection_manager.deinit() catch |err| {
+        cleanup_error = err;
+    };
+
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {
-            cleanup_error = err;
+            if (cleanup_error == null) cleanup_error = err;
         };
     }
 

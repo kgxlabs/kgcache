@@ -3,46 +3,7 @@ const resp = @import("resp.zig");
 const commander = @import("commander.zig");
 const ClientState = @import("client_state.zig");
 const store = @import("store.zig");
-const Config = @import("config.zig");
 const logging = @import("logger.zig");
-
-pub fn acceptLoop(
-    io: std.Io,
-    logger: logging.Logger,
-    server: *std.Io.net.Server,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    config: Config,
-) !void {
-    while (true) {
-        const connection = try server.accept(io);
-        const handle_thread = std.Thread.spawn(.{}, handle, .{
-            io,
-            logger,
-            connection,
-            data_store,
-            con_allocator,
-            config.connection_buffer_size,
-        }) catch |err| {
-            connection.close(io);
-            return err;
-        };
-        handle_thread.detach();
-    }
-}
-
-pub fn handle(
-    io: std.Io,
-    logger: logging.Logger,
-    connection: std.Io.net.Stream,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    connection_buffer_size: usize,
-) void {
-    defer connection.close(io);
-
-    serve(io, logger, connection, data_store, con_allocator, connection_buffer_size);
-}
 
 /// Serves one client session using a borrowed stream.
 ///
@@ -222,7 +183,7 @@ fn usesLegacyArgumentResponse(request: resp.RESPValue) bool {
         std.ascii.eqlIgnoreCase(keyword, "ECHO");
 }
 
-test "buffer allocation failure is reported once and closes the connection" {
+test "buffer allocation failure is reported once without closing the borrowed stream" {
     const CloseRecorder = struct {
         calls: usize = 0,
 
@@ -246,7 +207,7 @@ test "buffer allocation failure is reported once and closes the connection" {
     var test_logger = logging.TestLogger.init();
     var unused_store: store.Store = undefined;
 
-    handle(
+    serve(
         io,
         test_logger.logger(),
         .{ .socket = .{ .handle = 1, .address = undefined } },
@@ -259,7 +220,7 @@ test "buffer allocation failure is reported once and closes the connection" {
     try std.testing.expectEqual(1, events.len);
     try std.testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
     try std.testing.expectEqual(error.OutOfMemory, events[0].source.?);
-    try std.testing.expectEqual(1, close_recorder.calls);
+    try std.testing.expectEqual(0, close_recorder.calls);
 }
 
 const TestConnectionIo = struct {
@@ -349,10 +310,10 @@ test "a Storage source crosses Store and Commander to the connection logger" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
 
     try testing.expectEqualStrings(internal_error_response, fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     const events = test_logger.recordedEvents();
     try testing.expectEqual(1, events.len);
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
@@ -368,12 +329,12 @@ test "command input errors keep their wire response and allow another request" {
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
 
     try testing.expectEqualStrings("-Wrong number of arguments\r\n+PONG\r\n", fake_io.written());
     try testing.expectEqual(2, fake_io.next_request);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
 }
 
 test "a malformed protocol request gets its fixed response without an error event" {
@@ -383,10 +344,10 @@ test "a malformed protocol request gets its fixed response without an error even
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
 
     try testing.expectEqualStrings("-ERR protocol error: invalid RESP type\r\n", fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
 }
 
@@ -400,24 +361,24 @@ test "an unknown command gets its fixed response and the connection continues" {
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
 
     try testing.expectEqualStrings("-ERR unknown command\r\n+PONG\r\n", fake_io.written());
     try testing.expectEqual(2, fake_io.next_request);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
 }
 
-test "a response write source is reported once and closes the connection" {
+test "a response write source is reported once without closing the borrowed stream" {
     const testing = std.testing;
     var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$4\r\nPING\r\n"}, .fail_write = true };
     var test_logger = logging.TestLogger.init();
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
 
     try testing.expectEqualStrings("", fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     const events = test_logger.recordedEvents();
     try testing.expectEqual(1, events.len);
     try testing.expectEqual(error.NetworkDown, events[0].source.?);
@@ -431,10 +392,10 @@ test "an internal failure and failed error response report both sources" {
     mock.dbsize_result = error.TestStorageSource;
     var data_store = mock.store();
 
-    handle(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024);
 
     try testing.expectEqualStrings("", fake_io.written());
-    try testing.expectEqual(1, fake_io.close_calls);
+    try testing.expectEqual(0, fake_io.close_calls);
     const events = test_logger.recordedEvents();
     try testing.expectEqual(2, events.len);
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
