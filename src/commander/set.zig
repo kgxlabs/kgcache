@@ -1,7 +1,6 @@
 const std = @import("std");
 const resp = @import("../resp.zig");
 const store = @import("../store.zig");
-const object = @import("../object.zig");
 const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 const Request = @import("request.zig");
@@ -22,7 +21,7 @@ const vtable = Commander.VTable{
     .deinit = deinit,
 };
 
-fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!resp.RESPValue {
+fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
     const self: *Set = @ptrCast(@alignCast(ptr));
 
     const now_ms = std.Io.Clock.real.now(io).toMilliseconds();
@@ -31,10 +30,10 @@ fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: 
     const maybe_object = try data_store.set(req, client_state.db_index);
 
     if (maybe_object == null) {
-        return .{ .simple_string = "OK" };
+        return Commander.Result.borrowed(.{ .simple_string = "OK" });
     }
 
-    return try object.toRESP(maybe_object.?);
+    return try Commander.Result.owned(maybe_object.?);
 }
 
 const schema: Schema.Interface.SchemaDefinition = .{

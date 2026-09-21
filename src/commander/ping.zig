@@ -18,8 +18,8 @@ pub fn commander(self: *Ping) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(_: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
-    return .{ .simple_string = "PONG" };
+fn execute(_: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
+    return Commander.Result.borrowed(.{ .simple_string = "PONG" });
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -46,8 +46,9 @@ test "execute ping command" {
     defer data_store.deinit();
     var client_state: Commander.ClientState = .{};
 
-    const result = try command.execute(testing.io, &data_store, &client_state);
-    switch (result) {
+    var result = try command.execute(testing.io, &data_store, &client_state);
+    defer result.deinit();
+    switch (result.value) {
         .simple_string => |actual| try testing.expectEqualStrings("PONG", actual),
         else => return error.TestUnexpectedResult,
     }

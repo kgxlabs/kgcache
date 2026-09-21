@@ -21,7 +21,7 @@ const vtable = Commander.VTable{
     .deinit = deinit,
 };
 
-fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Select = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len != 1) {
@@ -34,7 +34,7 @@ fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *
     }
 
     client_state.db_index = index;
-    return .{ .simple_string = "OK" };
+    return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -56,8 +56,9 @@ test "execute selects a valid database" {
     var data_store = mock_store.store();
     var client_state: Commander.ClientState = .{};
 
-    const result = try command.execute(testing.io, &data_store, &client_state);
-    switch (result) {
+    var result = try command.execute(testing.io, &data_store, &client_state);
+    defer result.deinit();
+    switch (result.value) {
         .simple_string => |actual| try testing.expectEqualStrings("OK", actual),
         else => return error.TestUnexpectedResult,
     }

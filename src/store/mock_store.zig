@@ -4,8 +4,8 @@ const Request = @import("../commander/request.zig");
 
 const MockStore = @This();
 
-get_result: anyerror!?object.Object = null,
-set_result: anyerror!?object.Object = null,
+get_result: anyerror!?object.Owned = null,
+set_result: anyerror!?object.Owned = null,
 remove_result: anyerror!bool = false,
 dbsize_result: anyerror!u32 = 0,
 bgsave_result: anyerror!void = {},
@@ -48,14 +48,14 @@ const vtable = Store.VTable{
     .deinit = deinit,
 };
 
-fn get(ptr: *anyopaque, key: []const u8, _: u32) anyerror!?object.Object {
+fn get(ptr: *anyopaque, key: []const u8, _: u32) anyerror!?object.Owned {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.get_calls += 1;
     self.last_get_key = key;
     return self.get_result;
 }
 
-fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Object {
+fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.set_calls += 1;
     self.last_set_key = req.key;

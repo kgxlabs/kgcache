@@ -131,9 +131,10 @@ fn replayContents(
         const c = try commander.init(allocator, value);
         defer c.deinit();
 
-        const reply = try c.execute(io, data_store, client_state);
+        var reply = try c.execute(io, data_store, client_state);
+        defer reply.deinit();
 
-        switch (reply) {
+        switch (reply.value) {
             .simple_error => return Error.InvalidAofCommandResult,
             else => {},
         }

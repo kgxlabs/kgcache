@@ -281,12 +281,12 @@ const BlockingStore = struct {
         .deinit = deinit,
     };
 
-    fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Object {
+    fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Owned {
         const self: *BlockingStore = @ptrCast(@alignCast(ptr));
         return self.inner.get(key, db_index);
     }
 
-    fn set(ptr: *anyopaque, request: Request.SetRequest, db_index: u32) anyerror!?object.Object {
+    fn set(ptr: *anyopaque, request: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
         const self: *BlockingStore = @ptrCast(@alignCast(ptr));
         return self.inner.set(request, db_index);
     }
@@ -569,8 +569,9 @@ test "create with appendonly off still loads the kgc snapshot" {
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
     defer server.destroy() catch unreachable;
 
-    const loaded = try server._store.get("foo", 0) orelse return error.TestUnexpectedResult;
-    switch (loaded) {
+    var loaded = try server._store.get("foo", 0) orelse return error.TestUnexpectedResult;
+    defer loaded.deinit();
+    switch (loaded.value) {
         .string => |str| try testing.expectEqualStrings("bar", str),
     }
 }
@@ -761,10 +762,12 @@ test "writes survive a simulated restart" {
     const second = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
     defer second.destroy() catch unreachable;
 
-    const persistent = try second._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("one", persistent.string);
-    const expiring = try second._store.get("expiring", 1) orelse return error.TestUnexpectedResult;
-    try testing.expectEqualStrings("two", expiring.string);
+    var persistent = try second._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
+    defer persistent.deinit();
+    try testing.expectEqualStrings("one", persistent.value.string);
+    var expiring = try second._store.get("expiring", 1) orelse return error.TestUnexpectedResult;
+    defer expiring.deinit();
+    try testing.expectEqualStrings("two", expiring.value.string);
 
     var tx = try second._data_storages[1].begin();
     defer tx.end();

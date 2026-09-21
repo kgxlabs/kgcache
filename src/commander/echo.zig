@@ -18,17 +18,18 @@ const vtable = Commander.VTable{
     .deinit = deinit,
 };
 
-fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Echo = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len != 1) {
         return error.WrongNumberArguments;
     }
 
-    return switch (self.arguments[0]) {
+    const value: resp.RESPValue = switch (self.arguments[0]) {
         .bulk_string => |maybe_string| .{ .bulk_string = maybe_string orelse return Commander.Error.MalformedCommandRequest },
-        else => Commander.Error.UnsupportedArgumentType,
+        else => return Commander.Error.UnsupportedArgumentType,
     };
+    return Commander.Result.borrowed(value);
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -43,8 +44,9 @@ test "execute echo command" {
         .{ .bulk_string = "hello" },
     };
 
-    const result = try TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values }));
-    switch (result) {
+    var result = try TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values }));
+    defer result.deinit();
+    switch (result.value) {
         .bulk_string => |maybe_actual| try testing.expectEqualStrings("hello", maybe_actual orelse return error.TestUnexpectedResult),
         else => return error.TestUnexpectedResult,
     }

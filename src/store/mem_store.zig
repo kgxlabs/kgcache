@@ -56,7 +56,7 @@ const vtable = Store.VTable{
     .deinit = deinit,
 };
 
-pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Object {
+pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Owned {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
     var tx = try storage.begin();
@@ -64,7 +64,7 @@ pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Obj
 
     const maybe_value = try storage.get(key);
     const value = maybe_value orelse return null;
-    return value.value;
+    return try object.Owned.clone(self._allocator, value.value);
 }
 
 // TODO: Support all of these options
@@ -72,7 +72,7 @@ pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Obj
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Object {
+pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
@@ -83,11 +83,11 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?ob
 
     const existing_entry = try storage.get(req.key);
     if (existing_entry != null and shouldSkipIfExist(req.condition)) {
-        return makeSetResponse(req, existing_entry.?.value);
+        return try makeSetResponse(self, req, existing_entry.?.value);
     }
 
     if (existing_entry == null and shouldSkipIfNotExist(req.condition)) {
-        return makeSetResponse(req, null);
+        return try makeSetResponse(self, req, null);
     }
 
     const stored_entry = try storage.put(req.key, .{
@@ -97,7 +97,7 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?ob
         .keepttl = req.keepttl,
     });
 
-    return makeSetResponse(req, stored_entry.value);
+    return try makeSetResponse(self, req, stored_entry.value);
 }
 
 pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
@@ -215,9 +215,9 @@ fn validateCondition(maybe_condition: ?Request.SetCondition) error{UnsupportedCo
     };
 }
 
-fn makeSetResponse(req: Request.SetRequest, value: ?object.Object) ?object.Object {
+fn makeSetResponse(self: *MemoryStore, req: Request.SetRequest, value: ?object.Object) !?object.Owned {
     if (req.response != null and req.response.?.get) {
-        return value;
+        return try object.Owned.clone(self._allocator, value orelse return null);
     }
 
     return null;
@@ -355,7 +355,7 @@ test "set stores a value and returns null" {
     try testing.expect(set_value == null);
 
     const get_value = try data_store.get(req.key, 0) orelse return error.TestUnexpectedResult;
-    try expectObjectString(get_value, req.value);
+    try expectOwnedObjectString(get_value, req.value);
 }
 
 test "set stores a value and returns value" {
@@ -377,10 +377,10 @@ test "set stores a value and returns value" {
 
     const set_value = try data_store.set(req, 0);
 
-    try expectObjectString(set_value, req.value);
+    try expectOwnedObjectString(set_value, req.value);
 
     const get_value = try data_store.get(req.key, 0) orelse return error.TestUnexpectedResult;
-    try expectObjectString(get_value, req.value);
+    try expectOwnedObjectString(get_value, req.value);
 }
 
 test "get returns null for a missing key" {
@@ -394,6 +394,46 @@ test "get returns null for a missing key" {
     const value = try data_store.get("missing", 0);
 
     try testing.expect(value == null);
+}
+
+test "get returns a value that survives a storage update" {
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
+    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    try setStoreValue(&data_store, "key", "first", 0);
+    var result = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
+    defer result.deinit();
+
+    try setStoreValue(&data_store, "key", "second", 0);
+
+    try expectObjectString(result.value, "first");
+}
+
+test "set GET returns a value that survives a storage update" {
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
+    var memory_store = MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc_backend.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    var result = try data_store.set(.{
+        .key = "key",
+        .value = "first",
+        .condition = null,
+        .expires_at = null,
+        .keepttl = false,
+        .response = .{ .get = true },
+    }, 0) orelse return error.TestUnexpectedResult;
+    defer result.deinit();
+
+    try setStoreValue(&data_store, "key", "second", 0);
+
+    try expectObjectString(result.value, "first");
 }
 
 test "set replaces an existing value" {
@@ -428,7 +468,7 @@ test "set replaces an existing value" {
     try testing.expect(result == null);
 
     const value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
-    try expectObjectString(value, "second");
+    try expectOwnedObjectString(value, "second");
 }
 
 test "set with NX does not replace an existing value" {
@@ -457,7 +497,7 @@ test "set with NX does not replace an existing value" {
     }, 0);
 
     const value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
-    try expectObjectString(value, "first");
+    try expectOwnedObjectString(value, "first");
 }
 
 test "set with XX does not create a missing value" {
@@ -510,7 +550,7 @@ test "set owns the key and value bytes" {
     @memset(&value, 'x');
 
     const stored_value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
-    try expectObjectString(stored_value, "one");
+    try expectOwnedObjectString(stored_value, "one");
 }
 
 test "databases are isolated from each other" {
@@ -539,7 +579,7 @@ test "databases are isolated from each other" {
     try testing.expect(try data_store.get("key", 1) == null);
 
     const value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
-    try expectObjectString(value, "value");
+    try expectOwnedObjectString(value, "value");
 }
 
 test "save then load round-trips across databases" {
@@ -687,7 +727,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
 
     _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config);
     const value = try fresh_store.get("foo", 0);
-    try expectObjectString(value, "bar");
+    try expectOwnedObjectString(value, "bar");
 }
 
 test "concurrent AOF rewrite and writes replay to the final value" {
@@ -752,7 +792,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     defer fresh_store.deinit();
 
     _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config);
-    try expectObjectString(try fresh_store.get("key", 0), last_value);
+    try expectOwnedObjectString(try fresh_store.get("key", 0), last_value);
 }
 
 test "concurrent KGC snapshot contains one complete submitted value" {
@@ -892,8 +932,8 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
     defer fresh_store.deinit();
 
     _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config);
-    try expectObjectString(try fresh_store.get("zero", 0), "first");
-    try expectObjectString(try fresh_store.get("one", 1), "second");
+    try expectOwnedObjectString(try fresh_store.get("zero", 0), "first");
+    try expectOwnedObjectString(try fresh_store.get("one", 1), "second");
 }
 
 test "KGC bgsave waits for active Storage work and preserves all databases" {
@@ -997,4 +1037,10 @@ fn expectObjectString(maybe_value: ?object.Object, expected: []const u8) !void {
             try testing.expectEqualStrings(expected, str);
         },
     }
+}
+
+fn expectOwnedObjectString(maybe_owned: ?object.Owned, expected: []const u8) !void {
+    var owned = maybe_owned orelse return error.Null;
+    defer owned.deinit();
+    try expectObjectString(owned.value, expected);
 }

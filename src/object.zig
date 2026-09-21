@@ -6,6 +6,27 @@ pub const Object = union(enum) {
     // TODO: Add more types --- list, set, sorted set, hash, stream
 };
 
+pub const Owned = struct {
+    allocator: std.mem.Allocator,
+    value: Object,
+
+    pub fn clone(allocator: std.mem.Allocator, value: Object) !Owned {
+        return .{
+            .allocator = allocator,
+            .value = switch (value) {
+                .string => |str| .{ .string = try allocator.dupe(u8, str) },
+            },
+        };
+    }
+
+    pub fn deinit(self: *Owned) void {
+        switch (self.value) {
+            .string => |str| self.allocator.free(str),
+        }
+        self.* = undefined;
+    }
+};
+
 // TODO: Currently only handles string. handle more types in future
 pub fn fromRESP(value: resp.RESPValue) !Object {
     return switch (value) {
