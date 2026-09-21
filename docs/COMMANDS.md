@@ -7,7 +7,8 @@ This reference describes the currently implemented command subset. Full Redis co
 | `PING` | Returns `PONG`. Arguments are currently ignored. |
 | `ECHO <message>` | Returns one non-null bulk-string argument. |
 | `GET <key>` | Returns a bulk string, or a null bulk string when the key is absent or expired. |
-| `SET <key> <value> [options]` | Stores a string value and returns `OK`, unless `GET` requests a value response. |
+| `SET <key> <value> [options]` | Stores a string value. Without `GET`, returns `OK` when the write applies and a null bulk string when `NX` or `XX` rejects it. With `GET`, returns the previous value or a null bulk string when no value existed. |
+| `DEL <key> [key ...]` | Removes the given keys and returns the number of keys that existed and were removed. |
 | `SELECT <index>` | Switches the connection's active database. Returns an error if `index` is out of range. |
 | `DBSIZE` | Returns the number of stored keys as an RESP integer. |
 | `SAVE` | Writes a `.kgc` snapshot of all databases to disk (see [Configuration](CONFIGURATION.md) for `snapshot-path`), and blocks the calling connection until the write finishes. Returns an error if the write fails or a save is already in progress. |
@@ -32,5 +33,14 @@ also cannot run at the same time.
 | Absolute expiration | `EXAT <unix-seconds>`, `PXAT <unix-milliseconds>` |
 | TTL handling | `KEEPTTL` |
 | Response | `GET` |
+
+`NX` applies the write only when the key does not exist. `XX` applies it only
+when the key exists. When either condition rejects the write, the current value
+and its expiration remain unchanged.
+
+Without `GET`, a rejected conditional write returns a null bulk string. `GET`
+changes the response to the value that existed before the command, or a null
+bulk string when the key did not exist. This is true whether the conditional
+write applies or is rejected.
 
 Expiration records are maintained separately from key/value entries, with an O(1) index for updates and removal. Expired values are removed when read.
