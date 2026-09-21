@@ -13,9 +13,8 @@ pub const TriggerOrigin = enum {
 
 const Store = @This();
 
-// NOTE: we need to create new return type for `mutation commands` since they might or might not apply changes to storage
-// and we need to record that in order to write correct response.
-// But for `query` and `action` commands (responses are either null or void), we dont need it
+// Mutation commands can complete without applying a change. Keep that outcome
+// separate from any value the command asks the store to return.
 pub const MutationOutcome = enum {
     applied,
     not_applied,
@@ -28,7 +27,7 @@ pub fn MutationResult(comptime T: type) type {
     };
 }
 
-const SetResult = MutationResult(?object.Owned);
+pub const SetResult = MutationResult(?object.Owned);
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -50,8 +49,8 @@ pub fn get(self: Store, key: []const u8, db_index: u32) anyerror!?object.Owned {
     return self.vtable.get(self.ptr, key, db_index);
 }
 
-/// The caller owns a non-null result and must call `deinit` on it.
-pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
+/// The caller owns a non-null `result.value` and must call `deinit` on it.
+pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!SetResult {
     return self.vtable.set(self.ptr, req, db_index);
 }
 

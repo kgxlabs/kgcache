@@ -27,13 +27,18 @@ fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: 
     const now_ms = std.Io.Clock.real.now(io).toMilliseconds();
     const req = try bind(self.arguments, now_ms);
 
-    const maybe_object = try data_store.set(req, client_state.db_index);
+    const result = try data_store.set(req, client_state.db_index);
 
-    if (maybe_object == null) {
-        return Commander.Result.borrowed(.{ .simple_string = "OK" });
+    if (result.value) |value| {
+        return try Commander.Result.owned(value);
     }
 
-    return try Commander.Result.owned(maybe_object.?);
+    const requested_prev_value = req.response != null and req.response.?.get;
+    if (requested_prev_value or result.outcome == .not_applied) {
+        return Commander.Result.borrowed(.{ .bulk_string = null });
+    }
+
+    return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
 
 const schema: Schema.Interface.SchemaDefinition = .{

@@ -5,7 +5,7 @@ const Request = @import("../commander/request.zig");
 const MockStore = @This();
 
 get_result: anyerror!?object.Owned = null,
-set_result: anyerror!?object.Owned = null,
+set_result: anyerror!Store.SetResult = .{ .outcome = .applied, .value = null },
 remove_result: anyerror!bool = false,
 dbsize_result: anyerror!u32 = 0,
 bgsave_result: anyerror!void = {},
@@ -55,7 +55,7 @@ fn get(ptr: *anyopaque, key: []const u8, _: u32) anyerror!?object.Owned {
     return self.get_result;
 }
 
-fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
+fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!Store.SetResult {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.set_calls += 1;
     self.last_set_key = req.key;

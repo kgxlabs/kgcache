@@ -72,7 +72,7 @@ pub fn get(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!?object.Own
 // IFDEQ ifdeq-digest | IFDNE ifdne-digest] [GET] [EX seconds |
 // PX milliseconds | EXAT unix-time-seconds |
 // PXAT unix-time-milliseconds | KEEPTTL]
-pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
+pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!Store.SetResult {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
@@ -83,21 +83,37 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!?ob
 
     const existing_entry = try storage.get(req.key);
     if (existing_entry != null and shouldSkipIfExist(req.condition)) {
-        return try makeSetResponse(self, req, existing_entry.?.value);
+        return .{
+            .outcome = .not_applied,
+            .value = try makeSetResponse(self, req, existing_entry.?.value),
+        };
     }
 
     if (existing_entry == null and shouldSkipIfNotExist(req.condition)) {
-        return try makeSetResponse(self, req, null);
+        return .{
+            .outcome = .not_applied,
+            .value = try makeSetResponse(self, req, null),
+        };
     }
 
-    const stored_entry = try storage.put(req.key, .{
+    var response = try makeSetResponse(
+        self,
+        req,
+        if (existing_entry) |existing| existing.value else null,
+    );
+    errdefer if (response) |*value| value.deinit();
+
+    _ = try storage.put(req.key, .{
         .string = req.value,
     }, .{
         .expires_at = req.expires_at,
         .keepttl = req.keepttl,
     });
 
-    return try makeSetResponse(self, req, stored_entry.value);
+    return .{
+        .outcome = .applied,
+        .value = response,
+    };
 }
 
 pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
