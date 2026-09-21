@@ -13,12 +13,29 @@ pub const TriggerOrigin = enum {
 
 const Store = @This();
 
+// NOTE: we need to create new return type for `mutation commands` since they might or might not apply changes to storage
+// and we need to record that in order to write correct response.
+// But for `query` and `action` commands (responses are either null or void), we dont need it
+pub const MutationOutcome = enum {
+    applied,
+    not_applied,
+};
+
+pub fn MutationResult(comptime T: type) type {
+    return struct {
+        outcome: MutationOutcome,
+        value: T,
+    };
+}
+
+const SetResult = MutationResult(?object.Owned);
+
 ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
     get: *const fn (*anyopaque, []const u8, u32) anyerror!?object.Owned,
-    set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!?object.Owned,
+    set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!SetResult,
     remove: *const fn (*anyopaque, []const u8, u32) anyerror!bool,
     dbsize: *const fn (*anyopaque, u32) anyerror!u32,
     numDatabases: *const fn (*anyopaque) u32,
