@@ -368,13 +368,13 @@ test "set stores a value and returns null" {
     };
     const set_value = try data_store.set(req, 0);
 
-    try testing.expect(set_value == null);
+    try testing.expect(set_value.value == null);
 
     const get_value = try data_store.get(req.key, 0) orelse return error.TestUnexpectedResult;
     try expectOwnedObjectString(get_value, req.value);
 }
 
-test "set stores a value and returns value" {
+test "set GET returns null when there is no previous value" {
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "test.kgc");
@@ -393,7 +393,7 @@ test "set stores a value and returns value" {
 
     const set_value = try data_store.set(req, 0);
 
-    try expectOwnedObjectString(set_value, req.value);
+    try testing.expect(set_value.value == null);
 
     const get_value = try data_store.get(req.key, 0) orelse return error.TestUnexpectedResult;
     try expectOwnedObjectString(get_value, req.value);
@@ -437,17 +437,20 @@ test "set GET returns a value that survives a storage update" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    var result = try data_store.set(.{
+    try setStoreValue(&data_store, "key", "first", 0);
+
+    const set_result = try data_store.set(.{
         .key = "key",
-        .value = "first",
+        .value = "second",
         .condition = null,
         .expires_at = null,
         .keepttl = false,
         .response = .{ .get = true },
-    }, 0) orelse return error.TestUnexpectedResult;
+    }, 0);
+    var result = set_result.value orelse return error.TestUnexpectedResult;
     defer result.deinit();
 
-    try setStoreValue(&data_store, "key", "second", 0);
+    try setStoreValue(&data_store, "key", "third", 0);
 
     try expectObjectString(result.value, "first");
 }
@@ -481,7 +484,7 @@ test "set replaces an existing value" {
 
     const result = try data_store.set(second_req, 0);
 
-    try testing.expect(result == null);
+    try testing.expect(result.value == null);
 
     const value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
     try expectOwnedObjectString(value, "second");
