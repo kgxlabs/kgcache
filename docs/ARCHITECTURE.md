@@ -33,6 +33,11 @@ The TCP server has three layers for client connections:
 The storage backend owns its copied keys and string values, and protects
 operations with a mutex-backed transaction boundary.
 
+Any Store operation that returns storage-backed data copies it while the
+transaction is still locked. The command result owns this copy until RESP
+serialization finishes, then `Result.deinit` releases it. This keeps response
+bytes valid if another client mutates or removes the stored data.
+
 The application supervises `Server.run` and a SIGINT/SIGTERM waiter with
 `std.Io.Select`. The signal handler only records the signal and wakes the
 waiter. Normal application code cancels and waits for `Server.run`, which
