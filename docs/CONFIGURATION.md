@@ -86,7 +86,7 @@ snapshots.
 
 | Value | Behavior |
 | --- | --- |
-| `always` | Write and fsync before a write command returns `OK` |
+| `always` | Write and fsync before an applied write command returns to the client |
 | `everysec` | Write from cron and fsync at most once per second |
 | `no` | Write from cron and let the OS decide when to fsync |
 

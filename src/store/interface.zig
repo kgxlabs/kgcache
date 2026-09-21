@@ -13,13 +13,30 @@ pub const TriggerOrigin = enum {
 
 const Store = @This();
 
+// Mutation commands can complete without applying a change. Keep that outcome
+// separate from any value the command asks the store to return.
+pub const MutationOutcome = enum {
+    applied,
+    not_applied,
+};
+
+pub fn MutationResult(comptime T: type) type {
+    return struct {
+        outcome: MutationOutcome,
+        value: T,
+    };
+}
+
+pub const SetResult = MutationResult(?object.Owned);
+pub const RemoveResult = MutationResult(void);
+
 ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
     get: *const fn (*anyopaque, []const u8, u32) anyerror!?object.Owned,
-    set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!?object.Owned,
-    remove: *const fn (*anyopaque, []const u8, u32) anyerror!bool,
+    set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!SetResult,
+    remove: *const fn (*anyopaque, []const u8, u32) anyerror!RemoveResult,
     dbsize: *const fn (*anyopaque, u32) anyerror!u32,
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque) anyerror!void,
@@ -33,12 +50,12 @@ pub fn get(self: Store, key: []const u8, db_index: u32) anyerror!?object.Owned {
     return self.vtable.get(self.ptr, key, db_index);
 }
 
-/// The caller owns a non-null result and must call `deinit` on it.
-pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
+/// The caller owns a non-null `result.value` and must call `deinit` on it.
+pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!SetResult {
     return self.vtable.set(self.ptr, req, db_index);
 }
 
-pub fn remove(self: Store, key: []const u8, db_index: u32) anyerror!bool {
+pub fn remove(self: Store, key: []const u8, db_index: u32) anyerror!RemoveResult {
     return self.vtable.remove(self.ptr, key, db_index);
 }
 

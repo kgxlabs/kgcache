@@ -53,7 +53,7 @@ It gives stronger safety, but it is slower.
 
 | Policy | During normal use | What may be lost |
 | --- | --- | --- |
-| `always` | Write and fsync before the write command returns `OK` | No acknowledged write under normal storage behavior |
+| `always` | Write and fsync before an applied write command returns to the client | No acknowledged write under normal storage behavior |
 | `everysec` | Cron writes buffered commands on each tick and fsyncs at most once per second | Up to about one second after power loss |
 | `no` | Cron writes buffered commands, but kgcache never asks for fsync | Whatever the OS has not written before power loss |
 

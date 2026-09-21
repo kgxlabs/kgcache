@@ -14,8 +14,8 @@ RESP client
     ▼
 ┌─────────────────┐     ┌────────────────┐     ┌─────────────────────┐
 │ Command dispatch │ ──▶ │ Store interface │ ──▶ │ Default in-memory   │
-│ PING · GET · SET │     │ GET · SET ·     │     │ StringHashMap + TTL │
-│ DBSIZE · …       │     │ DBSIZE          │     │ expiration index    │
+│ PING · GET · SET │     │ GET · SET · DEL │     │ StringHashMap + TTL │
+│ DEL · DBSIZE · … │     │ DBSIZE          │     │ expiration index    │
 └─────────────────┘     └────────────────┘     └─────────────────────┘
 ```
 
@@ -37,6 +37,12 @@ Any Store operation that returns storage-backed data copies it while the
 transaction is still locked. The command result owns this copy until RESP
 serialization finishes, then `Result.deinit` releases it. This keeps response
 bytes valid if another client mutates or removes the stored data.
+
+Store mutations that can complete without changing data return
+`MutationResult(T)`. Its outcome is `applied` or `not_applied`, while its
+`value` holds any data requested from the operation. `SET` uses the value for
+the optional previous value, and `DEL` uses `void`. Each command converts this
+store result into the shared command `Result` sent through RESP.
 
 The application supervises `Server.run` and a SIGINT/SIGTERM waiter with
 `std.Io.Select`. The signal handler only records the signal and wakes the

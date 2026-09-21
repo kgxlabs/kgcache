@@ -31,7 +31,8 @@ fn execute(
     var removed: i64 = 0;
     for (self.arguments) |argument| {
         const key = try command_arguments.bulkString(argument);
-        if (try data_store.remove(key, client_state.db_index)) removed += 1;
+        const result = try data_store.remove(key, client_state.db_index);
+        if (result.outcome == .applied) removed += 1;
     }
 
     return Commander.Result.borrowed(.{ .integer = removed });
