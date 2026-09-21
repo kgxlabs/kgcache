@@ -17,8 +17,8 @@ ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
-    get: *const fn (*anyopaque, []const u8, u32) anyerror!?object.Object,
-    set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!?object.Object,
+    get: *const fn (*anyopaque, []const u8, u32) anyerror!?object.Owned,
+    set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!?object.Owned,
     remove: *const fn (*anyopaque, []const u8, u32) anyerror!bool,
     dbsize: *const fn (*anyopaque, u32) anyerror!u32,
     numDatabases: *const fn (*anyopaque) u32,
@@ -28,11 +28,13 @@ pub const VTable = struct {
     deinit: *const fn (*anyopaque) void,
 };
 
-pub fn get(self: Store, key: []const u8, db_index: u32) anyerror!?object.Object {
+/// The caller owns a non-null result and must call `deinit` on it.
+pub fn get(self: Store, key: []const u8, db_index: u32) anyerror!?object.Owned {
     return self.vtable.get(self.ptr, key, db_index);
 }
 
-pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!?object.Object {
+/// The caller owns a non-null result and must call `deinit` on it.
+pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!?object.Owned {
     return self.vtable.set(self.ptr, req, db_index);
 }
 

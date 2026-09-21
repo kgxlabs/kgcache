@@ -23,7 +23,7 @@ fn execute(
     _: std.Io,
     data_store: *store.Store,
     client_state: *Commander.ClientState,
-) anyerror!resp.RESPValue {
+) anyerror!Commander.Result {
     const self: *Del = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 0) return error.WrongNumberArguments;
@@ -34,7 +34,7 @@ fn execute(
         if (try data_store.remove(key, client_state.db_index)) removed += 1;
     }
 
-    return .{ .integer = removed };
+    return Commander.Result.borrowed(.{ .integer = removed });
 }
 
 fn deinit(ptr: *anyopaque) void {

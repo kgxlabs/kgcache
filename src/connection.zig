@@ -96,7 +96,7 @@ fn handleConnection(
         // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
         // How do we handle that scenario to free the memory?
 
-        const result = c.execute(io, data_store, &client_state) catch |err| {
+        var result = c.execute(io, data_store, &client_state) catch |err| {
             if (executeErrorResponse(err, commands)) |response| {
                 if (!writeResponse(logger, &connection_writer, response, stop_requested)) return;
                 continue;
@@ -106,8 +106,9 @@ fn handleConnection(
             _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
             return;
         };
+        defer result.deinit();
 
-        const serialized_result = serializer.serialize(req_allocator, result) catch |err| {
+        const serialized_result = serializer.serialize(req_allocator, result.value) catch |err| {
             logger.err("connection: response serialization failed", err, @errorReturnTrace());
             _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
             return;

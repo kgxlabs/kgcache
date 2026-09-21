@@ -18,9 +18,9 @@ const vtable = Commander.VTable{
     .deinit = deinit,
 };
 
-fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!resp.RESPValue {
+fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!Commander.Result {
     try data_store.bgrewriteaof(.manual);
-    return .{ .simple_string = "OK" };
+    return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -35,8 +35,9 @@ test "execute echo command" {
         .{ .bulk_string = "hello" },
     };
 
-    const result = try TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values }));
-    switch (result) {
+    var result = try TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values }));
+    defer result.deinit();
+    switch (result.value) {
         .bulk_string => |maybe_actual| try testing.expectEqualStrings("hello", maybe_actual orelse return error.TestUnexpectedResult),
         else => return error.TestUnexpectedResult,
     }

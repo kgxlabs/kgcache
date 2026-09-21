@@ -14,7 +14,7 @@ pub fn commander(self: *Command) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Command = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 0) {
@@ -22,7 +22,7 @@ fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientStat
     }
 
     // TODO: Implement introspection.
-    return self.arguments[0];
+    return Commander.Result.borrowed(self.arguments[0]);
 }
 
 fn deinit(ptr: *anyopaque) void {

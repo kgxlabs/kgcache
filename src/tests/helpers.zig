@@ -9,7 +9,7 @@ const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
 const PersistenceState = @import("../persistence_state.zig");
 
-pub fn executeWithMemoryStore(command: commander.Commander) anyerror!resp.RESPValue {
+pub fn executeWithMemoryStore(command: commander.Commander) anyerror!commander.Commander.Result {
     const testing = std.testing;
     defer command.deinit();
 

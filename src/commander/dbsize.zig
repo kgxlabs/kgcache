@@ -16,14 +16,14 @@ pub fn commander(self: *DBSize) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!resp.RESPValue {
+fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
     const self: *DBSize = @ptrCast(@alignCast(ptr));
     if (self.arguments.len != 0) {
         return error.WrongNumberArguments;
     }
 
     const size = try data_store.dbsize(client_state.db_index);
-    return .{ .integer = @intCast(size) };
+    return Commander.Result.borrowed(.{ .integer = @intCast(size) });
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -37,8 +37,9 @@ test "execute returns the store size" {
     var values = [_]resp.RESPValue{.{ .bulk_string = "DBSIZE" }};
     const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
 
-    const result = try TestHelpers.executeWithMemoryStore(command);
-    try testing.expectEqual(@as(i64, 0), result.integer);
+    var result = try TestHelpers.executeWithMemoryStore(command);
+    defer result.deinit();
+    try testing.expectEqual(@as(i64, 0), result.value.integer);
 }
 
 test "execute delegates to the store dbsize operation" {
@@ -53,8 +54,9 @@ test "execute delegates to the store dbsize operation" {
     var data_store = mock_store.store();
     var client_state: Commander.ClientState = .{};
 
-    const result = try command.execute(testing.io, &data_store, &client_state);
-    try testing.expectEqual(@as(i64, 42), result.integer);
+    var result = try command.execute(testing.io, &data_store, &client_state);
+    defer result.deinit();
+    try testing.expectEqual(@as(i64, 42), result.value.integer);
     try testing.expectEqual(1, mock_store.dbsize_calls);
 }
 

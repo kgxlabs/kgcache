@@ -17,9 +17,9 @@ pub fn commander(self: *BgSave) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!resp.RESPValue {
+fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!Commander.Result {
     try data_store.bgsave(.manual);
-    return .{ .simple_string = "OK" };
+    return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
 
 fn deinit(ptr: *anyopaque) void {
