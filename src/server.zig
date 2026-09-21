@@ -291,7 +291,7 @@ const BlockingStore = struct {
         return self.inner.set(request, db_index);
     }
 
-    fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
+    fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!store.Store.RemoveResult {
         const self: *BlockingStore = @ptrCast(@alignCast(ptr));
         return self.inner.remove(key, db_index);
     }

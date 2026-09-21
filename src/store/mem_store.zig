@@ -116,7 +116,7 @@ pub fn set(ptr: *anyopaque, req: Request.SetRequest, db_index: u32) anyerror!Sto
     };
 }
 
-pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
+pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!Store.RemoveResult {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const storage = self._storages[db_index];
 
@@ -126,7 +126,10 @@ pub fn remove(ptr: *anyopaque, key: []const u8, db_index: u32) anyerror!bool {
     const existed = try storage.get(key);
     try storage.remove(key);
 
-    return existed != null;
+    return .{
+        .outcome = if (existed != null) .applied else .not_applied,
+        .value = {},
+    };
 }
 
 pub fn dbsize(ptr: *anyopaque, db_index: u32) anyerror!u32 {

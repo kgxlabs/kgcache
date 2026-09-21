@@ -28,6 +28,7 @@ pub fn MutationResult(comptime T: type) type {
 }
 
 pub const SetResult = MutationResult(?object.Owned);
+pub const RemoveResult = MutationResult(void);
 
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -35,7 +36,7 @@ vtable: *const VTable,
 pub const VTable = struct {
     get: *const fn (*anyopaque, []const u8, u32) anyerror!?object.Owned,
     set: *const fn (*anyopaque, Request.SetRequest, u32) anyerror!SetResult,
-    remove: *const fn (*anyopaque, []const u8, u32) anyerror!bool,
+    remove: *const fn (*anyopaque, []const u8, u32) anyerror!RemoveResult,
     dbsize: *const fn (*anyopaque, u32) anyerror!u32,
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque) anyerror!void,
@@ -54,7 +55,7 @@ pub fn set(self: Store, req: Request.SetRequest, db_index: u32) anyerror!SetResu
     return self.vtable.set(self.ptr, req, db_index);
 }
 
-pub fn remove(self: Store, key: []const u8, db_index: u32) anyerror!bool {
+pub fn remove(self: Store, key: []const u8, db_index: u32) anyerror!RemoveResult {
     return self.vtable.remove(self.ptr, key, db_index);
 }
 
