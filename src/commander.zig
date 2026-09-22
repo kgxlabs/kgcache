@@ -13,6 +13,7 @@ pub const Save = @import("commander/save.zig");
 pub const Select = @import("commander/select.zig");
 pub const Set = @import("commander/set.zig");
 pub const Error = Commander.Error;
+const MockStore = @import("store/mock_store.zig");
 
 const CommandKind = enum {
     bgrewriteaof,
@@ -113,4 +114,81 @@ test "reject empty command array" {
     const testing = std.testing;
     var values = [_]resp.RESPValue{};
     try testing.expectError(error.MalformedCommandRequest, init(testing.allocator, .{ .array = &values }));
+}
+
+fn executeWithMockStore(keyword: []const u8, arguments: []const resp.RESPValue, mock_store: *MockStore) anyerror!Commander.Result {
+    var request: [3]resp.RESPValue = undefined;
+    request[0] = .{ .bulk_string = keyword };
+    for (arguments, 0..) |argument, index| request[index + 1] = argument;
+
+    const command = try init(std.testing.allocator, .{ .array = request[0 .. arguments.len + 1] });
+    defer command.deinit();
+
+    var data_store = mock_store.store();
+    var client_state: Commander.ClientState = .{};
+    return command.execute(std.testing.io, &data_store, &client_state);
+}
+
+test "invalid arity returns before any store operation" {
+    const testing = std.testing;
+    const arguments = [_]resp.RESPValue{
+        .{ .bulk_string = "key" },
+        .{ .bulk_string = "extra" },
+    };
+    const cases = .{
+        .{ "PING", 2 },
+        .{ "GET", 0 },
+        .{ "GET", 2 },
+        .{ "SAVE", 1 },
+        .{ "BGSAVE", 2 },
+        .{ "BGREWRITEAOF", 1 },
+    };
+
+    inline for (cases) |case| {
+        var mock_store = MockStore.init();
+        try testing.expectError(error.WrongNumberArguments, executeWithMockStore(case[0], arguments[0..case[1]], &mock_store));
+        try testing.expectEqual(@as(usize, 0), mock_store.get_calls);
+        try testing.expectEqual(@as(usize, 0), mock_store.save_calls);
+        try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
+        try testing.expectEqual(@as(usize, 0), mock_store.bgrewriteaof_calls);
+    }
+}
+
+test "ping returns PONG or the supplied message" {
+    const testing = std.testing;
+    var mock_store = MockStore.init();
+
+    var empty_result = try executeWithMockStore("PING", &.{}, &mock_store);
+    defer empty_result.deinit();
+    try testing.expectEqualStrings("PONG", empty_result.value.simple_string);
+
+    var message_result = try executeWithMockStore("PING", &.{.{ .bulk_string = "hello" }}, &mock_store);
+    defer message_result.deinit();
+    try testing.expectEqualStrings("hello", message_result.value.bulk_string.?);
+}
+
+test "valid arity delegates to the store" {
+    const testing = std.testing;
+    var mock_store = MockStore.init();
+
+    var get_result = try executeWithMockStore("GET", &.{.{ .bulk_string = "key" }}, &mock_store);
+    defer get_result.deinit();
+    try testing.expect(get_result.value.bulk_string == null);
+    try testing.expectEqual(@as(usize, 1), mock_store.get_calls);
+
+    var save_result = try executeWithMockStore("SAVE", &.{}, &mock_store);
+    defer save_result.deinit();
+    try testing.expectEqualStrings("OK", save_result.value.simple_string);
+    try testing.expectEqual(@as(usize, 1), mock_store.save_calls);
+
+    var bgsave_result = try executeWithMockStore("BGSAVE", &.{}, &mock_store);
+    defer bgsave_result.deinit();
+
+    var scheduled_result = try executeWithMockStore("BGSAVE", &.{.{ .bulk_string = "SCHEDULE" }}, &mock_store);
+    defer scheduled_result.deinit();
+    try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);
+
+    var rewrite_result = try executeWithMockStore("BGREWRITEAOF", &.{}, &mock_store);
+    defer rewrite_result.deinit();
+    try testing.expectEqual(@as(usize, 1), mock_store.bgrewriteaof_calls);
 }
