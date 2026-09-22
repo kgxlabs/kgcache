@@ -313,12 +313,12 @@ const BlockingStore = struct {
         return self.inner.save();
     }
 
-    fn bgsave(ptr: *anyopaque, origin: store.Store.TriggerOrigin) anyerror!void {
+    fn bgsave(ptr: *anyopaque, origin: store.Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
         const self: *BlockingStore = @ptrCast(@alignCast(ptr));
         return self.inner.bgsave(origin);
     }
 
-    fn bgrewriteaof(ptr: *anyopaque, origin: store.Store.TriggerOrigin) anyerror!void {
+    fn bgrewriteaof(ptr: *anyopaque, origin: store.Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
         const self: *BlockingStore = @ptrCast(@alignCast(ptr));
         return self.inner.bgrewriteaof(origin);
     }

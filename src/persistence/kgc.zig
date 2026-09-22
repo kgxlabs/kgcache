@@ -79,7 +79,7 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
 // only hold short lock session so we dont hold the lock while fork
 // Finishing this does not mean, saving succeeded.
 // It just means forking completed
-pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!void {
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
     {
@@ -125,6 +125,8 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerO
         .captured_change_count = snapshot_change_count,
         .origin = origin,
     });
+
+    return .started;
 }
 
 fn forkProcess() anyerror!std.posix.pid_t {
@@ -550,7 +552,7 @@ test "background child reports its storage source once through the normal logger
     {
         var tx = try data_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{failing_storage}, .manual);
+        _ = try backend_instance.snapshot().bgsave(&.{failing_storage}, .manual);
     }
     if (std.c.dup2(saved_stderr, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
     _ = std.c.close(fds[1]);
@@ -737,7 +739,7 @@ test "successful automatic background save clears cooldown and produces a loadab
     {
         var tx = try backend_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{backend_storage}, .automatic);
+        _ = try backend_instance.snapshot().bgsave(&.{backend_storage}, .automatic);
     }
     {
         var state_tx = try persistence_state.begin();

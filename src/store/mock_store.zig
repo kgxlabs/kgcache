@@ -1,4 +1,5 @@
 const Store = @import("interface.zig");
+const PersistenceState = @import("../persistence_state.zig");
 const object = @import("../object.zig");
 const Request = @import("../commander/request.zig");
 
@@ -8,7 +9,7 @@ get_result: anyerror!?object.Owned = null,
 set_result: anyerror!Store.SetResult = .{ .outcome = .applied, .value = null },
 remove_result: anyerror!Store.RemoveResult = .{ .outcome = .not_applied, .value = {} },
 dbsize_result: anyerror!u32 = 0,
-bgsave_result: anyerror!void = {},
+bgsave_result: anyerror!PersistenceState.BackgroundStartOutcome = .started,
 num_databases_result: u32 = 1,
 get_calls: usize = 0,
 set_calls: usize = 0,
@@ -91,15 +92,16 @@ fn save(ptr: *anyopaque) anyerror!void {
     self.save_calls += 1;
 }
 
-fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!void {
+fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgsave_calls += 1;
     return self.bgsave_result;
 }
 
-fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!void {
+fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgrewriteaof_calls += 1;
+    return .started;
 }
 
 fn deinit(_: *anyopaque) void {}

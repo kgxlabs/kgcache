@@ -154,7 +154,7 @@ fn triggerSaveIfDue(
 
     // A failed trigger attempt should not crash the cron loop -- it'll just get
     // re-evaluated next tick.
-    data_store.bgsave(.automatic) catch |err| {
+    _ = data_store.bgsave(.automatic) catch |err| {
         switch (err) {
             error.SaveAlreadyInProgress => {},
             else => {
@@ -169,6 +169,7 @@ fn triggerSaveIfDue(
                 return;
             },
         }
+        return;
     };
 }
 
@@ -191,9 +192,10 @@ fn triggerRewriteIfDue(
         if (!due) return;
     }
 
-    data_store.bgrewriteaof(.automatic) catch |err| {
+    _ = data_store.bgrewriteaof(.automatic) catch |err| {
         if (err == error.RewriteAlreadyInProgress) return;
         logger.err("cron: failed to trigger automatic AOF rewrite", err, @errorReturnTrace());
+        return;
     };
 }
 
@@ -252,7 +254,9 @@ const FinishRewriteJournal = struct {
         self.last_flush_ms = now_ms;
         if (self.fail_flush) return error.TestFlushSource;
     }
-    fn bgRewrite(_: *anyopaque, _: []const storage.Interface, _: store.Store.TriggerOrigin) anyerror!void {}
+    fn bgRewrite(_: *anyopaque, _: []const storage.Interface, _: store.Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
+        return .started;
+    }
     fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
     }
@@ -520,7 +524,7 @@ test "a completed background save preserves changes made after its snapshot chan
     try writeOneKey(&data_store);
     try testing.expect(persistence_state.captureSnapshotChangeCount() > 0);
 
-    try data_store.bgsave(.manual);
+    _ = try data_store.bgsave(.manual);
 
     // This write happens after the child captured its snapshot change count.
     try writeOneKey(&data_store);
@@ -752,7 +756,7 @@ test "triggerSaveIfDue does not start cooldown for a busy save" {
 
     const now_ms = time.nowMs(testing.io);
     triggerSaveIfDue(test_logger.logger(), &data_store, &persistence_state, now_ms, config);
-    mock_store.bgsave_result = {};
+    mock_store.bgsave_result = .started;
     triggerSaveIfDue(test_logger.logger(), &data_store, &persistence_state, now_ms, config);
 
     try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);

@@ -351,7 +351,9 @@ const FailingJournal = struct {
     }
 
     fn flush(_: *anyopaque, _: i64, _: persistence.JournalPersistence.FlushOptions) anyerror!void {}
-    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
+        return .started;
+    }
     fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
     }
@@ -603,7 +605,9 @@ const RecordingJournal = struct {
         self.last_flush_mode = options.mode;
         if (self.fail_flush) return error.TestFlushSource;
     }
-    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!void {}
+    fn bgRewrite(_: *anyopaque, _: []const Storage, _: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
+        return .started;
+    }
     fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
     }

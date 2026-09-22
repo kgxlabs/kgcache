@@ -2,6 +2,7 @@ const std = @import("std");
 const object = @import("../object.zig");
 const Storage = @import("../storage/interface.zig");
 const Request = @import("../commander/request.zig");
+const PersistenceState = @import("../persistence_state.zig");
 
 // NOTE: currently this is the optimal place that should own `TriggerOrigin`
 // Other places like `PersistenceState` (persistence is not really a operation module) and `Commander` (circular deps) are not solid for now.
@@ -40,8 +41,8 @@ pub const VTable = struct {
     dbsize: *const fn (*anyopaque, u32) anyerror!u32,
     numDatabases: *const fn (*anyopaque) u32,
     save: *const fn (*anyopaque) anyerror!void,
-    bgsave: *const fn (*anyopaque, TriggerOrigin) anyerror!void,
-    bgrewriteaof: *const fn (*anyopaque, TriggerOrigin) anyerror!void,
+    bgsave: *const fn (*anyopaque, TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome,
+    bgrewriteaof: *const fn (*anyopaque, TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -71,11 +72,11 @@ pub fn save(self: Store) anyerror!void {
     return self.vtable.save(self.ptr);
 }
 
-pub fn bgsave(self: Store, origin: TriggerOrigin) anyerror!void {
+pub fn bgsave(self: Store, origin: TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     return self.vtable.bgsave(self.ptr, origin);
 }
 
-pub fn bgrewriteaof(self: Store, origin: TriggerOrigin) anyerror!void {
+pub fn bgrewriteaof(self: Store, origin: TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     return self.vtable.bgrewriteaof(self.ptr, origin);
 }
 

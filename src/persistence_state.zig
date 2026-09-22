@@ -6,6 +6,11 @@ const Config = @import("config.zig");
 
 const PersistenceState = @This();
 
+pub const BackgroundStartOutcome = enum {
+    started,
+    scheduled,
+};
+
 pub const ReapResult = enum {
     running,
     succeeded,

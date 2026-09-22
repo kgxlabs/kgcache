@@ -87,7 +87,7 @@ pub const Record = struct {
 pub const VTable = struct {
     prepareRecord: *const fn (*anyopaque, WriteEvent) anyerror!Record,
     flush: *const fn (*anyopaque, i64, FlushOptions) anyerror!void,
-    bgRewrite: *const fn (*anyopaque, []const Storage, origin: Store.TriggerOrigin) anyerror!void,
+    bgRewrite: *const fn (*anyopaque, []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome,
     dueForRewrite: *const fn (*anyopaque, Config) anyerror!bool,
     finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) anyerror!void,
     beginLoading: *const fn (*anyopaque) void,
@@ -113,7 +113,7 @@ pub fn flush(self: JournalPersistence, now_ms: i64, options: FlushOptions) anyer
     return self.vtable.flush(self.ptr, now_ms, options);
 }
 
-pub fn bgRewrite(self: JournalPersistence, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!void {
+pub fn bgRewrite(self: JournalPersistence, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     return self.vtable.bgRewrite(self.ptr, storages, origin);
 }
 

@@ -198,7 +198,7 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) anyerror!Journa
     return Journal.Record.init(prepared, event, publishPreparedRecord, abortPreparedRecord);
 }
 
-pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!void {
+pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     {
@@ -329,6 +329,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
         .origin = origin,
     });
     child_started = true;
+    return .started;
 }
 
 pub fn dueForRewrite(ptr: *anyopaque, config: Config) anyerror!bool {
@@ -1546,7 +1547,7 @@ test "rewrite cut preserves total incr bytes and resets the live file offset" {
             try testing.expect(old_total > 0);
             try testing.expectEqual(old_total, backend._file_offset);
 
-            try journal_handle.bgRewrite(&.{}, .manual);
+            _ = try journal_handle.bgRewrite(&.{}, .manual);
             try testing.expectEqual(old_total, backend._incr_bytes);
             try testing.expectEqual(0, backend._file_offset);
 

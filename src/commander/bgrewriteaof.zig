@@ -22,7 +22,7 @@ fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.C
     const self: *BgRewriteAof = @ptrCast(@alignCast(ptr));
     if (self.arguments.len != 0) return error.WrongNumberArguments;
 
-    try data_store.bgrewriteaof(.manual);
+    _ = try data_store.bgrewriteaof(.manual);
     return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
 
