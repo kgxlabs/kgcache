@@ -18,7 +18,10 @@ pub fn commander(self: *Save) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!Commander.Result {
+fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!Commander.Result {
+    const self: *Save = @ptrCast(@alignCast(ptr));
+    if (self.arguments.len != 0) return error.WrongNumberArguments;
+
     try data_store.save();
     return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const resp = @import("../resp.zig");
 const store = @import("../store.zig");
+const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 const TestHelpers = @import("../tests/helpers.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
@@ -18,8 +19,13 @@ pub fn commander(self: *Ping) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(_: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
-    return Commander.Result.borrowed(.{ .simple_string = "PONG" });
+fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
+    const self: *Ping = @ptrCast(@alignCast(ptr));
+    if (self.arguments.len > 1) return error.WrongNumberArguments;
+    if (self.arguments.len == 0) return Commander.Result.borrowed(.{ .simple_string = "PONG" });
+
+    const message = try command_arguments.bulkString(self.arguments[0]);
+    return Commander.Result.borrowed(.{ .bulk_string = message });
 }
 
 fn deinit(ptr: *anyopaque) void {

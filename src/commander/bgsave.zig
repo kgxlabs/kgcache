@@ -17,7 +17,10 @@ pub fn commander(self: *BgSave) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!Commander.Result {
+fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!Commander.Result {
+    const self: *BgSave = @ptrCast(@alignCast(ptr));
+    if (self.arguments.len > 1) return error.WrongNumberArguments;
+
     try data_store.bgsave(.manual);
     return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
