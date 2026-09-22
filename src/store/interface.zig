@@ -43,6 +43,8 @@ pub const VTable = struct {
     save: *const fn (*anyopaque) anyerror!void,
     bgsave: *const fn (*anyopaque, TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome,
     bgrewriteaof: *const fn (*anyopaque, TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome,
+    dispatchPendingBgsave: *const fn (*anyopaque) anyerror!bool,
+    dispatchPendingAofRewrite: *const fn (*anyopaque) anyerror!bool,
     deinit: *const fn (*anyopaque) void,
 };
 
@@ -78,6 +80,14 @@ pub fn bgsave(self: Store, origin: TriggerOrigin) anyerror!PersistenceState.Back
 
 pub fn bgrewriteaof(self: Store, origin: TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     return self.vtable.bgrewriteaof(self.ptr, origin);
+}
+
+pub fn dispatchPendingBgsave(self: Store) anyerror!bool {
+    return self.vtable.dispatchPendingBgsave(self.ptr);
+}
+
+pub fn dispatchPendingAofRewrite(self: Store) anyerror!bool {
+    return self.vtable.dispatchPendingAofRewrite(self.ptr);
 }
 
 pub fn deinit(self: Store) void {

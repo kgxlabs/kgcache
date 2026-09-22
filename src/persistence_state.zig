@@ -78,6 +78,7 @@ _pending_aof: bool = false,
 _mutual_exclusive: bool = false,
 _in_flight_kgc_save: ?KgcBackgroundSave = null,
 _in_flight_aof_rewrite: ?AofBackgroundRewrite = null,
+_completed_aof_rewrite: ?AofReapResult = null,
 _last_failed_save_ms: ?time.UnixMs = null,
 /// Number of writes (put/remove) since the last save.
 _change_count: std.atomic.Value(u64) = .init(0),
@@ -125,13 +126,17 @@ pub fn tryStartKgc(self: *PersistenceState, policy: StartPolicy) StartDecision {
 }
 
 pub fn claimPendingKgc(self: *PersistenceState) bool {
-    if (!self._pending_kgc or self._kgc_in_progress or self._in_flight_kgc_save != null) return false;
-
-    if (self._mutual_exclusive and self._aof_in_progress) return false;
-
+    if (!self.canDispatchPendingKgc()) return false;
     self._kgc_in_progress = true;
-
     return true;
+}
+
+pub fn canDispatchPendingKgc(self: *PersistenceState) bool {
+    const has_pending_save = self._pending_kgc;
+    const save_is_idle = !self._kgc_in_progress and self._in_flight_kgc_save == null;
+    const aof_allows_start = !self._mutual_exclusive or !self._aof_in_progress;
+
+    return has_pending_save and save_is_idle and aof_allows_start;
 }
 
 /// Register the child and release its pending reservation in one state change.
@@ -188,10 +193,16 @@ pub fn tryStartAof(self: *PersistenceState, policy: StartPolicy) StartDecision {
 
 /// Call while holding a PersistenceState session after storage and journal locks are held.
 pub fn claimPendingAof(self: *PersistenceState) bool {
-    if (!self._pending_aof or self._aof_in_progress or self._in_flight_aof_rewrite != null) return false;
-    if (self._mutual_exclusive and self._kgc_in_progress) return false;
+    if (!self.canDispatchPendingAof()) return false;
     self._aof_in_progress = true;
     return true;
+}
+
+pub fn canDispatchPendingAof(self: *PersistenceState) bool {
+    const has_pending_rewrite = self._pending_aof;
+    const rewrite_is_idle = !self._aof_in_progress and self._in_flight_aof_rewrite == null;
+    const save_allows_start = !self._mutual_exclusive or !self._kgc_in_progress;
+    return has_pending_rewrite and rewrite_is_idle and save_allows_start;
 }
 
 /// Register the child and release its pending reservation in one state change.
@@ -215,6 +226,7 @@ pub fn setInFlightAofRewrite(self: *PersistenceState, rewrite: AofBackgroundRewr
 }
 
 pub fn finishAof(self: *PersistenceState) void {
+    self._completed_aof_rewrite = null;
     self._aof_in_progress = false;
 }
 
@@ -294,14 +306,26 @@ fn waitPidSystem(pid: std.posix.pid_t) anyerror!?u32 {
     }
 }
 
+pub fn terminateAndReapChild(pid: std.posix.pid_t) void {
+    std.posix.kill(pid, .KILL) catch {};
+    var status: c_int = undefined;
+    while (true) {
+        const result = std.posix.system.waitpid(pid, &status, 0);
+        if (result >= 0) return;
+        if (std.posix.errno(result) != .INTR) return;
+    }
+}
+
 pub fn reapAof(self: *PersistenceState) AofReapResult {
+    if (self._completed_aof_rewrite) |completed| return completed;
     const rewrite = self._in_flight_aof_rewrite orelse return .{ .status = .running };
     const child = self.reapPid(rewrite.pid);
     if (child.status == .running) return .{ .status = .running, .report_error = child.report_error };
 
     self._in_flight_aof_rewrite = null;
-    self._aof_in_progress = false;
-    return .{ .status = child.status, .report_error = child.report_error };
+    const completed: AofReapResult = .{ .status = child.status, .report_error = child.report_error };
+    self._completed_aof_rewrite = completed;
+    return completed;
 }
 
 pub fn recordChange(self: *PersistenceState) void {
@@ -623,7 +647,12 @@ test "background start decisions reserve and restore pending work" {
                 try testing.expectEqual(ReapResult.succeeded, state.reapKgc(time.nowMs(testing.io)).status);
                 state.finishKgc();
             },
-            .aof => try testing.expectEqual(ReapResult.succeeded, state.reapAof().status),
+            .aof => {
+                try testing.expectEqual(ReapResult.succeeded, state.reapAof().status);
+                try testing.expect(state.aofInProgress());
+                try testing.expectEqual(ReapResult.succeeded, state.reapAof().status);
+                state.finishAof();
+            },
         }
 
         const blocked_by_reservation = switch (blocker) {
@@ -685,7 +714,10 @@ test "background start decisions reserve and restore pending work" {
                 try testing.expectEqual(ReapResult.succeeded, state.reapKgc(time.nowMs(testing.io)).status);
                 state.finishKgc();
             },
-            .aof => try testing.expectEqual(ReapResult.succeeded, state.reapAof().status),
+            .aof => {
+                try testing.expectEqual(ReapResult.succeeded, state.reapAof().status);
+                state.finishAof();
+            },
         }
         try testing.expect(if (blocker == .kgc) state.claimPendingKgc() else state.claimPendingAof());
     }
@@ -753,6 +785,7 @@ test "invalid pending completion leaves state unchanged" {
                 try testing.expectEqual(@as(std.posix.pid_t, 22), state._in_flight_aof_rewrite.?.pid);
                 try testing.expectError(error.ChildAlreadyTracked, state.failPendingAofStart());
                 try testing.expectEqual(ReapResult.succeeded, state.reapAof().status);
+                state.finishAof();
                 try testing.expect(!state.aofInProgress());
             },
         }

@@ -14,6 +14,7 @@ const KgcBackend = @This();
 const vtable: Snapshot.VTable = .{
     .save = save,
     .bgsave = bgsave,
+    .dispatchPendingSave = dispatchPendingSave,
     .load = load,
 };
 
@@ -81,18 +82,37 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
 // It just means forking completed
 pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
+    _ = try self.startBackgroundSave(storages, origin, false);
+    return .started;
+}
 
+pub fn dispatchPendingSave(ptr: *anyopaque, storages: []const Storage) anyerror!bool {
+    const self: *KgcBackend = @ptrCast(@alignCast(ptr));
+
+    return self.startBackgroundSave(storages, .manual, true);
+}
+
+fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Store.TriggerOrigin, pending: bool) anyerror!bool {
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
-        if (self._persistence_state.tryStartKgc(.immediate) != .started) return Snapshot.Error.SaveAlreadyInProgress;
+
+        if (pending) {
+            if (!self._persistence_state.claimPendingKgc()) return false;
+        } else if (self._persistence_state.tryStartKgc(.immediate) != .started) {
+            return Snapshot.Error.SaveAlreadyInProgress;
+        }
     }
 
     // NOTE: the placement is important. This way A busy return would not run finishKgc() and clear another operation’s active state
     errdefer {
         var tx = self._persistence_state.beginUncancelable();
         defer tx.end();
-        self._persistence_state.finishKgc();
+        if (pending) {
+            self._persistence_state.failPendingKgcStart() catch |err| {
+                self._logger.err("kgc: failed to release pending save claim", err, @errorReturnTrace());
+            };
+        } else self._persistence_state.finishKgc();
     }
 
     const pid = try self._fork();
@@ -116,17 +136,29 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerO
     }
 
     // Fork succeeded, so cancellation must not leave the child untracked.
-    var state_tx = self._persistence_state.beginUncancelable();
-    defer state_tx.end();
+    const registration_error: ?PersistenceState.PendingStartError = blk: {
+        var state_tx = self._persistence_state.beginUncancelable();
+        defer state_tx.end();
 
-    const snapshot_change_count = self._persistence_state.captureSnapshotChangeCount();
-    self._persistence_state.setInFlightKgcSave(.{
-        .pid = pid,
-        .captured_change_count = snapshot_change_count,
-        .origin = origin,
-    });
+        const child_save: PersistenceState.KgcBackgroundSave = .{
+            .pid = pid,
+            .captured_change_count = self._persistence_state.captureSnapshotChangeCount(),
+            .origin = origin,
+        };
 
-    return .started;
+        if (pending) {
+            self._persistence_state.completePendingKgcStart(child_save) catch |err| break :blk err;
+        } else self._persistence_state.setInFlightKgcSave(child_save);
+        break :blk null;
+    };
+
+    if (registration_error) |err| {
+        self._logger.err("kgc: failed to register pending save child", err, @errorReturnTrace());
+        PersistenceState.terminateAndReapChild(pid);
+        return err;
+    }
+
+    return true;
 }
 
 fn forkProcess() anyerror!std.posix.pid_t {

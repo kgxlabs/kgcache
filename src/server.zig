@@ -278,6 +278,8 @@ const BlockingStore = struct {
         .save = save,
         .bgsave = bgsave,
         .bgrewriteaof = bgrewriteaof,
+        .dispatchPendingBgsave = dispatchPendingBgsave,
+        .dispatchPendingAofRewrite = dispatchPendingAofRewrite,
         .deinit = deinit,
     };
 
@@ -321,6 +323,16 @@ const BlockingStore = struct {
     fn bgrewriteaof(ptr: *anyopaque, origin: store.Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
         const self: *BlockingStore = @ptrCast(@alignCast(ptr));
         return self.inner.bgrewriteaof(origin);
+    }
+
+    fn dispatchPendingBgsave(ptr: *anyopaque) anyerror!bool {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.dispatchPendingBgsave();
+    }
+
+    fn dispatchPendingAofRewrite(ptr: *anyopaque) anyerror!bool {
+        const self: *BlockingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.dispatchPendingAofRewrite();
     }
 
     fn deinit(ptr: *anyopaque) void {

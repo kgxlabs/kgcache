@@ -53,6 +53,8 @@ const vtable = Store.VTable{
     .save = save,
     .bgsave = bgsave,
     .bgrewriteaof = bgrewriteaof,
+    .dispatchPendingBgsave = dispatchPendingBgsave,
+    .dispatchPendingAofRewrite = dispatchPendingAofRewrite,
     .deinit = deinit,
 };
 
@@ -176,6 +178,26 @@ pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!Persi
     defer aof_tx.end();
 
     return aof.bgRewrite(self._storages, origin);
+}
+
+pub fn dispatchPendingBgsave(ptr: *anyopaque) anyerror!bool {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const sessions = try self.beginStorageSessions();
+    defer self.endStorageSessions(sessions);
+
+    return self._kgc.dispatchPendingSave(self._storages);
+}
+
+pub fn dispatchPendingAofRewrite(ptr: *anyopaque) anyerror!bool {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const aof = self._aof orelse return false;
+    const sessions = try self.beginStorageSessions();
+    defer self.endStorageSessions(sessions);
+
+    var aof_tx = try aof.begin();
+    defer aof_tx.end();
+
+    return aof.dispatchPendingRewrite(self._storages);
 }
 
 fn beginStorageSessions(self: *MemoryStore) ![]Storage.Tx {
@@ -731,13 +753,19 @@ test "AOF rewrite reports progress until completion and replays writes" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(!persistence_state.aofInProgress());
+        try testing.expect(persistence_state.aofInProgress());
     }
 
     {
         var tx = try journal.begin();
         defer tx.end();
         try journal.finishRewrite(result);
+    }
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        persistence_state.finishAof();
+        try testing.expect(!persistence_state.aofInProgress());
     }
 
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);

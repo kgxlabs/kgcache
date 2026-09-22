@@ -43,11 +43,13 @@ _last_rewrite_attempt_ms: ?time.UnixMs = null,
 // Last successful everysec fsync; null means the next flush must sync.
 _last_fsync_ms: ?time.UnixMs = null,
 _last_write_failed: bool = false,
+_fork: *const fn () anyerror!std.posix.pid_t = forkProcess,
 _loading: bool = false,
 _buffer: std.ArrayList(u8) = .empty,
 
 const vtable: Journal.VTable = .{
     .bgRewrite = bgRewrite,
+    .dispatchPendingRewrite = dispatchPendingRewrite,
     .deinit = deinit,
     .finishRewrite = finishRewrite,
     .flush = flush,
@@ -200,11 +202,24 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) anyerror!Journa
 
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    _ = try self.startBackgroundRewrite(storages, origin, false);
+    return .started;
+}
 
+pub fn dispatchPendingRewrite(ptr: *anyopaque, storages: []const Storage) anyerror!bool {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    return self.startBackgroundRewrite(storages, .manual, true);
+}
+
+fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: Store.TriggerOrigin, pending: bool) anyerror!bool {
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
-        if (self._persistence_state.tryStartAof(.immediate) != .started) return error.RewriteAlreadyInProgress;
+        if (pending) {
+            if (!self._persistence_state.claimPendingAof()) return false;
+        } else if (self._persistence_state.tryStartAof(.immediate) != .started) {
+            return error.RewriteAlreadyInProgress;
+        }
     }
 
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
@@ -213,7 +228,11 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     errdefer {
         if (!child_started) {
             var state_tx = self._persistence_state.beginUncancelable();
-            self._persistence_state.finishAof();
+            if (pending) {
+                self._persistence_state.failPendingAofStart() catch |err| {
+                    self._logger.err("aof: failed to release pending rewrite claim", err, @errorReturnTrace());
+                };
+            } else self._persistence_state.finishAof();
             state_tx.end();
         }
     }
@@ -291,13 +310,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     if (old_file) |file| file.close(self._io);
 
     // start the fork
-    const rc = std.posix.system.fork();
-    const pid: std.posix.pid_t = switch (std.posix.errno(rc)) {
-        .SUCCESS => @intCast(rc),
-        .AGAIN => return error.SystemResources,
-        .NOMEM => return error.OutOfMemory,
-        else => return error.Unexpected,
-    };
+    const pid = try self._fork();
 
     if (pid == 0) {
         // The child inherits stdin, stdout, and stderr from the parent.
@@ -318,18 +331,49 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
         std.c._exit(0);
     }
 
+    const previous_pending_base_seq = self._pending_base_seq;
     self._pending_base_seq = base_seq;
-    // Fork succeeded, so cancellation must not leave the child untracked.
-    var state_tx = self._persistence_state.beginUncancelable();
-    defer state_tx.end();
 
-    self._persistence_state.setInFlightAofRewrite(.{
-        .pid = pid,
-        .base_seq = base_seq,
-        .origin = origin,
-    });
+    // Fork succeeded, so cancellation must not leave the child untracked.
+    const registration_error: ?PersistenceState.PendingStartError = blk: {
+        var state_tx = self._persistence_state.beginUncancelable();
+        defer state_tx.end();
+
+        const rewrite: PersistenceState.AofBackgroundRewrite = .{
+            .pid = pid,
+            .base_seq = base_seq,
+            .origin = origin,
+        };
+
+        if (pending) {
+            self._persistence_state.completePendingAofStart(rewrite) catch |err| break :blk err;
+        } else self._persistence_state.setInFlightAofRewrite(rewrite);
+
+        break :blk null;
+    };
+
+    if (registration_error) |err| {
+        self._logger.err("aof: failed to register pending rewrite child", err, @errorReturnTrace());
+
+        PersistenceState.terminateAndReapChild(pid);
+        self._pending_base_seq = previous_pending_base_seq;
+
+        return err;
+    }
+
     child_started = true;
-    return .started;
+
+    return true;
+}
+
+fn forkProcess() anyerror!std.posix.pid_t {
+    const rc = std.posix.system.fork();
+    return switch (std.posix.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AGAIN => error.SystemResources,
+        .NOMEM => error.OutOfMemory,
+        else => error.Unexpected,
+    };
 }
 
 pub fn dueForRewrite(ptr: *anyopaque, config: Config) anyerror!bool {

@@ -68,9 +68,12 @@ pub fn run(
                 defer state_tx.end();
                 break :blk persistence_state.reapAof();
             };
-            finishAofIfCompleted(logger, aof, aof_result);
-            triggerRewriteIfDue(logger, aof, data_store, config);
+            finishAofIfCompleted(logger, persistence_state, aof, aof_result);
         }
+
+        dispatchPendingWork(logger, persistence_state, data_store, maybe_aof != null);
+
+        if (maybe_aof) |aof| triggerRewriteIfDue(logger, aof, data_store, config);
 
         triggerSaveIfDue(
             logger,
@@ -113,6 +116,7 @@ fn flushAofIfDue(io: std.Io, logger: logging.Logger, aof: persistence.JournalPer
 
 fn finishAofIfCompleted(
     logger: logging.Logger,
+    persistence_state: *PersistenceState,
     aof: persistence.JournalPersistence,
     reap_result: PersistenceState.AofReapResult,
 ) void {
@@ -130,6 +134,34 @@ fn finishAofIfCompleted(
     aof.finishRewrite(reap_result.status) catch |err| {
         logger.err("cron: failed to finish AOF rewrite", err, @errorReturnTrace());
     };
+    var state_tx = persistence_state.beginUncancelable();
+    defer state_tx.end();
+    persistence_state.finishAof();
+}
+
+fn dispatchPendingWork(logger: logging.Logger, persistence_state: *PersistenceState, data_store: *store.Store, has_aof: bool) void {
+    const ready = blk: {
+        var state_tx = persistence_state.begin() catch |err| {
+            logger.err("cron: failed to check pending work", err, @errorReturnTrace());
+            return;
+        };
+        defer state_tx.end();
+        break :blk .{
+            .kgc = persistence_state.canDispatchPendingKgc(),
+            .aof = has_aof and persistence_state.canDispatchPendingAof(),
+        };
+    };
+
+    if (ready.kgc) {
+        _ = data_store.dispatchPendingBgsave() catch |err| {
+            logger.err("cron: failed to dispatch pending background save", err, @errorReturnTrace());
+        };
+    }
+    if (ready.aof) {
+        _ = data_store.dispatchPendingAofRewrite() catch |err| {
+            logger.err("cron: failed to dispatch pending AOF rewrite", err, @errorReturnTrace());
+        };
+    }
 }
 
 fn triggerSaveIfDue(
@@ -231,6 +263,7 @@ const FinishRewriteJournal = struct {
         .prepareRecord = prepareRecord,
         .flush = flush,
         .bgRewrite = bgRewrite,
+        .dispatchPendingRewrite = dispatchPendingRewrite,
         .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
         .beginLoading = beginLoading,
@@ -256,6 +289,9 @@ const FinishRewriteJournal = struct {
     }
     fn bgRewrite(_: *anyopaque, _: []const storage.Interface, _: store.Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
         return .started;
+    }
+    fn dispatchPendingRewrite(_: *anyopaque, _: []const storage.Interface) anyerror!bool {
+        return false;
     }
     fn dueForRewrite(_: *anyopaque, _: Config) anyerror!bool {
         return false;
@@ -362,12 +398,13 @@ test "no cron flush drains buffered commands" {
 test "cron forwards failed AOF completion and ignores a running child" {
     const testing = std.testing;
     var backend = FinishRewriteJournal.init(testing.io);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     const journal = backend.journal();
 
-    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .{ .status = .running });
+    finishAofIfCompleted(logging.NoopLogger.logger(), &state, journal, .{ .status = .running });
     try testing.expectEqual(@as(usize, 0), backend.calls);
 
-    finishAofIfCompleted(logging.NoopLogger.logger(), journal, .{ .status = .failed });
+    finishAofIfCompleted(logging.NoopLogger.logger(), &state, journal, .{ .status = .failed });
     try testing.expectEqual(@as(usize, 1), backend.calls);
     try testing.expectEqual(PersistenceState.ReapResult.failed, backend.last_result.?);
 }
@@ -375,6 +412,7 @@ test "cron forwards failed AOF completion and ignores a running child" {
 test "cron swallows finishRewrite errors" {
     const testing = std.testing;
     var backend = FinishRewriteJournal.init(testing.io);
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
     backend.fail = true;
 
     const devnull = std.c.open("/dev/null", .{ .ACCMODE = .WRONLY });
@@ -389,10 +427,153 @@ test "cron swallows finishRewrite errors" {
     }
     _ = std.c.dup2(devnull, std.posix.STDERR_FILENO);
 
-    finishAofIfCompleted(logging.NoopLogger.logger(), backend.journal(), .{ .status = .succeeded });
+    finishAofIfCompleted(logging.NoopLogger.logger(), &state, backend.journal(), .{ .status = .succeeded });
 
     try testing.expectEqual(@as(usize, 1), backend.calls);
     try testing.expectEqual(PersistenceState.ReapResult.succeeded, backend.last_result.?);
+}
+
+test "cron dispatches one pending save after either AOF result and retries a failed launch" {
+    const testing = std.testing;
+    const Fork = struct {
+        var calls: usize = 0;
+        fn run() anyerror!std.posix.pid_t {
+            calls += 1;
+            if (calls == 1) return error.SystemResources;
+            return 123;
+        }
+    };
+    const Wait = struct {
+        var status: u32 = 0;
+        fn run(_: std.posix.pid_t) anyerror!?u32 {
+            return status;
+        }
+    };
+
+    for ([_]u32{ 0, 256 }) |child_status| {
+        Fork.calls = 0;
+        Wait.status = child_status;
+        var state = PersistenceState.init(testing.io, .{
+            .mutual_exclusive = true,
+            .process = .{ .wait_pid = Wait.run },
+        });
+        var journal_backend = FinishRewriteJournal.init(testing.io);
+        var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &state, "unused-pending-save.kgc");
+        kgc_backend._fork = Fork.run;
+        var memory_store = store.MemoryStore.init(testing.allocator, &.{}, kgc_backend.snapshot(), null);
+        var data_store = memory_store.store();
+        defer data_store.deinit();
+
+        const completed = blk: {
+            var tx = try state.begin();
+            defer tx.end();
+            try testing.expectEqual(PersistenceState.StartDecision.started, state.tryStartAof(.immediate));
+            state.setInFlightAofRewrite(.{ .pid = 11, .base_seq = 1, .origin = .manual });
+            try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartKgc(.schedule));
+            try testing.expect(!state.claimPendingKgc());
+            break :blk state.reapAof();
+        };
+        try testing.expectEqual(if (child_status == 0) PersistenceState.ReapResult.succeeded else .failed, completed.status);
+        finishAofIfCompleted(logging.NoopLogger.logger(), &state, journal_backend.journal(), completed);
+        try testing.expectEqual(@as(usize, 1), journal_backend.calls);
+
+        dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
+        try testing.expectEqual(@as(usize, 1), Fork.calls);
+        {
+            var tx = try state.begin();
+            defer tx.end();
+            try testing.expect(!state.kgcInProgress());
+            try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartKgc(.schedule));
+        }
+
+        dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
+        try testing.expectEqual(@as(usize, 2), Fork.calls);
+        {
+            var tx = try state.begin();
+            defer tx.end();
+            try testing.expect(state.kgcInProgress());
+            try testing.expectEqual(PersistenceState.StartDecision.busy, state.tryStartKgc(.schedule));
+        }
+        dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
+        try testing.expectEqual(@as(usize, 2), Fork.calls);
+
+        {
+            var tx = try state.begin();
+            defer tx.end();
+            const save_result = state.reapKgc(time.nowMs(testing.io));
+            try testing.expectEqual(completed.status, save_result.status);
+            _ = try finishKgcIfCompleted(testing.io, &state, save_result);
+        }
+    }
+}
+
+test "cron dispatches one pending AOF rewrite after a save and retries a failed launch" {
+    const testing = std.testing;
+    const Fork = struct {
+        var calls: usize = 0;
+        fn run() anyerror!std.posix.pid_t {
+            calls += 1;
+            if (calls == 1) return error.SystemResources;
+            return 123;
+        }
+    };
+    const Wait = struct {
+        fn run(_: std.posix.pid_t) anyerror!?u32 {
+            return 0;
+        }
+    };
+    const dirname = "scratch-cron-pending-aof";
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+
+    Fork.calls = 0;
+    var state = PersistenceState.init(testing.io, .{
+        .mutual_exclusive = true,
+        .process = .{ .wait_pid = Wait.run },
+    });
+    var kgc_backend = try persistence.KgcPersistence.init(testing.io, testing.allocator, &state, "unused-pending-save.kgc");
+    var aof_backend = try persistence.AofPersistence.init(testing.io, testing.allocator, &state, .{
+        .append_only = true,
+        .append_dirname = dirname,
+    });
+    aof_backend._fork = Fork.run;
+    const journal = aof_backend.journal();
+    defer journal.deinit() catch {};
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{}, kgc_backend.snapshot(), journal);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expectEqual(PersistenceState.StartDecision.started, state.tryStartKgc(.immediate));
+        state.setInFlightKgcSave(.{ .pid = 11, .captured_change_count = 0, .origin = .manual });
+        try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartAof(.schedule));
+        try testing.expect(!state.claimPendingAof());
+        const completed = state.reapKgc(time.nowMs(testing.io));
+        _ = try finishKgcIfCompleted(testing.io, &state, completed);
+    }
+
+    dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
+    try testing.expectEqual(@as(usize, 1), Fork.calls);
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(!state.aofInProgress());
+        try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartAof(.schedule));
+    }
+
+    dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
+    try testing.expectEqual(@as(usize, 2), Fork.calls);
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        try testing.expect(state.aofInProgress());
+        try testing.expectEqual(PersistenceState.StartDecision.busy, state.tryStartAof(.schedule));
+    }
+    dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
+    try testing.expectEqual(@as(usize, 2), Fork.calls);
 }
 
 test "triggerRewriteIfDue starts a rewrite when the rule is met" {
