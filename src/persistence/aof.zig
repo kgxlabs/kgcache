@@ -204,7 +204,7 @@ pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.Trigg
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
-        if (!self._persistence_state.tryStartAof()) return error.RewriteAlreadyInProgress;
+        if (self._persistence_state.tryStartAof(.immediate) != .started) return error.RewriteAlreadyInProgress;
     }
 
     self._last_rewrite_attempt_ms = time.nowMs(self._io);
@@ -996,7 +996,7 @@ test "dueForRewrite is false while a rewrite is already running" {
             {
                 var state_tx = try state.begin();
                 defer state_tx.end();
-                try testing.expect(state.tryStartAof());
+                try testing.expectEqual(PersistenceState.StartDecision.started, state.tryStartAof(.immediate));
             }
             defer {
                 var state_tx = state.begin() catch unreachable;

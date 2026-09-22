@@ -57,7 +57,7 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
-        if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+        if (self._persistence_state.tryStartKgc(.immediate) != .started) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
     errdefer {
@@ -85,7 +85,7 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerO
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
-        if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+        if (self._persistence_state.tryStartKgc(.immediate) != .started) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
     // NOTE: the placement is important. This way A busy return would not run finishKgc() and clear another operation’s active state
@@ -358,7 +358,7 @@ test "save returns SaveAlreadyInProgress when a save is already claimed" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(persistence_state.tryStartKgc());
+        try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
     }
     defer {
         var state_tx = persistence_state.begin() catch unreachable;
@@ -377,7 +377,7 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(persistence_state.tryStartKgc());
+        try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
     }
     defer {
         var state_tx = persistence_state.begin() catch unreachable;
@@ -434,7 +434,7 @@ test "failed save keeps the bgsave cooldown and releases its claim" {
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
     try testing.expect(!persistence_state.bgsaveCooldownElapsed(failure_ms, 5000));
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "encoder allocation failure preserves the source error and releases the save claim" {
@@ -446,7 +446,7 @@ test "encoder allocation failure preserves the source error and releases the sav
     try testing.expectError(error.OutOfMemory, backend_instance.snapshot().save(&.{}));
     var tx = try persistence_state.begin();
     defer tx.end();
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "storage visitor failure keeps the previous snapshot and removes encoder state" {
@@ -493,7 +493,7 @@ test "storage visitor failure keeps the previous snapshot and removes encoder st
 
     var tx = try persistence_state.begin();
     defer tx.end();
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "fork failure keeps its source error and releases the background save claim" {
@@ -509,7 +509,7 @@ test "fork failure keeps its source error and releases the background save claim
     try testing.expectError(error.SystemResources, backend_instance.snapshot().bgsave(&.{}, .automatic));
     var tx = try persistence_state.begin();
     defer tx.end();
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "background child reports its storage source once through the normal logger" {
@@ -683,7 +683,7 @@ test "file operation failures preserve source errors and the previous snapshot" 
         try testing.expectError(error.FileNotFound, cwd.readFileAlloc(testing.io, tmp_path, testing.allocator, .unlimited));
 
         var tx = try persistence_state.begin();
-        try testing.expect(persistence_state.tryStartKgc());
+        try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
         persistence_state.finishKgc();
         tx.end();
     }

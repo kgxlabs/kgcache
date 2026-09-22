@@ -462,7 +462,7 @@ test "triggerRewriteIfDue does nothing when a rewrite is already running" {
     {
         var state_tx = try state.begin();
         defer state_tx.end();
-        try testing.expect(state.tryStartAof());
+        try testing.expectEqual(PersistenceState.StartDecision.started, state.tryStartAof(.immediate));
     }
     defer {
         var state_tx = state.begin() catch unreachable;
@@ -565,7 +565,7 @@ test "a failed background save leaves changes dirty" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(persistence_state.tryStartKgc());
+        try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
     }
 
     const rc = std.posix.system.fork();
