@@ -144,8 +144,8 @@ pub fn canDispatchPendingKgc(self: *PersistenceState) bool {
 pub fn completePendingKgcStart(self: *PersistenceState, save: KgcBackgroundSave) PendingStartError!void {
     if (self._in_flight_kgc_save != null) return error.ChildAlreadyTracked;
     if (!self._pending_kgc or !self._kgc_in_progress) return error.InvalidPendingClaim;
-    self._in_flight_kgc_save = save;
     self._pending_kgc = false;
+    self.setInFlightKgcSave(save);
 }
 
 /// Leave the request queued after a launch failure before a child exists.
@@ -210,8 +210,8 @@ pub fn canDispatchPendingAof(self: *PersistenceState) bool {
 pub fn completePendingAofStart(self: *PersistenceState, rewrite: AofBackgroundRewrite) PendingStartError!void {
     if (self._in_flight_aof_rewrite != null) return error.ChildAlreadyTracked;
     if (!self._pending_aof or !self._aof_in_progress) return error.InvalidPendingClaim;
-    self._in_flight_aof_rewrite = rewrite;
     self._pending_aof = false;
+    self.setInFlightAofRewrite(rewrite);
 }
 
 /// Leave the request queued after a launch failure before a child exists.

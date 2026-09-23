@@ -29,6 +29,7 @@ pub fn run(
             logger.err("cron: sleep failed", err, @errorReturnTrace());
             return;
         };
+
         if (stop_requested.load(.acquire)) return;
 
         const next_start = expiration.runRound(io, allocator, data_storages, start, config) catch |err| {
@@ -464,13 +465,21 @@ test "cron dispatches one pending save after either AOF result and retries a fai
         var data_store = memory_store.store();
         defer data_store.deinit();
 
-        const completed = blk: {
+        {
             var tx = try state.begin();
             defer tx.end();
             try testing.expectEqual(PersistenceState.StartDecision.started, state.tryStartAof(.immediate));
             state.setInFlightAofRewrite(.{ .pid = 11, .base_seq = 1, .origin = .manual });
-            try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartKgc(.schedule));
             try testing.expect(!state.claimPendingKgc());
+        }
+
+        try testing.expectEqual(PersistenceState.BackgroundStartOutcome.scheduled, try data_store.bgsave(.manual));
+        try testing.expectEqual(PersistenceState.BackgroundStartOutcome.scheduled, try data_store.bgsave(.manual));
+        try testing.expectEqual(@as(usize, 0), Fork.calls);
+
+        const completed = blk: {
+            var tx = try state.begin();
+            defer tx.end();
             break :blk state.reapAof();
         };
         try testing.expectEqual(if (child_status == 0) PersistenceState.ReapResult.succeeded else .failed, completed.status);
@@ -483,7 +492,7 @@ test "cron dispatches one pending save after either AOF result and retries a fai
             var tx = try state.begin();
             defer tx.end();
             try testing.expect(!state.kgcInProgress());
-            try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartKgc(.schedule));
+            try testing.expect(state.canDispatchPendingKgc());
         }
 
         dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);

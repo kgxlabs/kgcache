@@ -183,12 +183,32 @@ test "valid arity delegates to the store" {
 
     var bgsave_result = try executeWithMockStore("BGSAVE", &.{}, &mock_store);
     defer bgsave_result.deinit();
+    try testing.expectEqualStrings("Background saving started", bgsave_result.value.simple_string);
 
-    var scheduled_result = try executeWithMockStore("BGSAVE", &.{.{ .bulk_string = "SCHEDULE" }}, &mock_store);
+    mock_store.bgsave_result = .scheduled;
+    var scheduled_result = try executeWithMockStore("BGSAVE", &.{.{ .bulk_string = "sChEdUlE" }}, &mock_store);
     defer scheduled_result.deinit();
+    try testing.expectEqualStrings("Background saving scheduled", scheduled_result.value.simple_string);
     try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);
 
     var rewrite_result = try executeWithMockStore("BGREWRITEAOF", &.{}, &mock_store);
     defer rewrite_result.deinit();
     try testing.expectEqual(@as(usize, 1), mock_store.bgrewriteaof_calls);
+}
+
+test "BGSAVE rejects an invalid option before calling the store" {
+    const testing = std.testing;
+    var mock_store = MockStore.init();
+
+    try testing.expectError(
+        error.Syntax,
+        executeWithMockStore("BGSAVE", &.{.{ .bulk_string = "NOW" }}, &mock_store),
+    );
+    try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
+
+    try testing.expectError(
+        error.UnsupportedArgumentType,
+        executeWithMockStore("BGSAVE", &.{.{ .integer = 1 }}, &mock_store),
+    );
+    try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
 }

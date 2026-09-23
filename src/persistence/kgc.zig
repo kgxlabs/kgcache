@@ -82,8 +82,8 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
 // It just means forking completed
 pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
-    _ = try self.startBackgroundSave(storages, origin, false);
-    return .started;
+    const started = try self.startBackgroundSave(storages, origin, false);
+    return if (started) .started else .scheduled;
 }
 
 pub fn dispatchPendingSave(ptr: *anyopaque, storages: []const Storage) anyerror!bool {
@@ -99,8 +99,14 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
 
         if (pending) {
             if (!self._persistence_state.claimPendingKgc()) return false;
-        } else if (self._persistence_state.tryStartKgc(.immediate) != .started) {
-            return Snapshot.Error.SaveAlreadyInProgress;
+        } else {
+            const policy: PersistenceState.StartPolicy = if (origin == .manual) .schedule else .immediate;
+
+            switch (self._persistence_state.tryStartKgc(policy)) {
+                .started => {},
+                .scheduled => return false,
+                .busy => return Snapshot.Error.SaveAlreadyInProgress,
+            }
         }
     }
 
