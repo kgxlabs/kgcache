@@ -10,6 +10,7 @@ set_result: anyerror!Store.SetResult = .{ .outcome = .applied, .value = null },
 remove_result: anyerror!Store.RemoveResult = .{ .outcome = .not_applied, .value = {} },
 dbsize_result: anyerror!u32 = 0,
 bgsave_result: anyerror!PersistenceState.BackgroundStartOutcome = .started,
+bgrewriteaof_result: anyerror!PersistenceState.BackgroundStartOutcome = .started,
 dispatch_pending_bgsave_result: anyerror!bool = false,
 dispatch_pending_aof_result: anyerror!bool = false,
 num_databases_result: u32 = 1,
@@ -107,7 +108,7 @@ fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!PersistenceState.Bac
 fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgrewriteaof_calls += 1;
-    return .started;
+    return self.bgrewriteaof_result;
 }
 
 fn dispatchPendingBgsave(ptr: *anyopaque) anyerror!bool {

@@ -528,7 +528,7 @@ test "cron dispatches one pending AOF rewrite after a save and retries a failed 
     };
     const Wait = struct {
         fn run(_: std.posix.pid_t) anyerror!?u32 {
-            return 0;
+            return 256;
         }
     };
     const dirname = "scratch-cron-pending-aof";
@@ -558,9 +558,23 @@ test "cron dispatches one pending AOF rewrite after a save and retries a failed 
         defer tx.end();
         try testing.expectEqual(PersistenceState.StartDecision.started, state.tryStartKgc(.immediate));
         state.setInFlightKgcSave(.{ .pid = 11, .captured_change_count = 0, .origin = .manual });
-        try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartAof(.schedule));
         try testing.expect(!state.claimPendingAof());
+    }
+
+    const initial_incr_seq = aof_backend._incr_seq;
+    const initial_file_offset = aof_backend._file_offset;
+    try testing.expectEqual(PersistenceState.BackgroundStartOutcome.scheduled, try data_store.bgrewriteaof(.manual));
+    try testing.expectEqual(PersistenceState.BackgroundStartOutcome.scheduled, try data_store.bgrewriteaof(.manual));
+    try testing.expectEqual(@as(usize, 0), Fork.calls);
+    try testing.expectEqual(initial_incr_seq, aof_backend._incr_seq);
+    try testing.expectEqual(initial_file_offset, aof_backend._file_offset);
+    try testing.expect(aof_backend._last_rewrite_attempt_ms == null);
+
+    {
+        var tx = try state.begin();
+        defer tx.end();
         const completed = state.reapKgc(time.nowMs(testing.io));
+        try testing.expectEqual(PersistenceState.ReapResult.failed, completed.status);
         _ = try finishKgcIfCompleted(testing.io, &state, completed);
     }
 
@@ -570,7 +584,7 @@ test "cron dispatches one pending AOF rewrite after a save and retries a failed 
         var tx = try state.begin();
         defer tx.end();
         try testing.expect(!state.aofInProgress());
-        try testing.expectEqual(PersistenceState.StartDecision.scheduled, state.tryStartAof(.schedule));
+        try testing.expect(state.canDispatchPendingAof());
     }
 
     dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);

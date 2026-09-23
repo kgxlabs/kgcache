@@ -193,6 +193,7 @@ test "valid arity delegates to the store" {
 
     var rewrite_result = try executeWithMockStore("BGREWRITEAOF", &.{}, &mock_store);
     defer rewrite_result.deinit();
+    try testing.expectEqualStrings("Background append only file rewriting started", rewrite_result.value.simple_string);
     try testing.expectEqual(@as(usize, 1), mock_store.bgrewriteaof_calls);
 }
 
@@ -211,4 +212,16 @@ test "BGSAVE rejects an invalid option before calling the store" {
         executeWithMockStore("BGSAVE", &.{.{ .integer = 1 }}, &mock_store),
     );
     try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
+}
+
+test "BGREWRITEAOF reports a scheduled rewrite" {
+    const testing = std.testing;
+    var mock_store = MockStore.init();
+    mock_store.bgrewriteaof_result = .scheduled;
+
+    var result = try executeWithMockStore("BGREWRITEAOF", &.{}, &mock_store);
+    defer result.deinit();
+
+    try testing.expectEqualStrings("Background append only file rewriting scheduled", result.value.simple_string);
+    try testing.expectEqual(@as(usize, 1), mock_store.bgrewriteaof_calls);
 }

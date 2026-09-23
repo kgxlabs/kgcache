@@ -202,8 +202,8 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) anyerror!Journa
 
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
-    _ = try self.startBackgroundRewrite(storages, origin, false);
-    return .started;
+    const started = try self.startBackgroundRewrite(storages, origin, false);
+    return if (started) .started else .scheduled;
 }
 
 pub fn dispatchPendingRewrite(ptr: *anyopaque, storages: []const Storage) anyerror!bool {
@@ -217,8 +217,13 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
         defer state_tx.end();
         if (pending) {
             if (!self._persistence_state.claimPendingAof()) return false;
-        } else if (self._persistence_state.tryStartAof(.immediate) != .started) {
-            return error.RewriteAlreadyInProgress;
+        } else {
+            const policy: PersistenceState.StartPolicy = if (origin == .manual) .schedule else .immediate;
+            switch (self._persistence_state.tryStartAof(policy)) {
+                .started => {},
+                .scheduled => return false,
+                .busy => return error.RewriteAlreadyInProgress,
+            }
         }
     }
 
