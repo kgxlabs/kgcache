@@ -9,7 +9,7 @@ setup, fsync choices, startup, and rewrites, see
 
 ## Background saving (`BGSAVE`)
 
-`SAVE` writes a full snapshot to disk on the connection thread that asked for it: simple, but the client is stuck waiting for however long the write takes. `BGSAVE` exists to avoid that: it returns `OK` immediately, and does the actual write somewhere else, while the server keeps handling other requests.
+`SAVE` writes a full snapshot to disk on the connection thread that asked for it: simple, but the client is stuck waiting for however long the write takes. `BGSAVE` runs without blocking the client. It returns `Background saving started` when the save begins. If an AOF rewrite is active and background persistence is exclusive, it returns `Background saving scheduled`, then starts the save after the rewrite finishes.
 
 That "somewhere else" is a forked child process, and getting this right depends on a few OS-level mechanics that are worth spelling out, since they shape most of the code around it.
 
@@ -33,19 +33,23 @@ For `BGSAVE`, this is exactly the "snapshot" primitive it needs: the child sees 
    │ trigger private       │
    │ COW copies             _exit()  (never returns)
    ▼
- returns OK immediately
+ returns Background saving started
 ```
 
-`KgcBackend.bgsave` (`src/persistence/kgc.zig`) is the whole implementation:
+The request has three possible outcomes:
 
 ```text
-tryStartKgc() fails? ──▶ return SaveAlreadyInProgress, don't fork
+BGSAVE request
+ ├─ another save is active: return an error
+ ├─ an exclusive AOF rewrite is active: schedule one save
+ └─ otherwise: start saving
 
+When saving starts:
 fork()
  ├─ child:  close stdin/stdout, dump(storages), then _exit()
  │          (never returns into the caller's connection-handling code)
  └─ parent: capture the change count, record the child's pid and origin,
-            then return OK immediately
+            then return started immediately
 ```
 
 A few details here are load-bearing, not stylistic:
@@ -59,7 +63,12 @@ A few details here are load-bearing, not stylistic:
 
 Two `BGSAVE`s (or a `SAVE` and a `BGSAVE`) writing to the same `.kgc` file at once would interleave or corrupt the output. `PersistenceState` (`src/persistence_state.zig`) is the guard against that: a small piece of state, shared by every connection thread and the background housekeeping loop, tracking whether a kgc save and/or an AOF rewrite is currently in flight, plus the pid of whichever child is running.
 
-The claim has to happen in the *parent*, before `fork()`: a flag flipped inside the child would only ever exist in the child's own COW-private copy of that memory, invisible to the parent and every other thread, which is exactly the same isolation `BGSAVE` relies on for the snapshot itself working correctly here. `save()` and `bgsave()` both claim the same flag before doing any writing, and `SAVE`/`BGSAVE` share one error for it: whichever asks first wins, the other gets `SaveAlreadyInProgress` immediately.
+The claim has to happen in the *parent*, before `fork()`: a flag flipped inside the child would only ever exist in the child's own COW-private copy of that memory, invisible to the parent and every other thread, which is exactly the same isolation `BGSAVE` relies on for the snapshot itself working correctly here. `SAVE` and `BGSAVE` share one "save already in progress" error. Repeated manual requests while a save is active are errors, not a queue.
+
+`BGSAVE` accepts either no argument or one case-insensitive `SCHEDULE` token.
+Both forms follow the same policy. When an AOF rewrite blocks the save, one
+pending save is recorded and repeated requests coalesce into it. This is an
+intentional difference from Redis: bare `BGSAVE` schedules in this case too.
 
 Since kgcache handles each connection on its own OS thread, this state is genuinely shared across threads, not just across the fork boundary: `PersistenceState` protects it with a mutex rather than a plain flag.
 
@@ -83,7 +92,9 @@ If the child has not exited yet, the poll is a no-op. Once it has, `PersistenceS
 
 ### `exclusive-bg-persistence`
 
-By default, a `BGSAVE` and an AOF background rewrite are mutually exclusive: starting one while the other is running fails immediately rather than forking a second child. Turning this off (`exclusive-bg-persistence no`) is possible but not recommended: two children forked at once means the parent and *both* children share the same COW memory, so every write in the parent afterward risks a page copy being charged against both children instead of one: real Redis operators are advised against running `BGSAVE` and `BGREWRITEAOF` close together for the same reason.
+By default, a `BGSAVE` and an AOF background rewrite are mutually exclusive. A manual `BGSAVE` or `BGREWRITEAOF` request for the other kind is scheduled and starts after the active operation finishes. Repeated requests coalesce into one scheduled operation. If that operation cannot start, it remains scheduled and is tried again. Starting a scheduled save does not count as a successful save.
+
+Turning exclusivity off (`exclusive-bg-persistence no`) is possible but not recommended. It lets one `BGSAVE` and one AOF rewrite run at the same time. Two children then share the parent's COW memory, so every later parent write may require page copies for both children.
 
 ## Automatic background saving (condition-based snapshots)
 
@@ -132,6 +143,9 @@ Trigger path (every cron-interval-ms tick):
 ```
 
 An automatic save failure starts a retry cooldown. Cron keeps evaluating the save rules, but it does not try another automatic `BGSAVE` until `bgsave-retry-delay-ms` has elapsed. `SaveAlreadyInProgress` does not start the cooldown because it means another persistence operation already owns the claim. A successful save clears any existing cooldown.
+
+Automatic saves remain immediate attempts and are never scheduled behind an
+AOF rewrite.
 
 ### Why the reset can't happen at the trigger call site
 

@@ -176,11 +176,15 @@ Run one by hand:
 
 ```console
 127.0.0.1:6379> BGREWRITEAOF
-OK
+Background append only file rewriting started
 ```
 
-The command returns after the background child starts. The child writes the
-new base while the parent keeps serving requests.
+The command returns after the background rewrite starts, while the server keeps
+serving requests. If a save is active and background persistence is exclusive,
+the command instead returns `Background append only file rewriting scheduled`.
+The rewrite starts after the save finishes. Repeated requests coalesce into the
+same scheduled rewrite. An active AOF rewrite remains an error, and AOF must be
+enabled before a request can be scheduled.
 
 Before forking, the parent opens a new incremental file and updates the
 manifest:
@@ -208,6 +212,10 @@ Publishing the new incremental file before the fork matters. If the rewrite
 fails or the server stops, the manifest still names every file that contains
 new writes.
 
+If a scheduled rewrite cannot start after the save finishes, it remains
+scheduled and is tried again. Starting it does not count as a successful
+rewrite.
+
 The manifest is replaced by writing and syncing a temporary file, then
 renaming it. The rename itself is atomic. The current Zig file API does not
 provide directory fsync here, so a power loss just after the rename still
@@ -230,6 +238,8 @@ auto-aof-rewrite-percentage 0
 
 `BGREWRITEAOF` still works when automatic rewriting is off. After a failed
 rewrite, kgcache waits 60 seconds before trying another automatic rewrite.
+Automatic rewrites remain immediate attempts and never enter the pending manual
+queue.
 
 ## Write failures
 
@@ -258,5 +268,8 @@ the server can recover after a short problem such as a full disk that was
 cleaned up.
 
 Only one AOF rewrite can run at a time. By default, an AOF rewrite and
-`BGSAVE` also cannot run at the same time. See
+`BGSAVE` also cannot run at the same time. A manual request for the other kind
+from `BGSAVE` or `BGREWRITEAOF` is scheduled and starts after the active
+operation finishes. With
+`exclusive-bg-persistence no`, one rewrite and one save may overlap. See
 [`exclusive-bg-persistence`](CONFIGURATION.md#exclusive-bg-persistence-recommendation).

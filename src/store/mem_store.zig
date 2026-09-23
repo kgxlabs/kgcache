@@ -53,6 +53,8 @@ const vtable = Store.VTable{
     .save = save,
     .bgsave = bgsave,
     .bgrewriteaof = bgrewriteaof,
+    .dispatchPendingBgsave = dispatchPendingBgsave,
+    .dispatchPendingAofRewrite = dispatchPendingAofRewrite,
     .deinit = deinit,
 };
 
@@ -156,16 +158,16 @@ pub fn save(ptr: *anyopaque) anyerror!void {
     try self._kgc.save(self._storages);
 }
 
-pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void {
+pub fn bgsave(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
 
     const sessions = try self.beginStorageSessions();
     defer self.endStorageSessions(sessions);
 
-    try self._kgc.bgsave(self._storages, origin);
+    return self._kgc.bgsave(self._storages, origin);
 }
 
-pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void {
+pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *MemoryStore = @ptrCast(@alignCast(ptr));
     const aof = self._aof orelse return error.AofDisabled;
 
@@ -175,7 +177,27 @@ pub fn bgrewriteaof(ptr: *anyopaque, origin: Store.TriggerOrigin) anyerror!void 
     var aof_tx = try aof.begin();
     defer aof_tx.end();
 
-    try aof.bgRewrite(self._storages, origin);
+    return aof.bgRewrite(self._storages, origin);
+}
+
+pub fn dispatchPendingBgsave(ptr: *anyopaque) anyerror!bool {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const sessions = try self.beginStorageSessions();
+    defer self.endStorageSessions(sessions);
+
+    return self._kgc.dispatchPendingSave(self._storages);
+}
+
+pub fn dispatchPendingAofRewrite(ptr: *anyopaque) anyerror!bool {
+    const self: *MemoryStore = @ptrCast(@alignCast(ptr));
+    const aof = self._aof orelse return false;
+    const sessions = try self.beginStorageSessions();
+    defer self.endStorageSessions(sessions);
+
+    var aof_tx = try aof.begin();
+    defer aof_tx.end();
+
+    return aof.dispatchPendingRewrite(self._storages);
 }
 
 fn beginStorageSessions(self: *MemoryStore) ![]Storage.Tx {
@@ -710,7 +732,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
         .response = null,
     }, 0);
 
-    try data_store.bgrewriteaof(.manual);
+    _ = try data_store.bgrewriteaof(.manual);
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
@@ -731,13 +753,19 @@ test "AOF rewrite reports progress until completion and replays writes" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(!persistence_state.aofInProgress());
+        try testing.expect(persistence_state.aofInProgress());
     }
 
     {
         var tx = try journal.begin();
         defer tx.end();
         try journal.finishRewrite(result);
+    }
+    {
+        var state_tx = try persistence_state.begin();
+        defer state_tx.end();
+        persistence_state.finishAof();
+        try testing.expect(!persistence_state.aofInProgress());
     }
 
     var fresh_backend = DefaultStorage.init(testing.io, testing.allocator);
@@ -777,7 +805,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     defer data_store.deinit();
 
     try setStoreValue(&data_store, "key", "0", 0);
-    try data_store.bgrewriteaof(.manual);
+    _ = try data_store.bgrewriteaof(.manual);
 
     var value_buffer: [32]u8 = undefined;
     var last_value: []const u8 = "0";
@@ -839,7 +867,7 @@ test "concurrent KGC snapshot contains one complete submitted value" {
     defer data_store.deinit();
 
     try setStoreValue(&data_store, "key", first, 0);
-    try data_store.bgsave(.manual);
+    _ = try data_store.bgsave(.manual);
     for (0..20) |index| {
         try setStoreValue(&data_store, "key", if (index % 2 == 0) second else first, 0);
     }
@@ -880,8 +908,11 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
         failed: std.atomic.Value(bool) = .init(false),
 
         fn run(self: *@This()) void {
-            self.data_store.bgrewriteaof(.manual) catch self.failed.store(true, .release);
-            self.returned.store(true, .release);
+            defer self.returned.store(true, .release);
+            _ = self.data_store.bgrewriteaof(.manual) catch {
+                self.failed.store(true, .release);
+                return;
+            };
         }
     };
     const cwd = std.Io.Dir.cwd();
@@ -965,8 +996,11 @@ test "KGC bgsave waits for active Storage work and preserves all databases" {
         failed: std.atomic.Value(bool) = .init(false),
 
         fn run(self: *@This()) void {
-            self.data_store.bgsave(.manual) catch self.failed.store(true, .release);
-            self.returned.store(true, .release);
+            defer self.returned.store(true, .release);
+            _ = self.data_store.bgsave(.manual) catch {
+                self.failed.store(true, .release);
+                return;
+            };
         }
     };
     const cwd = std.Io.Dir.cwd();

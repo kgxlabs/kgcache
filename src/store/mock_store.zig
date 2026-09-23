@@ -1,4 +1,5 @@
 const Store = @import("interface.zig");
+const PersistenceState = @import("../persistence_state.zig");
 const object = @import("../object.zig");
 const Request = @import("../commander/request.zig");
 
@@ -8,7 +9,10 @@ get_result: anyerror!?object.Owned = null,
 set_result: anyerror!Store.SetResult = .{ .outcome = .applied, .value = null },
 remove_result: anyerror!Store.RemoveResult = .{ .outcome = .not_applied, .value = {} },
 dbsize_result: anyerror!u32 = 0,
-bgsave_result: anyerror!void = {},
+bgsave_result: anyerror!PersistenceState.BackgroundStartOutcome = .started,
+bgrewriteaof_result: anyerror!PersistenceState.BackgroundStartOutcome = .started,
+dispatch_pending_bgsave_result: anyerror!bool = false,
+dispatch_pending_aof_result: anyerror!bool = false,
 num_databases_result: u32 = 1,
 get_calls: usize = 0,
 set_calls: usize = 0,
@@ -17,6 +21,8 @@ dbsize_calls: usize = 0,
 save_calls: usize = 0,
 bgsave_calls: usize = 0,
 bgrewriteaof_calls: usize = 0,
+dispatch_pending_bgsave_calls: usize = 0,
+dispatch_pending_aof_calls: usize = 0,
 last_get_key: ?[]const u8 = null,
 last_set_key: ?[]const u8 = null,
 last_set_value: ?[]const u8 = null,
@@ -45,6 +51,8 @@ const vtable = Store.VTable{
     .save = save,
     .bgsave = bgsave,
     .bgrewriteaof = bgrewriteaof,
+    .dispatchPendingBgsave = dispatchPendingBgsave,
+    .dispatchPendingAofRewrite = dispatchPendingAofRewrite,
     .deinit = deinit,
 };
 
@@ -91,15 +99,28 @@ fn save(ptr: *anyopaque) anyerror!void {
     self.save_calls += 1;
 }
 
-fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!void {
+fn bgsave(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgsave_calls += 1;
     return self.bgsave_result;
 }
 
-fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!void {
+fn bgrewriteaof(ptr: *anyopaque, _: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *MockStore = @ptrCast(@alignCast(ptr));
     self.bgrewriteaof_calls += 1;
+    return self.bgrewriteaof_result;
+}
+
+fn dispatchPendingBgsave(ptr: *anyopaque) anyerror!bool {
+    const self: *MockStore = @ptrCast(@alignCast(ptr));
+    self.dispatch_pending_bgsave_calls += 1;
+    return self.dispatch_pending_bgsave_result;
+}
+
+fn dispatchPendingAofRewrite(ptr: *anyopaque) anyerror!bool {
+    const self: *MockStore = @ptrCast(@alignCast(ptr));
+    self.dispatch_pending_aof_calls += 1;
+    return self.dispatch_pending_aof_result;
 }
 
 fn deinit(_: *anyopaque) void {}

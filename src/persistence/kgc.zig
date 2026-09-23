@@ -14,6 +14,7 @@ const KgcBackend = @This();
 const vtable: Snapshot.VTable = .{
     .save = save,
     .bgsave = bgsave,
+    .dispatchPendingSave = dispatchPendingSave,
     .load = load,
 };
 
@@ -57,7 +58,7 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
-        if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+        if (self._persistence_state.tryStartKgc(.immediate) != .started) return Snapshot.Error.SaveAlreadyInProgress;
     }
 
     errdefer {
@@ -79,20 +80,45 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
 // only hold short lock session so we dont hold the lock while fork
 // Finishing this does not mean, saving succeeded.
 // It just means forking completed
-pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!void {
+pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
+    const self: *KgcBackend = @ptrCast(@alignCast(ptr));
+    const started = try self.startBackgroundSave(storages, origin, false);
+    return if (started) .started else .scheduled;
+}
+
+pub fn dispatchPendingSave(ptr: *anyopaque, storages: []const Storage) anyerror!bool {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
+    return self.startBackgroundSave(storages, .manual, true);
+}
+
+fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Store.TriggerOrigin, pending: bool) anyerror!bool {
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
-        if (!self._persistence_state.tryStartKgc()) return Snapshot.Error.SaveAlreadyInProgress;
+
+        if (pending) {
+            if (!self._persistence_state.claimPendingKgc()) return false;
+        } else {
+            const policy: PersistenceState.StartPolicy = if (origin == .manual) .schedule else .immediate;
+
+            switch (self._persistence_state.tryStartKgc(policy)) {
+                .started => {},
+                .scheduled => return false,
+                .busy => return Snapshot.Error.SaveAlreadyInProgress,
+            }
+        }
     }
 
     // NOTE: the placement is important. This way A busy return would not run finishKgc() and clear another operation’s active state
     errdefer {
         var tx = self._persistence_state.beginUncancelable();
         defer tx.end();
-        self._persistence_state.finishKgc();
+        if (pending) {
+            self._persistence_state.failPendingKgcStart() catch |err| {
+                self._logger.err("kgc: failed to release pending save claim", err, @errorReturnTrace());
+            };
+        } else self._persistence_state.finishKgc();
     }
 
     const pid = try self._fork();
@@ -116,15 +142,29 @@ pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerO
     }
 
     // Fork succeeded, so cancellation must not leave the child untracked.
-    var state_tx = self._persistence_state.beginUncancelable();
-    defer state_tx.end();
+    const registration_error: ?PersistenceState.PendingStartError = blk: {
+        var state_tx = self._persistence_state.beginUncancelable();
+        defer state_tx.end();
 
-    const snapshot_change_count = self._persistence_state.captureSnapshotChangeCount();
-    self._persistence_state.setInFlightKgcSave(.{
-        .pid = pid,
-        .captured_change_count = snapshot_change_count,
-        .origin = origin,
-    });
+        const child_save: PersistenceState.KgcBackgroundSave = .{
+            .pid = pid,
+            .captured_change_count = self._persistence_state.captureSnapshotChangeCount(),
+            .origin = origin,
+        };
+
+        if (pending) {
+            self._persistence_state.completePendingKgcStart(child_save) catch |err| break :blk err;
+        } else self._persistence_state.setInFlightKgcSave(child_save);
+        break :blk null;
+    };
+
+    if (registration_error) |err| {
+        self._logger.err("kgc: failed to register pending save child", err, @errorReturnTrace());
+        PersistenceState.terminateAndReapChild(pid);
+        return err;
+    }
+
+    return true;
 }
 
 fn forkProcess() anyerror!std.posix.pid_t {
@@ -356,7 +396,7 @@ test "save returns SaveAlreadyInProgress when a save is already claimed" {
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(persistence_state.tryStartKgc());
+        try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
     }
     defer {
         var state_tx = persistence_state.begin() catch unreachable;
@@ -375,7 +415,7 @@ test "bgsave returns SaveAlreadyInProgress when a save is already claimed, witho
     {
         var state_tx = try persistence_state.begin();
         defer state_tx.end();
-        try testing.expect(persistence_state.tryStartKgc());
+        try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
     }
     defer {
         var state_tx = persistence_state.begin() catch unreachable;
@@ -432,7 +472,7 @@ test "failed save keeps the bgsave cooldown and releases its claim" {
     var state_tx = try persistence_state.begin();
     defer state_tx.end();
     try testing.expect(!persistence_state.bgsaveCooldownElapsed(failure_ms, 5000));
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "encoder allocation failure preserves the source error and releases the save claim" {
@@ -444,7 +484,7 @@ test "encoder allocation failure preserves the source error and releases the sav
     try testing.expectError(error.OutOfMemory, backend_instance.snapshot().save(&.{}));
     var tx = try persistence_state.begin();
     defer tx.end();
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "storage visitor failure keeps the previous snapshot and removes encoder state" {
@@ -491,7 +531,7 @@ test "storage visitor failure keeps the previous snapshot and removes encoder st
 
     var tx = try persistence_state.begin();
     defer tx.end();
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "fork failure keeps its source error and releases the background save claim" {
@@ -507,7 +547,7 @@ test "fork failure keeps its source error and releases the background save claim
     try testing.expectError(error.SystemResources, backend_instance.snapshot().bgsave(&.{}, .automatic));
     var tx = try persistence_state.begin();
     defer tx.end();
-    try testing.expect(persistence_state.tryStartKgc());
+    try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
 test "background child reports its storage source once through the normal logger" {
@@ -550,7 +590,7 @@ test "background child reports its storage source once through the normal logger
     {
         var tx = try data_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{failing_storage}, .manual);
+        _ = try backend_instance.snapshot().bgsave(&.{failing_storage}, .manual);
     }
     if (std.c.dup2(saved_stderr, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
     _ = std.c.close(fds[1]);
@@ -681,7 +721,7 @@ test "file operation failures preserve source errors and the previous snapshot" 
         try testing.expectError(error.FileNotFound, cwd.readFileAlloc(testing.io, tmp_path, testing.allocator, .unlimited));
 
         var tx = try persistence_state.begin();
-        try testing.expect(persistence_state.tryStartKgc());
+        try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
         persistence_state.finishKgc();
         tx.end();
     }
@@ -737,7 +777,7 @@ test "successful automatic background save clears cooldown and produces a loadab
     {
         var tx = try backend_storage.begin();
         defer tx.end();
-        try backend_instance.snapshot().bgsave(&.{backend_storage}, .automatic);
+        _ = try backend_instance.snapshot().bgsave(&.{backend_storage}, .automatic);
     }
     {
         var state_tx = try persistence_state.begin();
