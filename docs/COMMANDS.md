@@ -12,17 +12,17 @@ This reference describes the currently implemented command subset. Full Redis co
 | `SELECT <index>` | Switches the connection's active database. Returns an error if `index` is out of range. |
 | `DBSIZE` | Returns the number of stored keys as an RESP integer. |
 | `SAVE` | Writes a `.kgc` snapshot of all databases to disk (see [Configuration](CONFIGURATION.md) for `snapshot-path`), and blocks the calling connection until the write finishes. Returns an error if the write fails or a save is already in progress. |
-| `BGSAVE [SCHEDULE]` | Starts the same snapshot as `SAVE` in a forked child and returns `Background saving started`. The optional `SCHEDULE` token is case-insensitive. Both forms return `Background saving scheduled` when an AOF rewrite is active and background persistence is exclusive. An active save is still an error. Automatic saves can also start when a configured `save` rule is met; see [Configuration](CONFIGURATION.md#automatic-background-saving-save) and [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
-| `BGREWRITEAOF` | Starts an AOF rewrite in a forked child and returns `Background append only file rewriting started`. It returns `Background append only file rewriting scheduled` when a save is active and background persistence is exclusive. AOF being off, an active rewrite, or another start failure remains an error. See [Append-only file](AOF.md#rewrite). |
+| `BGSAVE [SCHEDULE]` | Starts a background snapshot and returns `Background saving started`. The optional `SCHEDULE` token is case-insensitive. Both forms return `Background saving scheduled` when an AOF rewrite is active and background persistence is exclusive. The save starts after the rewrite finishes. An active save is still an error. See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
+| `BGREWRITEAOF` | Starts an AOF rewrite and returns `Background append only file rewriting started`. It returns `Background append only file rewriting scheduled` when a save is active and background persistence is exclusive. The rewrite starts after the save finishes. AOF being off or an active rewrite remains an error. See [Append-only file](AOF.md#rewrite). |
 | `COMMAND <value>` | Placeholder command that returns its first argument; Redis command introspection is not implemented. |
 
 Command names are case-insensitive.
 
 `SAVE` and `BGSAVE` share one "a save is already running" guard, and only one
 AOF rewrite can run at a time. With the default `exclusive-bg-persistence yes`,
-a manual `BGSAVE` or `BGREWRITEAOF` is scheduled when the other kind is active. One
-pending request is remembered, and repeated requests of that kind coalesce into
-it. Cron starts the pending work after the active child is reaped and finalized.
+a manual `BGSAVE` or `BGREWRITEAOF` is scheduled when the other kind is active.
+One pending request is remembered, and repeated requests of that kind coalesce
+into it. The scheduled work starts after the active operation finishes.
 With `exclusive-bg-persistence no`, one save and one rewrite may overlap.
 
 Unlike Redis, kgcache gives bare `BGSAVE` the same scheduling behavior as
