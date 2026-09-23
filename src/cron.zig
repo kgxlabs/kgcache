@@ -72,17 +72,15 @@ pub fn run(
             finishAofIfCompleted(logger, persistence_state, aof, aof_result);
         }
 
-        dispatchPendingWork(logger, persistence_state, data_store, maybe_aof != null);
+        const pending_dispatch = dispatchPendingWork(logger, persistence_state, data_store, maybe_aof != null);
 
-        if (maybe_aof) |aof| triggerRewriteIfDue(logger, aof, data_store, config);
+        if (!pending_dispatch.aof) {
+            if (maybe_aof) |aof| triggerRewriteIfDue(logger, aof, data_store, config);
+        }
 
-        triggerSaveIfDue(
-            logger,
-            data_store,
-            persistence_state,
-            time.nowMs(io),
-            config,
-        );
+        if (!pending_dispatch.kgc) {
+            triggerSaveIfDue(logger, data_store, persistence_state, time.nowMs(io), config);
+        }
     }
 }
 
@@ -140,14 +138,19 @@ fn finishAofIfCompleted(
     persistence_state.finishAof();
 }
 
-fn dispatchPendingWork(logger: logging.Logger, persistence_state: *PersistenceState, data_store: *store.Store, has_aof: bool) void {
+const PendingDispatch = struct {
+    kgc: bool = false,
+    aof: bool = false,
+};
+
+fn dispatchPendingWork(logger: logging.Logger, persistence_state: *PersistenceState, data_store: *store.Store, has_aof: bool) PendingDispatch {
     const ready = blk: {
         var state_tx = persistence_state.begin() catch |err| {
             logger.err("cron: failed to check pending work", err, @errorReturnTrace());
-            return;
+            return .{};
         };
         defer state_tx.end();
-        break :blk .{
+        break :blk PendingDispatch{
             .kgc = persistence_state.canDispatchPendingKgc(),
             .aof = has_aof and persistence_state.canDispatchPendingAof(),
         };
@@ -163,6 +166,8 @@ fn dispatchPendingWork(logger: logging.Logger, persistence_state: *PersistenceSt
             logger.err("cron: failed to dispatch pending AOF rewrite", err, @errorReturnTrace());
         };
     }
+
+    return ready;
 }
 
 fn triggerSaveIfDue(
@@ -486,7 +491,7 @@ test "cron dispatches one pending save after either AOF result and retries a fai
         finishAofIfCompleted(logging.NoopLogger.logger(), &state, journal_backend.journal(), completed);
         try testing.expectEqual(@as(usize, 1), journal_backend.calls);
 
-        dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
+        _ = dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
         try testing.expectEqual(@as(usize, 1), Fork.calls);
         {
             var tx = try state.begin();
@@ -495,7 +500,7 @@ test "cron dispatches one pending save after either AOF result and retries a fai
             try testing.expect(state.canDispatchPendingKgc());
         }
 
-        dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
+        _ = dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
         try testing.expectEqual(@as(usize, 2), Fork.calls);
         {
             var tx = try state.begin();
@@ -503,7 +508,7 @@ test "cron dispatches one pending save after either AOF result and retries a fai
             try testing.expect(state.kgcInProgress());
             try testing.expectEqual(PersistenceState.StartDecision.busy, state.tryStartKgc(.schedule));
         }
-        dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
+        _ = dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, false);
         try testing.expectEqual(@as(usize, 2), Fork.calls);
 
         {
@@ -578,7 +583,7 @@ test "cron dispatches one pending AOF rewrite after a save and retries a failed 
         _ = try finishKgcIfCompleted(testing.io, &state, completed);
     }
 
-    dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
+    _ = dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
     try testing.expectEqual(@as(usize, 1), Fork.calls);
     {
         var tx = try state.begin();
@@ -587,7 +592,7 @@ test "cron dispatches one pending AOF rewrite after a save and retries a failed 
         try testing.expect(state.canDispatchPendingAof());
     }
 
-    dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
+    _ = dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
     try testing.expectEqual(@as(usize, 2), Fork.calls);
     {
         var tx = try state.begin();
@@ -595,7 +600,7 @@ test "cron dispatches one pending AOF rewrite after a save and retries a failed 
         try testing.expect(state.aofInProgress());
         try testing.expectEqual(PersistenceState.StartDecision.busy, state.tryStartAof(.schedule));
     }
-    dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
+    _ = dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
     try testing.expectEqual(@as(usize, 2), Fork.calls);
 }
 
