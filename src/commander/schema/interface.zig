@@ -1,10 +1,3 @@
-const std = @import("std");
-
-pub const SchemaDefinition = struct {
-    required: i8,
-    options: []const OptionDefinition,
-};
-
 pub const OptionGroup = enum {
     condition,
     expiration,

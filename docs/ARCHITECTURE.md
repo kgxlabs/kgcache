@@ -33,6 +33,17 @@ The TCP server has three layers for client connections:
 The storage backend owns its copied keys and string values, and protects
 operations with a mutex-backed transaction boundary.
 
+### Command registry
+
+The command registry is the runtime source of command metadata. Request
+dispatch uses its command names and accepted argument counts. Future command
+introspection will read the same definitions for flags, categories, and key
+positions.
+
+Command handlers keep value-dependent validation and execution. The registry
+contains typed metadata only. Protocol response construction stays in the
+command and connection layers.
+
 Any Store operation that returns storage-backed data copies it while the
 transaction is still locked. The command result owns this copy until RESP
 serialization finishes, then `Result.deinit` releases it. This keeps response

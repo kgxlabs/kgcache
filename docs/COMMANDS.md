@@ -4,7 +4,7 @@ This reference describes the currently implemented command subset. Full Redis co
 
 | Command | Behavior |
 | --- | --- |
-| `PING` | Returns `PONG`. Arguments are currently ignored. |
+| `PING [message]` | Returns `PONG` without an argument, or returns one non-null bulk-string argument unchanged. |
 | `ECHO <message>` | Returns one non-null bulk-string argument. |
 | `GET <key>` | Returns a bulk string, or a null bulk string when the key is absent or expired. |
 | `SET <key> <value> [options]` | Stores a string value. Without `GET`, returns `OK` when the write applies and a null bulk string when `NX` or `XX` rejects it. With `GET`, returns the previous value or a null bulk string when no value existed. |

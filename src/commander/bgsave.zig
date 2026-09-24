@@ -20,8 +20,6 @@ const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.ClientState) anyerror!Commander.Result {
     const self: *BgSave = @ptrCast(@alignCast(ptr));
 
-    if (self.arguments.len > 1) return error.WrongNumberArguments;
-
     if (self.arguments.len == 1) {
         const option = try command_arguments.bulkString(self.arguments[0]);
         if (!std.ascii.eqlIgnoreCase(option, "schedule")) return Commander.Error.Syntax;

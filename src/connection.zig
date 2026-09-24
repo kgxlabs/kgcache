@@ -82,7 +82,7 @@ fn handleConnection(
         defer parser.deinit(req_allocator, commands);
 
         const c = commander.init(req_allocator, commands) catch |err| {
-            const response = initErrorResponse(err) orelse {
+            const response = initErrorResponse(err, commands) orelse {
                 logger.err("connection: command initialization failed", err, @errorReturnTrace());
                 _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
                 return;
@@ -151,12 +151,13 @@ fn writeResponse(
     return true;
 }
 
-fn initErrorResponse(err: commander.Error) ?[]const u8 {
+fn initErrorResponse(err: commander.Error, request: resp.RESPValue) ?[]const u8 {
     return switch (err) {
         error.UnknownCommand => "-ERR unknown command\r\n",
         error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
         error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
         error.MalformedCommandRequest => "-ERR malformed command request\r\n",
+        error.WrongNumberArguments => wrongNumberArgumentsResponse(request),
         else => null,
     };
 }
@@ -167,10 +168,7 @@ fn executeErrorResponse(err: anyerror, request: resp.RESPValue) ?[]const u8 {
         error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
         error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
         error.MalformedCommandRequest => "-ERR malformed command request\r\n",
-        error.WrongNumberArguments => if (usesLegacyArgumentResponse(request))
-            "-Wrong number of arguments\r\n"
-        else
-            "-ERR wrong number of arguments\r\n",
+        error.WrongNumberArguments => wrongNumberArgumentsResponse(request),
         error.DbIndexOutOfRange => "-ERR DB index is out of range\r\n",
         error.UnsupportedOption => "-ERR unsupported option\r\n",
         error.Syntax => "-ERR syntax error\r\n",
@@ -181,6 +179,13 @@ fn executeErrorResponse(err: anyerror, request: resp.RESPValue) ?[]const u8 {
         error.AofDisabled => "-ERR AOF is disabled\r\n",
         else => null,
     };
+}
+
+fn wrongNumberArgumentsResponse(request: resp.RESPValue) []const u8 {
+    return if (usesLegacyArgumentResponse(request))
+        "-Wrong number of arguments\r\n"
+    else
+        "-ERR wrong number of arguments\r\n";
 }
 
 // These commands sent this exact wire response before validation moved here.
@@ -339,10 +344,11 @@ test "a Storage source crosses Store and Commander to the connection logger" {
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
 }
 
-test "command input errors keep their wire response and allow another request" {
+test "argument count errors keep their wire responses and allow another request" {
     const testing = std.testing;
     var fake_io: TestConnectionIo = .{ .requests = &.{
         "*2\r\n$6\r\nDBSIZE\r\n$1\r\nx\r\n",
+        "*1\r\n$3\r\nGET\r\n",
         "*1\r\n$4\r\nPING\r\n",
     } };
     var test_logger = logging.TestLogger.init();
@@ -351,8 +357,87 @@ test "command input errors keep their wire response and allow another request" {
 
     serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
-    try testing.expectEqualStrings("-Wrong number of arguments\r\n+PONG\r\n", fake_io.written());
-    try testing.expectEqual(2, fake_io.next_request);
+    try testing.expectEqualStrings(
+        "-Wrong number of arguments\r\n-ERR wrong number of arguments\r\n+PONG\r\n",
+        fake_io.written(),
+    );
+    try testing.expectEqual(3, fake_io.next_request);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+    try testing.expectEqual(0, fake_io.close_calls);
+}
+
+test "commands preserve replies and database state through a connection" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+
+    var fake_io: TestConnectionIo = .{ .requests = &.{
+        "*3\r\n$3\r\nsEt\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*1\r\n$3\r\nDEL\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*1\r\n$6\r\nDBSIZE\r\n",
+        "*2\r\n$6\r\nSELECT\r\n$1\r\n1\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nother\r\n",
+        "*1\r\n$6\r\nDBSIZE\r\n",
+        "*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n",
+        "*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*1\r\n$6\r\nDBSIZE\r\n",
+    } };
+    var test_logger = logging.TestLogger.init();
+
+    var database_zero = DefaultStorage.init(testing.io, testing.allocator);
+    var database_one = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try persistence.KgcPersistence.init(
+        testing.io,
+        testing.allocator,
+        &persistence_state,
+        "command-registry-behavior.kgc",
+    );
+    var memory_store = store.MemoryStore.init(
+        testing.allocator,
+        &.{ database_zero.storage(), database_one.storage() },
+        kgc.snapshot(),
+        null,
+    );
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    serve(
+        fake_io.io(),
+        test_logger.logger(),
+        .{ .socket = .{ .handle = 1, .address = undefined } },
+        &data_store,
+        testing.allocator,
+        1024,
+        &never_stop_requested,
+    );
+
+    try testing.expectEqualStrings(
+        "+OK\r\n" ++
+            "$5\r\nvalue\r\n" ++
+            "-ERR wrong number of arguments\r\n" ++
+            "$5\r\nvalue\r\n" ++
+            "-ERR wrong number of arguments\r\n" ++
+            "$5\r\nvalue\r\n" ++
+            ":1\r\n" ++
+            "+OK\r\n" ++
+            "$-1\r\n" ++
+            "+OK\r\n" ++
+            ":1\r\n" ++
+            "+OK\r\n" ++
+            ":1\r\n" ++
+            "$-1\r\n" ++
+            ":0\r\n",
+        fake_io.written(),
+    );
+    try testing.expectEqual(15, fake_io.next_request);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
     try testing.expectEqual(0, fake_io.close_calls);
 }

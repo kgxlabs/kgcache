@@ -24,10 +24,6 @@ const vtable = Commander.VTable{
 fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Select = @ptrCast(@alignCast(ptr));
 
-    if (self.arguments.len != 1) {
-        return error.WrongNumberArguments;
-    }
-
     const index = try command_arguments.bulkStringInt(u32, self.arguments[0]);
     if (index >= data_store.numDatabases()) {
         return error.DbIndexOutOfRange;
@@ -81,12 +77,4 @@ test "rejects an out-of-range database index" {
 
     try testing.expectError(error.DbIndexOutOfRange, command.execute(testing.io, &data_store, &client_state));
     try testing.expectEqual(0, client_state.db_index);
-}
-
-test "rejects wrong number of arguments" {
-    const testing = std.testing;
-    var values = [_]resp.RESPValue{.{ .bulk_string = "SELECT" }};
-    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
-
-    try testing.expectError(error.WrongNumberArguments, TestHelpers.executeWithMemoryStore(command));
 }

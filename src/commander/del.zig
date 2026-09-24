@@ -26,8 +26,6 @@ fn execute(
 ) anyerror!Commander.Result {
     const self: *Del = @ptrCast(@alignCast(ptr));
 
-    if (self.arguments.len == 0) return error.WrongNumberArguments;
-
     var removed: i64 = 0;
     for (self.arguments) |argument| {
         const key = try command_arguments.bulkString(argument);
