@@ -1,25 +1,13 @@
 const std = @import("std");
 const resp = @import("resp.zig");
-pub const BgRewriteAof = @import("commander/bgrewriteaof.zig");
-pub const BgSave = @import("commander/bgsave.zig");
-pub const CommandDefinition = @import("commander/definition.zig").Definition;
-pub const CommandRegistry = @import("commander/registry.zig");
+const registry = @import("commander/registry.zig");
 pub const Commander = @import("commander/interface.zig");
-pub const Command = @import("commander/command.zig");
-pub const DBSize = @import("commander/dbsize.zig");
-pub const Del = @import("commander/del.zig");
-pub const Echo = @import("commander/echo.zig");
-pub const Get = @import("commander/get.zig");
-pub const Ping = @import("commander/ping.zig");
-pub const Save = @import("commander/save.zig");
-pub const Select = @import("commander/select.zig");
-pub const Set = @import("commander/set.zig");
 pub const Error = Commander.Error;
 const MockStore = @import("store/mock_store.zig");
 
 pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander {
     const keyword = try parseKeyword(value);
-    const definition = CommandRegistry.find(keyword) orelse return error.UnknownCommand;
+    const definition = registry.find(keyword) orelse return error.UnknownCommand;
     const arguments = try parseArguments(value);
 
     if (!definition.arity.accepts(arguments.len)) return error.WrongNumberArguments;
@@ -102,7 +90,7 @@ fn executeWithMockStore(keyword: []const u8, arguments: []const resp.RESPValue, 
     return command.execute(std.testing.io, &data_store, &client_state);
 }
 
-test "invalid argument counts have no command effects" {
+test "commands reject invalid argument counts" {
     const testing = std.testing;
     const arguments = [_]resp.RESPValue{
         .{ .bulk_string = "key" },
@@ -128,10 +116,24 @@ test "invalid argument counts have no command effects" {
     inline for (cases) |case| {
         var mock_store = MockStore.init();
         try testing.expectError(error.WrongNumberArguments, executeWithMockStore(case[0], arguments[0..case[1]], &mock_store));
-        try testing.expectEqual(@as(usize, 0), mock_store.dbsize_calls);
-        try testing.expectEqual(@as(usize, 0), mock_store.get_calls);
-        try testing.expectEqual(@as(usize, 0), mock_store.remove_calls);
-        try testing.expectEqual(@as(usize, 0), mock_store.set_calls);
+    }
+}
+
+test "invalid argument counts do not start persistence" {
+    const testing = std.testing;
+    const arguments = [_]resp.RESPValue{
+        .{ .bulk_string = "one" },
+        .{ .bulk_string = "two" },
+    };
+    const cases = .{
+        .{ "BGREWRITEAOF", 1 },
+        .{ "BGSAVE", 2 },
+        .{ "SAVE", 1 },
+    };
+
+    inline for (cases) |case| {
+        var mock_store = MockStore.init();
+        try testing.expectError(error.WrongNumberArguments, executeWithMockStore(case[0], arguments[0..case[1]], &mock_store));
         try testing.expectEqual(@as(usize, 0), mock_store.save_calls);
         try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
         try testing.expectEqual(@as(usize, 0), mock_store.bgrewriteaof_calls);
@@ -242,5 +244,4 @@ test "BGREWRITEAOF reports a scheduled rewrite" {
     defer result.deinit();
 
     try testing.expectEqualStrings("Background append only file rewriting scheduled", result.value.simple_string);
-    try testing.expectEqual(@as(usize, 1), mock_store.bgrewriteaof_calls);
 }

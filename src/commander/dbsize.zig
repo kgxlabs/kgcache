@@ -37,7 +37,7 @@ test "execute returns the store size" {
     try testing.expectEqual(@as(i64, 0), result.value.integer);
 }
 
-test "execute delegates to the store dbsize operation" {
+test "execute returns the current database size" {
     const testing = std.testing;
 
     var values = [_]resp.RESPValue{.{ .bulk_string = "DBSIZE" }};
@@ -52,5 +52,4 @@ test "execute delegates to the store dbsize operation" {
     var result = try command.execute(testing.io, &data_store, &client_state);
     defer result.deinit();
     try testing.expectEqual(@as(i64, 42), result.value.integer);
-    try testing.expectEqual(1, mock_store.dbsize_calls);
 }

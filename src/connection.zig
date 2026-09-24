@@ -366,6 +366,82 @@ test "argument count errors keep their wire responses and allow another request"
     try testing.expectEqual(0, fake_io.close_calls);
 }
 
+test "commands preserve replies and database state through a connection" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+
+    var fake_io: TestConnectionIo = .{ .requests = &.{
+        "*3\r\n$3\r\nsEt\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*1\r\n$3\r\nDEL\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*1\r\n$6\r\nDBSIZE\r\n",
+        "*2\r\n$6\r\nSELECT\r\n$1\r\n1\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nother\r\n",
+        "*1\r\n$6\r\nDBSIZE\r\n",
+        "*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n",
+        "*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n",
+        "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        "*1\r\n$6\r\nDBSIZE\r\n",
+    } };
+    var test_logger = logging.TestLogger.init();
+
+    var database_zero = DefaultStorage.init(testing.io, testing.allocator);
+    var database_one = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try persistence.KgcPersistence.init(
+        testing.io,
+        testing.allocator,
+        &persistence_state,
+        "command-registry-behavior.kgc",
+    );
+    var memory_store = store.MemoryStore.init(
+        testing.allocator,
+        &.{ database_zero.storage(), database_one.storage() },
+        kgc.snapshot(),
+        null,
+    );
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    serve(
+        fake_io.io(),
+        test_logger.logger(),
+        .{ .socket = .{ .handle = 1, .address = undefined } },
+        &data_store,
+        testing.allocator,
+        1024,
+        &never_stop_requested,
+    );
+
+    try testing.expectEqualStrings(
+        "+OK\r\n" ++
+            "$5\r\nvalue\r\n" ++
+            "-ERR wrong number of arguments\r\n" ++
+            "$5\r\nvalue\r\n" ++
+            "-ERR wrong number of arguments\r\n" ++
+            "$5\r\nvalue\r\n" ++
+            ":1\r\n" ++
+            "+OK\r\n" ++
+            "$-1\r\n" ++
+            "+OK\r\n" ++
+            ":1\r\n" ++
+            "+OK\r\n" ++
+            ":1\r\n" ++
+            "$-1\r\n" ++
+            ":0\r\n",
+        fake_io.written(),
+    );
+    try testing.expectEqual(15, fake_io.next_request);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+    try testing.expectEqual(0, fake_io.close_calls);
+}
+
 test "a malformed protocol request gets its fixed response without an error event" {
     const testing = std.testing;
     var fake_io: TestConnectionIo = .{ .requests = &.{"?\r\n"} };

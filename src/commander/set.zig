@@ -41,18 +41,6 @@ fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: 
     return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
 
-const schema: Schema.Interface.SchemaDefinition = .{
-    .required = 2,
-    .options = &.{
-        .{
-            .keyword = "nx",
-            .repeatable = false,
-            .group = Schema.Interface.OptionGroup.condition,
-            .arity = 0,
-        },
-    },
-};
-
 fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) anyerror!Request.SetRequest {
     var pos: usize = 0;
     var req: Request.SetRequest = .{
