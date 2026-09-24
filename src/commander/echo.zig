@@ -21,10 +21,6 @@ const vtable = Commander.VTable{
 fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Echo = @ptrCast(@alignCast(ptr));
 
-    if (self.arguments.len != 1) {
-        return error.WrongNumberArguments;
-    }
-
     const value: resp.RESPValue = switch (self.arguments[0]) {
         .bulk_string => |maybe_string| .{ .bulk_string = maybe_string orelse return Commander.Error.MalformedCommandRequest },
         else => return Commander.Error.UnsupportedArgumentType,

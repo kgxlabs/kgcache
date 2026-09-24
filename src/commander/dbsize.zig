@@ -16,12 +16,7 @@ pub fn commander(self: *DBSize) Commander {
 
 const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
-fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
-    const self: *DBSize = @ptrCast(@alignCast(ptr));
-    if (self.arguments.len != 0) {
-        return error.WrongNumberArguments;
-    }
-
+fn execute(_: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
     const size = try data_store.dbsize(client_state.db_index);
     return Commander.Result.borrowed(.{ .integer = @intCast(size) });
 }
@@ -58,16 +53,4 @@ test "execute delegates to the store dbsize operation" {
     defer result.deinit();
     try testing.expectEqual(@as(i64, 42), result.value.integer);
     try testing.expectEqual(1, mock_store.dbsize_calls);
-}
-
-test "rejects arguments" {
-    const testing = std.testing;
-
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "DBSIZE" },
-        .{ .bulk_string = "unexpected" },
-    };
-    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
-
-    try testing.expectError(error.WrongNumberArguments, TestHelpers.executeWithMemoryStore(command));
 }

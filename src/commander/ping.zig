@@ -21,7 +21,6 @@ const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
 
 fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Ping = @ptrCast(@alignCast(ptr));
-    if (self.arguments.len > 1) return error.WrongNumberArguments;
     if (self.arguments.len == 0) return Commander.Result.borrowed(.{ .simple_string = "PONG" });
 
     const message = try command_arguments.bulkString(self.arguments[0]);

@@ -64,10 +64,6 @@ fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) anyerror!Request.SetRequest
         .keepttl = false,
     };
 
-    if (argv.len < schema.required) {
-        return Commander.Error.WrongNumberArguments;
-    }
-
     req.key = try command_arguments.bulkString(argv[pos]);
     pos += 1;
 

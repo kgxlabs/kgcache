@@ -17,72 +17,24 @@ pub const Set = @import("commander/set.zig");
 pub const Error = Commander.Error;
 const MockStore = @import("store/mock_store.zig");
 
-const CommandKind = enum {
-    bgrewriteaof,
-    bgsave,
-    command,
-    dbsize,
-    del,
-    echo,
-    get,
-    ping,
-    select,
-    save,
-    set,
-
-    fn parse(keyword: []const u8) Error!CommandKind {
-        if (std.ascii.eqlIgnoreCase(keyword, "bgrewriteaof")) return .bgrewriteaof;
-        if (std.ascii.eqlIgnoreCase(keyword, "bgsave")) return .bgsave;
-        if (std.ascii.eqlIgnoreCase(keyword, "command")) return .command;
-        if (std.ascii.eqlIgnoreCase(keyword, "dbsize")) return .dbsize;
-        if (std.ascii.eqlIgnoreCase(keyword, "del")) return .del;
-        if (std.ascii.eqlIgnoreCase(keyword, "echo")) return .echo;
-        if (std.ascii.eqlIgnoreCase(keyword, "get")) return .get;
-        if (std.ascii.eqlIgnoreCase(keyword, "ping")) return .ping;
-        if (std.ascii.eqlIgnoreCase(keyword, "save")) return .save;
-        if (std.ascii.eqlIgnoreCase(keyword, "select")) return .select;
-        if (std.ascii.eqlIgnoreCase(keyword, "set")) return .set;
-
-        return error.UnknownCommand;
-    }
-};
-
 pub fn init(allocator: std.mem.Allocator, value: resp.RESPValue) Error!Commander {
-    const command_kind = try parseKeyword(value);
+    const keyword = try parseKeyword(value);
+    const definition = CommandRegistry.find(keyword) orelse return error.UnknownCommand;
     const arguments = try parseArguments(value);
 
-    return switch (command_kind) {
-        .bgrewriteaof => try create(BgRewriteAof, allocator, arguments),
-        .bgsave => try create(BgSave, allocator, arguments),
-        .command => try create(Command, allocator, arguments),
-        .dbsize => try create(DBSize, allocator, arguments),
-        .del => try create(Del, allocator, arguments),
-        .echo => try create(Echo, allocator, arguments),
-        .get => try create(Get, allocator, arguments),
-        .ping => try create(Ping, allocator, arguments),
-        .save => try create(Save, allocator, arguments),
-        .select => try create(Select, allocator, arguments),
-        .set => try create(Set, allocator, arguments),
-    };
+    if (!definition.arity.accepts(arguments.len)) return error.WrongNumberArguments;
+
+    return definition.factory(allocator, arguments);
 }
 
-fn create(comptime T: type, allocator: std.mem.Allocator, arguments: []resp.RESPValue) Error!Commander {
-    const implementation = try allocator.create(T);
-    implementation.* = .{
-        .allocator = allocator,
-        .arguments = arguments,
-    };
-    return implementation.commander();
-}
-
-fn parseKeyword(value: resp.RESPValue) Error!CommandKind {
+fn parseKeyword(value: resp.RESPValue) Error![]const u8 {
     return switch (value) {
         .array => |maybe_commands| {
             const commands = maybe_commands orelse return error.UnknownCommand;
             if (commands.len == 0) return error.MalformedCommandRequest;
 
             return switch (commands[0]) {
-                .bulk_string => |maybe_keyword| CommandKind.parse(maybe_keyword orelse return error.UnknownCommand),
+                .bulk_string => |maybe_keyword| maybe_keyword orelse error.UnknownCommand,
                 else => error.UnsupportedKeyword,
             };
         },
@@ -118,6 +70,25 @@ test "reject empty command array" {
     try testing.expectError(error.MalformedCommandRequest, init(testing.allocator, .{ .array = &values }));
 }
 
+test "reject unsupported command input shapes" {
+    const testing = std.testing;
+
+    var non_bulk_keyword = [_]resp.RESPValue{.{ .integer = 1 }};
+    try testing.expectError(
+        error.UnsupportedKeyword,
+        init(testing.allocator, .{ .array = &non_bulk_keyword }),
+    );
+
+    var nested_argument = [_]resp.RESPValue{
+        .{ .bulk_string = "GET" },
+        .{ .array = null },
+    };
+    try testing.expectError(
+        error.UnsupportedArgumentType,
+        init(testing.allocator, .{ .array = &nested_argument }),
+    );
+}
+
 fn executeWithMockStore(keyword: []const u8, arguments: []const resp.RESPValue, mock_store: *MockStore) anyerror!Commander.Result {
     var request: [3]resp.RESPValue = undefined;
     request[0] = .{ .bulk_string = keyword };
@@ -131,25 +102,36 @@ fn executeWithMockStore(keyword: []const u8, arguments: []const resp.RESPValue, 
     return command.execute(std.testing.io, &data_store, &client_state);
 }
 
-test "invalid arity returns before any store operation" {
+test "invalid argument counts have no command effects" {
     const testing = std.testing;
     const arguments = [_]resp.RESPValue{
         .{ .bulk_string = "key" },
         .{ .bulk_string = "extra" },
     };
     const cases = .{
-        .{ "PING", 2 },
+        .{ "BGREWRITEAOF", 1 },
+        .{ "BGSAVE", 2 },
+        .{ "COMMAND", 0 },
+        .{ "DBSIZE", 1 },
+        .{ "DEL", 0 },
+        .{ "ECHO", 0 },
+        .{ "ECHO", 2 },
         .{ "GET", 0 },
         .{ "GET", 2 },
+        .{ "PING", 2 },
         .{ "SAVE", 1 },
-        .{ "BGSAVE", 2 },
-        .{ "BGREWRITEAOF", 1 },
+        .{ "SELECT", 0 },
+        .{ "SELECT", 2 },
+        .{ "SET", 1 },
     };
 
     inline for (cases) |case| {
         var mock_store = MockStore.init();
         try testing.expectError(error.WrongNumberArguments, executeWithMockStore(case[0], arguments[0..case[1]], &mock_store));
+        try testing.expectEqual(@as(usize, 0), mock_store.dbsize_calls);
         try testing.expectEqual(@as(usize, 0), mock_store.get_calls);
+        try testing.expectEqual(@as(usize, 0), mock_store.remove_calls);
+        try testing.expectEqual(@as(usize, 0), mock_store.set_calls);
         try testing.expectEqual(@as(usize, 0), mock_store.save_calls);
         try testing.expectEqual(@as(usize, 0), mock_store.bgsave_calls);
         try testing.expectEqual(@as(usize, 0), mock_store.bgrewriteaof_calls);
@@ -169,34 +151,69 @@ test "ping returns PONG or the supplied message" {
     try testing.expectEqualStrings("hello", message_result.value.bulk_string.?);
 }
 
-test "valid arity delegates to the store" {
+test "command names are case-insensitive" {
     const testing = std.testing;
     var mock_store = MockStore.init();
+
+    var result = try executeWithMockStore("pInG", &.{}, &mock_store);
+    defer result.deinit();
+
+    try testing.expectEqualStrings("PONG", result.value.simple_string);
+}
+
+test "supported command names keep their behavior" {
+    const testing = std.testing;
+    var mock_store = MockStore.init();
+
+    var command_result = try executeWithMockStore("COMMAND", &.{.{ .bulk_string = "INFO" }}, &mock_store);
+    defer command_result.deinit();
+    try testing.expectEqualStrings("INFO", command_result.value.bulk_string.?);
+
+    mock_store.dbsize_result = 42;
+    var dbsize_result = try executeWithMockStore("DBSIZE", &.{}, &mock_store);
+    defer dbsize_result.deinit();
+    try testing.expectEqual(@as(i64, 42), dbsize_result.value.integer);
+
+    var del_result = try executeWithMockStore("DEL", &.{.{ .bulk_string = "key" }}, &mock_store);
+    defer del_result.deinit();
+    try testing.expectEqual(@as(i64, 0), del_result.value.integer);
+
+    var echo_result = try executeWithMockStore("ECHO", &.{.{ .bulk_string = "hello" }}, &mock_store);
+    defer echo_result.deinit();
+    try testing.expectEqualStrings("hello", echo_result.value.bulk_string.?);
 
     var get_result = try executeWithMockStore("GET", &.{.{ .bulk_string = "key" }}, &mock_store);
     defer get_result.deinit();
     try testing.expect(get_result.value.bulk_string == null);
-    try testing.expectEqual(@as(usize, 1), mock_store.get_calls);
 
     var save_result = try executeWithMockStore("SAVE", &.{}, &mock_store);
     defer save_result.deinit();
     try testing.expectEqualStrings("OK", save_result.value.simple_string);
-    try testing.expectEqual(@as(usize, 1), mock_store.save_calls);
 
     var bgsave_result = try executeWithMockStore("BGSAVE", &.{}, &mock_store);
     defer bgsave_result.deinit();
     try testing.expectEqualStrings("Background saving started", bgsave_result.value.simple_string);
 
     mock_store.bgsave_result = .scheduled;
-    var scheduled_result = try executeWithMockStore("BGSAVE", &.{.{ .bulk_string = "sChEdUlE" }}, &mock_store);
-    defer scheduled_result.deinit();
-    try testing.expectEqualStrings("Background saving scheduled", scheduled_result.value.simple_string);
-    try testing.expectEqual(@as(usize, 2), mock_store.bgsave_calls);
+    var scheduled_bgsave_result = try executeWithMockStore("BGSAVE", &.{.{ .bulk_string = "sChEdUlE" }}, &mock_store);
+    defer scheduled_bgsave_result.deinit();
+    try testing.expectEqualStrings("Background saving scheduled", scheduled_bgsave_result.value.simple_string);
 
     var rewrite_result = try executeWithMockStore("BGREWRITEAOF", &.{}, &mock_store);
     defer rewrite_result.deinit();
     try testing.expectEqualStrings("Background append only file rewriting started", rewrite_result.value.simple_string);
-    try testing.expectEqual(@as(usize, 1), mock_store.bgrewriteaof_calls);
+
+    var select_result = try executeWithMockStore("SELECT", &.{.{ .bulk_string = "0" }}, &mock_store);
+    defer select_result.deinit();
+    try testing.expectEqualStrings("OK", select_result.value.simple_string);
+
+    var set_result = try executeWithMockStore(
+        "SET",
+        &.{ .{ .bulk_string = "key" }, .{ .bulk_string = "value" } },
+        &mock_store,
+    );
+    defer set_result.deinit();
+    try testing.expectEqualStrings("OK", set_result.value.simple_string);
 }
 
 test "BGSAVE rejects an invalid option before calling the store" {
