@@ -59,13 +59,8 @@ pub const KeySpec = union(enum) {
 
 pub const Flag = enum {
     admin,
-    denyoom,
     fast,
-    loading,
-    no_async_loading,
-    noscript,
     readonly,
-    stale,
     write,
 };
 

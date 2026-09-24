@@ -3,6 +3,7 @@ const resp = @import("resp.zig");
 pub const BgRewriteAof = @import("commander/bgrewriteaof.zig");
 pub const BgSave = @import("commander/bgsave.zig");
 pub const CommandDefinition = @import("commander/definition.zig").Definition;
+pub const CommandRegistry = @import("commander/registry.zig");
 pub const Commander = @import("commander/interface.zig");
 pub const Command = @import("commander/command.zig");
 pub const DBSize = @import("commander/dbsize.zig");
