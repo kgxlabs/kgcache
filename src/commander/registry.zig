@@ -18,6 +18,18 @@ const Arity = command_definition.Arity;
 const Definition = command_definition.Definition;
 const Factory = command_definition.Factory;
 
+pub fn find(name: []const u8) ?*const Definition {
+    for (0..definitions.len) |index| {
+        const definition = &definitions[index];
+        if (std.ascii.eqlIgnoreCase(name, definition.name)) return definition;
+    }
+    return null;
+}
+
+pub fn all() []const Definition {
+    return definitions[0..];
+}
+
 fn factoryFor(comptime T: type) Factory {
     return struct {
         fn create(allocator: std.mem.Allocator, arguments: []resp.RESPValue) Commander.Error!Commander {
@@ -142,5 +154,72 @@ const definitions = [_]Definition{
 };
 
 comptime {
-    _ = definitions;
+    validateDefinitions();
+}
+
+fn validateDefinitions() void {
+    inline for (definitions, 0..) |definition, index| {
+        validateName(definition);
+        validateArity(definition);
+        validateKeys(definition);
+
+        inline for (definitions, 0..) |other, other_index| {
+            if (other_index > index and std.ascii.eqlIgnoreCase(definition.name, other.name)) {
+                invalidDefinition(definition.name, "duplicates command `" ++ other.name ++ "`");
+            }
+        }
+    }
+}
+
+fn validateName(comptime definition: Definition) void {
+    if (definition.name.len == 0) invalidDefinition(definition.name, "has an empty name");
+
+    inline for (definition.name) |byte| {
+        const valid = std.ascii.isLower(byte) or
+            std.ascii.isDigit(byte) or
+            byte == '_' or
+            byte == '-' or
+            byte == '.';
+        if (!valid) invalidDefinition(definition.name, "name must be lowercase ASCII");
+    }
+}
+
+fn validateArity(comptime definition: Definition) void {
+    if (definition.arity.maximum) |maximum| {
+        if (definition.arity.minimum > maximum) {
+            invalidDefinition(definition.name, "minimum arity exceeds maximum arity");
+        }
+    }
+}
+
+fn validateKeys(comptime definition: Definition) void {
+    switch (definition.keys) {
+        .none => {},
+        .range => |key_range| {
+            if (key_range.step == 0) invalidDefinition(definition.name, "key step must be greater than zero");
+            if (key_range.first >= definition.arity.minimum) {
+                invalidDefinition(definition.name, "first key index is outside required arguments");
+            }
+
+            switch (key_range.last) {
+                .remaining => {},
+                .index => |last| {
+                    if (last < key_range.first) {
+                        invalidDefinition(definition.name, "last key index precedes first key index");
+                    }
+                    if (last >= definition.arity.minimum) {
+                        invalidDefinition(definition.name, "last key index is outside required arguments");
+                    }
+                    if ((last - key_range.first) % key_range.step != 0) {
+                        invalidDefinition(definition.name, "last key index is not reachable by key step");
+                    }
+                },
+            }
+        },
+    }
+}
+
+fn invalidDefinition(comptime name: []const u8, comptime reason: []const u8) noreturn {
+    const label = if (name.len == 0) "<empty>" else name;
+    @compileError("invalid command definition `" ++ label ++ "`: " ++ reason);
 }
