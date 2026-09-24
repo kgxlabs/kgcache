@@ -64,8 +64,8 @@ const definitions = [_]Definition{
     .{
         .name = "command",
         .arity = Arity.atLeast(1),
-        .flags = &.{},
-        .categories = &.{ .connection, .slow },
+        .flags = &.{.fast},
+        .categories = &.{ .connection, .fast },
         .keys = .none,
         .factory = factoryFor(Command),
     },
