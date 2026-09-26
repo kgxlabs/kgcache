@@ -60,10 +60,9 @@ const definitions = [_]Definition{
         .keys = .none,
         .factory = factoryFor(BgSave),
     },
-    // Transitional until Redis-compatible COMMAND introspection replaces the placeholder.
     .{
         .name = "command",
-        .arity = Arity.atLeast(1),
+        .arity = Arity.atLeast(0),
         .flags = &.{.fast},
         .categories = &.{ .connection, .fast },
         .keys = .none,
@@ -87,6 +86,7 @@ const definitions = [_]Definition{
                 .first = 0,
                 .last = .remaining,
                 .step = 1,
+                .flags = &.{ .RM, .delete },
             },
         },
         .factory = factoryFor(Del),
@@ -109,6 +109,7 @@ const definitions = [_]Definition{
                 .first = 0,
                 .last = .{ .index = 0 },
                 .step = 1,
+                .flags = &.{ .RO, .access },
             },
         },
         .factory = factoryFor(Get),
@@ -147,6 +148,7 @@ const definitions = [_]Definition{
                 .first = 0,
                 .last = .{ .index = 0 },
                 .step = 1,
+                .flags = &.{ .RW, .access, .update, .variable_flags },
             },
         },
         .factory = factoryFor(Set),
@@ -197,6 +199,7 @@ fn validateKeys(comptime definition: Definition) void {
         .none => {},
         .range => |key_range| {
             if (key_range.step == 0) invalidDefinition(definition.name, "key step must be greater than zero");
+            if (key_range.flags.len == 0) invalidDefinition(definition.name, "key flags must not be empty");
             if (key_range.first >= definition.arity.minimum) {
                 invalidDefinition(definition.name, "first key index is outside required arguments");
             }

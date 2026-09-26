@@ -54,7 +54,19 @@ pub const KeySpec = union(enum) {
             remaining,
         },
         step: usize,
+        flags: []const KeyFlag,
     },
+};
+
+pub const KeyFlag = enum {
+    RO,
+    RW,
+    OW,
+    RM,
+    access,
+    update,
+    delete,
+    variable_flags,
 };
 
 pub const Flag = enum {

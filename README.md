@@ -108,7 +108,7 @@ zig build test
 
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, transactions, or RESP3.
 - The server processes one parsed request per connection read, into a per-connection buffer (1 KiB by default, configurable). Pipelining and requests split across reads are not supported.
-- `COMMAND` is a placeholder, not Redis-compatible introspection.
+- `COMMAND` supports registry-based introspection. `COMMAND DOCS` and module filtering are not supported.
 - The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`. 
 
 ## License

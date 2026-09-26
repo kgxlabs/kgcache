@@ -14,9 +14,21 @@ This reference describes the currently implemented command subset. Full Redis co
 | `SAVE` | Writes a `.kgc` snapshot of all databases to disk (see [Configuration](CONFIGURATION.md) for `snapshot-path`), and blocks the calling connection until the write finishes. Returns an error if the write fails or a save is already in progress. |
 | `BGSAVE [SCHEDULE]` | Starts a background snapshot and returns `Background saving started`. The optional `SCHEDULE` token is case-insensitive. Both forms return `Background saving scheduled` when an AOF rewrite is active and background persistence is exclusive. The save starts after the rewrite finishes. An active save is still an error. See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
 | `BGREWRITEAOF` | Starts an AOF rewrite and returns `Background append only file rewriting started`. It returns `Background append only file rewriting scheduled` when a save is active and background persistence is exclusive. The rewrite starts after the save finishes. AOF being off or an active rewrite remains an error. See [Append-only file](AOF.md#rewrite). |
-| `COMMAND <value>` | Placeholder command that returns its first argument; Redis command introspection is not implemented. |
+| `COMMAND` | Returns metadata for the supported commands. |
+| `COMMAND COUNT` | Returns the number of supported commands. |
+| `COMMAND LIST [FILTERBY PATTERN <pattern> \| FILTERBY ACLCAT <category>]` | Lists supported command names. Patterns support `*` and `?`. |
+| `COMMAND INFO [name ...]` | Returns metadata for the named commands, or all commands when no names are given. Unknown names produce a null array entry. |
+| `COMMAND GETKEYS <command> [arguments ...]` | Returns the key arguments of a supported command. |
+| `COMMAND GETKEYSANDFLAGS <command> [arguments ...]` | Returns each key and its access flags. |
 
 Command names are case-insensitive.
+
+`COMMAND` reports metadata from the command registry. Its RESP2 metadata entries
+have ten fields: name, arity, flags, first key, last key, key step, ACL
+categories, tips, key specifications, and subcommands. Tips and subcommand
+details are currently empty. `COMMAND DOCS` and `COMMAND LIST FILTERBY MODULE`
+are not supported. Key extraction validates the command's argument count and
+types, but it does not validate every command-specific option.
 
 `SAVE` and `BGSAVE` share one "a save is already running" guard, and only one
 AOF rewrite can run at a time. With the default `exclusive-bg-persistence yes`,
