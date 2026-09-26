@@ -433,6 +433,12 @@ test "serialize array" {
     try expectSerialized(.{ .array = &values }, "*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n");
 }
 
+test "serialize null and empty arrays differently" {
+    var empty = [_]RESPValue{};
+    try expectSerialized(.{ .array = null }, "*-1\r\n");
+    try expectSerialized(.{ .array = &empty }, "*0\r\n");
+}
+
 test "reject unknown RESP type" {
     var p = parser("!\r\n");
 
