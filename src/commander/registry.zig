@@ -60,10 +60,9 @@ const definitions = [_]Definition{
         .keys = .none,
         .factory = factoryFor(BgSave),
     },
-    // Transitional until Redis-compatible COMMAND introspection replaces the placeholder.
     .{
         .name = "command",
-        .arity = Arity.atLeast(1),
+        .arity = Arity.atLeast(0),
         .flags = &.{.fast},
         .categories = &.{ .connection, .fast },
         .keys = .none,

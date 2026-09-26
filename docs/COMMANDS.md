@@ -14,7 +14,7 @@ This reference describes the currently implemented command subset. Full Redis co
 | `SAVE` | Writes a `.kgc` snapshot of all databases to disk (see [Configuration](CONFIGURATION.md) for `snapshot-path`), and blocks the calling connection until the write finishes. Returns an error if the write fails or a save is already in progress. |
 | `BGSAVE [SCHEDULE]` | Starts a background snapshot and returns `Background saving started`. The optional `SCHEDULE` token is case-insensitive. Both forms return `Background saving scheduled` when an AOF rewrite is active and background persistence is exclusive. The save starts after the rewrite finishes. An active save is still an error. See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
 | `BGREWRITEAOF` | Starts an AOF rewrite and returns `Background append only file rewriting started`. It returns `Background append only file rewriting scheduled` when a save is active and background persistence is exclusive. The rewrite starts after the save finishes. AOF being off or an active rewrite remains an error. See [Append-only file](AOF.md#rewrite). |
-| `COMMAND <value>` | Placeholder command that returns its first argument; Redis command introspection is not implemented. |
+| `COMMAND [COUNT \| LIST \| INFO \| GETKEYS \| GETKEYSANDFLAGS]` | Dispatch is wired, but introspection handlers are not implemented yet. Recognized forms return an unsupported option error. |
 
 Command names are case-insensitive.
 

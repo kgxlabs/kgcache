@@ -99,7 +99,6 @@ test "commands reject invalid argument counts" {
     const cases = .{
         .{ "BGREWRITEAOF", 1 },
         .{ "BGSAVE", 2 },
-        .{ "COMMAND", 0 },
         .{ "DBSIZE", 1 },
         .{ "DEL", 0 },
         .{ "ECHO", 0 },
@@ -163,13 +162,26 @@ test "command names are case-insensitive" {
     try testing.expectEqualStrings("PONG", result.value.simple_string);
 }
 
-test "supported command names keep their behavior" {
+test "COMMAND routes bare and named forms to their handlers" {
     const testing = std.testing;
     var mock_store = MockStore.init();
 
-    var command_result = try executeWithMockStore("COMMAND", &.{.{ .bulk_string = "INFO" }}, &mock_store);
-    defer command_result.deinit();
-    try testing.expectEqualStrings("INFO", command_result.value.bulk_string.?);
+    try testing.expectError(error.UnsupportedOption, executeWithMockStore("COMMAND", &.{}, &mock_store));
+    for ([_][]const u8{ "cOuNt", "LIST", "INFO", "GETKEYS", "GETKEYSANDFLAGS" }) |name| {
+        try testing.expectError(
+            error.UnsupportedOption,
+            executeWithMockStore("COMMAND", &.{.{ .bulk_string = name }}, &mock_store),
+        );
+    }
+    try testing.expectError(
+        error.UnsupportedArgumentType,
+        executeWithMockStore("COMMAND", &.{.{ .integer = 1 }}, &mock_store),
+    );
+}
+
+test "supported command names keep their behavior" {
+    const testing = std.testing;
+    var mock_store = MockStore.init();
 
     mock_store.dbsize_result = 42;
     var dbsize_result = try executeWithMockStore("DBSIZE", &.{}, &mock_store);
