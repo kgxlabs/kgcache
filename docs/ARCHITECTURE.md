@@ -36,8 +36,8 @@ operations with a mutex-backed transaction boundary.
 ### Command registry
 
 The command registry is the runtime source of command metadata. Request
-dispatch uses its command names and accepted argument counts. Future command
-introspection will read the same definitions for flags, categories, and key
+dispatch uses its command names and accepted argument counts. `COMMAND`
+introspection reads the same definitions for flags, categories, and key
 positions.
 
 Command handlers keep value-dependent validation and execution. The registry

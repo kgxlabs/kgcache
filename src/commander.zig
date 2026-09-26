@@ -166,13 +166,18 @@ test "COMMAND routes bare and named forms to their handlers" {
     const testing = std.testing;
     var mock_store = MockStore.init();
 
-    try testing.expectError(error.UnsupportedOption, executeWithMockStore("COMMAND", &.{}, &mock_store));
-    for ([_][]const u8{ "cOuNt", "LIST", "INFO", "GETKEYS", "GETKEYSANDFLAGS" }) |name| {
-        try testing.expectError(
-            error.UnsupportedOption,
-            executeWithMockStore("COMMAND", &.{.{ .bulk_string = name }}, &mock_store),
-        );
-    }
+    var all = try executeWithMockStore("COMMAND", &.{}, &mock_store);
+    defer all.deinit();
+    try testing.expectEqual(@as(usize, 11), all.value.array.?.len);
+
+    var count = try executeWithMockStore("COMMAND", &.{.{ .bulk_string = "cOuNt" }}, &mock_store);
+    defer count.deinit();
+    try testing.expectEqual(@as(i64, 11), count.value.integer);
+
+    try testing.expectError(
+        error.UnsupportedOption,
+        executeWithMockStore("COMMAND", &.{.{ .bulk_string = "UNKNOWN" }}, &mock_store),
+    );
     try testing.expectError(
         error.UnsupportedArgumentType,
         executeWithMockStore("COMMAND", &.{.{ .integer = 1 }}, &mock_store),

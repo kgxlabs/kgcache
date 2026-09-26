@@ -319,7 +319,7 @@ fn serializeErrorString(allocator: std.mem.Allocator, err_msg: []const u8) std.m
 
 fn serializeArray(allocator: std.mem.Allocator, maybe_value: ?[]RESPValue) std.mem.Allocator.Error![]const u8 {
     if (maybe_value == null) {
-        return std.fmt.allocPrint(allocator, "*0\r\n", .{});
+        return std.fmt.allocPrint(allocator, "*-1\r\n", .{});
     }
 
     var list: std.ArrayList(u8) = .empty;

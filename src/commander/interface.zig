@@ -29,6 +29,7 @@ pub const VTable = struct {
 pub const Result = struct {
     value: resp.RESPValue,
     owned_object: ?object.Owned = null,
+    owned_arena: ?*std.heap.ArenaAllocator = null,
 
     pub fn borrowed(value: resp.RESPValue) Result {
         return .{ .value = value };
@@ -44,8 +45,17 @@ pub const Result = struct {
         };
     }
 
+    pub fn inArena(value: resp.RESPValue, arena: *std.heap.ArenaAllocator) Result {
+        return .{ .value = value, .owned_arena = arena };
+    }
+
     pub fn deinit(self: *Result) void {
         if (self.owned_object) |*owned_value| owned_value.deinit();
+        if (self.owned_arena) |arena| {
+            const allocator = arena.child_allocator;
+            arena.deinit();
+            allocator.destroy(arena);
+        }
         self.* = undefined;
     }
 };
