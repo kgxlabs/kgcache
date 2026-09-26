@@ -78,6 +78,7 @@ kgcache /absolute/path/to/kgcache.conf
 | [Commands](docs/COMMANDS.md) | Supported commands, `SET` options, and compatibility notes |
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
 | [Architecture](docs/ARCHITECTURE.md) | Role within kgx, request flow, design trade-offs, repository layout |
+| [Test organization](docs/TESTING.md) | Where Zig tests and fixtures belong, test discovery, and checks for test moves |
 | [Errors and logging](docs/ERRORS.md) | Error propagation, terminal reports, and trace availability |
 | [Persistence](docs/PERSISTENCE.md) | Short comparison of snapshots and AOF |
 | [Snapshots](docs/SNAPSHOTS.md) | `SAVE`, `BGSAVE`, child cleanup, and automatic saving |
@@ -94,6 +95,8 @@ zig build test
 
 The tests cover RESP parsing, command dispatch, storage, expiration,
 snapshots, AOF loading, fsync policies, and AOF rewrites.
+
+See [Test organization](docs/TESTING.md) when adding or moving tests.
 
 Useful commands:
 
