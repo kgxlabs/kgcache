@@ -16,7 +16,7 @@ The platform vision and roadmap belong at the [kgxlabs organization](https://git
 | Address | `127.0.0.1:6379` by default; see [Configuration](docs/CONFIGURATION.md) |
 | Runtime | Zig 0.16.0+ |
 | Data model | Process-local string keys and values |
-| Commands | See [Commands](docs/COMMANDS.md) |
+| Commands | See [Commands](docs/COMMAND.md) |
 | Persistence | `.kgc` snapshots and an optional disk-backed AOF journal; see [Persistence](docs/PERSISTENCE.md) and [AOF](docs/AOF.md) |
 
 ## Quick start
@@ -75,7 +75,7 @@ kgcache /absolute/path/to/kgcache.conf
 
 | Doc | Covers |
 | --- | --- |
-| [Commands](docs/COMMANDS.md) | Supported commands, `SET` options, and compatibility notes |
+| [Commands](docs/COMMAND.md) | Supported commands, `SET` options, and compatibility notes |
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
 | [Architecture](docs/ARCHITECTURE.md) | Role within kgx, request flow, design trade-offs, repository layout |
 | [Test organization](docs/TESTING.md) | Where Zig tests and fixtures belong, test discovery, and checks for test moves |
