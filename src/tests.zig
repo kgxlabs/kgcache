@@ -1,11 +1,11 @@
 test {
     _ = @import("resp.zig");
-    _ = @import("commander.zig");
+    _ = @import("commander_tests.zig");
     _ = @import("commander/echo.zig");
     _ = @import("commander/ping.zig");
     _ = @import("commander/dbsize.zig");
     _ = @import("store.zig");
-    _ = @import("store/mem_store.zig");
+    _ = @import("store/mem_store_tests.zig");
     _ = @import("store/mock_store.zig");
     _ = @import("entry.zig");
     _ = @import("lock.zig");
@@ -14,16 +14,19 @@ test {
     _ = @import("object.zig");
     _ = @import("expiration.zig");
     _ = @import("cron.zig");
-    _ = @import("connection.zig");
+    _ = @import("connection_tests.zig");
     _ = @import("connection_manager.zig");
+    _ = @import("connection_manager_tests.zig");
     _ = @import("logger/test_logger.zig");
     _ = @import("config.zig");
     _ = @import("config_parser.zig");
     _ = @import("persistence/manifest.zig");
-    _ = @import("persistence_state.zig");
-    _ = @import("persistence/kgc.zig");
+    _ = @import("persistence_state_tests.zig");
+    _ = @import("persistence/kgc_tests.zig");
     _ = @import("persistence/aof.zig");
+    _ = @import("persistence/aof_tests.zig");
     _ = @import("persistence/aof_loader.zig");
     _ = @import("server.zig");
+    _ = @import("server_tests.zig");
     _ = @import("main.zig");
 }
