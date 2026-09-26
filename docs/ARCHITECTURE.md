@@ -122,7 +122,7 @@ and trace availability.
 │   └── tests.zig                # Unit-test entry point
 ├── docs/                        # Configuration, commands, and architecture reference
 │   ├── CONFIGURATION.md
-│   ├── COMMANDS.md
+│   ├── COMMAND.md
 │   ├── ARCHITECTURE.md          # This file: overview, design direction, repo map
 │   ├── PERSISTENCE.md           # Snapshot and AOF overview
 │   ├── SNAPSHOTS.md             # SAVE, BGSAVE, and automatic saving
