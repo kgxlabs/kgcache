@@ -273,6 +273,7 @@ const FinishRewriteJournal = struct {
         .dispatchPendingRewrite = dispatchPendingRewrite,
         .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
+        .getRewriteResolution = getRewriteResolution,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
         .reconcile = reconcile,
@@ -309,6 +310,10 @@ const FinishRewriteJournal = struct {
         self.calls += 1;
         self.last_result = result;
         if (self.fail) return error.TestRewriteCompletion;
+    }
+
+    fn getRewriteResolution(_: *anyopaque) persistence.JournalPersistence.RewriteResolution {
+        return .none;
     }
 
     fn beginLoading(_: *anyopaque) void {}

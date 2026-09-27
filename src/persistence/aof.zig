@@ -53,6 +53,7 @@ const vtable: Journal.VTable = .{
     .dispatchPendingRewrite = dispatchPendingRewrite,
     .deinit = deinit,
     .finishRewrite = finishRewrite,
+    .getRewriteResolution = getRewriteResolution,
     .flush = flush,
     .prepareRecord = prepareRecord,
     .dueForRewrite = dueForRewrite,
@@ -651,6 +652,14 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     self._last_rewrite_attempt_ms = null;
 
     if (delete_error) |err| return err;
+}
+
+fn getRewriteResolution(ptr: *anyopaque) Journal.RewriteResolution {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    // A pending base still needs publication or rollback, even after its
+    // child has been reaped.
+    if (self._pending_base_seq != null) return .pending;
+    return if (self._rewrite_settled) .settled else .none;
 }
 
 pub fn flush(ptr: *anyopaque, now_ms: i64, options: Journal.FlushOptions) anyerror!void {

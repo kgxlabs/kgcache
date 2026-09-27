@@ -9,14 +9,9 @@ const cron = @import("cron.zig");
 const ConnectionManager = @import("connection_manager.zig");
 const time = @import("time.zig");
 const logging = @import("logger.zig");
+const persistence_drain = @import("persistence/drain.zig");
 
 const Server = @This();
-
-const PersistenceShutdownState = enum {
-    ready,
-    child_tracked,
-    aof_unresolved,
-};
 
 _io: std.Io,
 _allocator: std.mem.Allocator,
@@ -183,20 +178,13 @@ pub fn destroy(self: *Server) anyerror!void {
         cleanup_error = err;
     };
 
-    while (true) {
-        self.drainPersistenceChildren() catch |err| {
-            if (cleanup_error == null) cleanup_error = err;
-        };
+    const journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
+    const drain_result = persistence_drain.run(self._io, self._logger, &self._persistence_state, journal);
 
-        switch (self.persistenceShutdownState()) {
-            .ready => break,
-            .child_tracked => {
-                // A failed wait leaves its PID tracked. Keep the server and
-                // borrowed logger alive, then try the wait again.
-                self._io.sleep(.fromMilliseconds(100), .awake) catch {};
-            },
-            .aof_unresolved => return cleanup_error orelse error.AofRewriteUnsettled,
-        }
+    if (cleanup_error == null) cleanup_error = drain_result.err;
+    switch (drain_result.status) {
+        .complete => {},
+        .aof_unresolved => return cleanup_error orelse error.AofRewriteUnsettled,
     }
 
     if (self._aof) |*aof| {
@@ -213,134 +201,6 @@ pub fn destroy(self: *Server) anyerror!void {
     self._allocator.destroy(self);
 
     if (cleanup_error) |err| return err;
-}
-
-fn drainPersistenceChildren(self: *Server) !void {
-    var state_tx = self._persistence_state.beginUncancelable();
-    const kgc_state = self._persistence_state.kgcShutdownState();
-    const aof_state = self._persistence_state.aofShutdownState();
-    state_tx.end();
-
-    var drain_error: ?anyerror = null;
-    var log_buffer: [128]u8 = undefined;
-
-    switch (kgc_state) {
-        .no_child => {},
-        .child => |save| {
-            const message = std.fmt.bufPrint(
-                &log_buffer,
-                "server: waiting for BGSAVE child pid {d} during shutdown",
-                .{save.pid},
-            ) catch unreachable;
-            self._logger.info(message);
-
-            if (self._persistence_state.waitForKgcShutdown(time.nowMs(self._io))) |result| {
-                self.finishKgcDuringShutdown(result, &drain_error);
-            } else |err| {
-                self.recordDrainError(&drain_error, "server: failed to wait for BGSAVE child", err);
-            }
-        },
-    }
-
-    switch (aof_state) {
-        .no_child => {},
-        .completed => |result| self.finishAofDuringShutdown(result, &drain_error),
-        .child => |rewrite| {
-            const message = std.fmt.bufPrint(
-                &log_buffer,
-                "server: waiting for BGREWRITEAOF child pid {d} during shutdown",
-                .{rewrite.pid},
-            ) catch unreachable;
-            self._logger.info(message);
-
-            if (self._persistence_state.waitForAofShutdown()) |result| {
-                self.finishAofDuringShutdown(result, &drain_error);
-            } else |err| {
-                self.recordDrainError(&drain_error, "server: failed to wait for BGREWRITEAOF child", err);
-            }
-        },
-    }
-
-    if (drain_error) |err| return err;
-}
-
-fn finishKgcDuringShutdown(self: *Server, result: PersistenceState.KgcReapResult, drain_error: *?anyerror) void {
-    if (result.report_error) |err| {
-        self.recordDrainError(drain_error, "server: BGSAVE child failed", err);
-    } else if (result.status == .failed) {
-        self.recordDrainError(drain_error, "server: BGSAVE child failed", error.BackgroundSaveFailed);
-    }
-
-    var state_tx = self._persistence_state.beginUncancelable();
-    defer state_tx.end();
-    defer self._persistence_state.finishKgc();
-
-    if (result.status == .succeeded) {
-        self._persistence_state.markSaved(result.saved_change_count.?, time.nowMs(self._io)) catch |err| {
-            self.recordDrainError(drain_error, "server: failed to account for BGSAVE", err);
-        };
-    }
-}
-
-fn finishAofDuringShutdown(self: *Server, result: PersistenceState.AofReapResult, drain_error: *?anyerror) void {
-    if (result.report_error) |err| {
-        self.recordDrainError(drain_error, "server: BGREWRITEAOF child failed", err);
-    } else if (result.status == .failed) {
-        self.recordDrainError(drain_error, "server: BGREWRITEAOF child failed", error.AofRewriteFailed);
-    }
-
-    const backend = if (self._aof) |*aof| aof else {
-        self.recordDrainError(drain_error, "server: AOF rewrite has no backend", error.AofDisabled);
-        return;
-    };
-    const journal = backend.journal();
-    var journal_tx = journal.beginUncancelable();
-    defer journal_tx.end();
-
-    journal.finishRewrite(result.status) catch |err| {
-        self.recordDrainError(drain_error, "server: failed to finish AOF rewrite", err);
-
-        // Before manifest publication, the pending base is still present.
-        // Delete that base while keeping the cut incremental files.
-        if (backend._pending_base_seq != null) {
-            journal.finishRewrite(.failed) catch |rollback_err| {
-                self.recordDrainError(drain_error, "server: failed to roll back AOF rewrite", rollback_err);
-            };
-        }
-    };
-
-    if (backend._pending_base_seq == null and backend._rewrite_settled) {
-        var state_tx = self._persistence_state.beginUncancelable();
-        defer state_tx.end();
-        self._persistence_state.finishAof();
-    } else {
-        self.recordDrainError(drain_error, "server: AOF rewrite remains unsettled", error.AofRewriteUnsettled);
-    }
-}
-
-fn persistenceShutdownState(self: *Server) PersistenceShutdownState {
-    var state_tx = self._persistence_state.beginUncancelable();
-    defer state_tx.end();
-
-    switch (self._persistence_state.kgcShutdownState()) {
-        .no_child => {},
-        .child => return .child_tracked,
-    }
-    switch (self._persistence_state.aofShutdownState()) {
-        .no_child => {},
-        .child => return .child_tracked,
-        .completed => return .aof_unresolved,
-    }
-    if (self._aof) |*aof| {
-        // if there is still seq number of new base file, aof rewritting is not finished
-        if (aof._pending_base_seq != null) return .aof_unresolved;
-    }
-    return .ready;
-}
-
-fn recordDrainError(self: *Server, drain_error: *?anyerror, message: []const u8, err: anyerror) void {
-    self._logger.err(message, err, @errorReturnTrace());
-    if (drain_error.* == null) drain_error.* = err;
 }
 
 fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
