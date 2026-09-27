@@ -52,7 +52,7 @@ pub fn runRound(
             }
 
             // When batch size is reached, >= 25% expired => immediately start next batch on this db.
-            const expired_percentage = @divTrunc(expired_count * 100, batch_size);
+            const expired_percentage = @divTrunc(@as(i32, expired_count) * 100, batch_size);
             if (expired_percentage >= threshold) {
                 continue :batch;
             }
@@ -118,4 +118,29 @@ test "runRound visits every db in a round, not just the first" {
         try testing.expectEqual(0, data_storages[1].getExpirableCount());
     }
     try testing.expectEqual(1, next_start);
+}
+
+test "runRound expires multiple keys with the largest configured batch" {
+    const testing = std.testing;
+
+    var backend = storage.DefaultStorage.init(testing.io, testing.allocator);
+    defer backend.storage().deinit();
+    const data_storages = [_]storage.Interface{backend.storage()};
+
+    {
+        var tx = try data_storages[0].begin();
+        defer tx.end();
+        for ([_][]const u8{ "first", "second" }) |key| {
+            _ = try data_storages[0].put(key, .{ .string = "value" }, .{
+                .expires_at = time.nowMs(testing.io) - 1,
+            });
+        }
+    }
+
+    const config: Config = .{ .active_expire_batch_size = 127 };
+    _ = try runRound(testing.io, testing.allocator, &data_storages, 0, config);
+
+    var tx = try data_storages[0].begin();
+    defer tx.end();
+    try testing.expectEqual(0, data_storages[0].getExpirableCount());
 }

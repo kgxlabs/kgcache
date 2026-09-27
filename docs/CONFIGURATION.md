@@ -15,7 +15,7 @@ port 7000
 num-databases 4
 ```
 
-Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value that does not fit its type stops startup. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
+Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
 
 ## Directives
 
@@ -40,8 +40,27 @@ Blank lines and lines starting with `#` are ignored. Anything else is validated 
 | `auto-aof-rewrite-percentage` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
 | `auto-aof-rewrite-min-size` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
 | `aof-load-truncated` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
+| `bgsave-retry-delay-ms` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
 
 See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every directive documented inline.
+
+## Numeric ranges
+
+All limits are inclusive. `usize` is the size of a machine word in the server build.
+
+| Directive | Accepted range |
+| --- | --- |
+| `port` | 1 to 65535 |
+| `connection-buffer-size` | 1 to maximum `usize` |
+| `num-databases` | 1 to 4294967295 |
+| `cron-interval-ms` | 1 to 9223372036854775807 |
+| `active-expire-budget-ms` | 1 to 127 |
+| `active-expire-batch-size` | 1 to 127 |
+| `active-expire-threshold-percent` | 1 to 100 |
+| `save <seconds> <changes>` | `seconds`: 1 to 9223372036854775807; `changes`: 1 to 4294967295 |
+| `auto-aof-rewrite-percentage` | 0 to 4294967295; `0` disables automatic rewrites |
+| `auto-aof-rewrite-min-size` | 0 to maximum `usize` |
+| `bgsave-retry-delay-ms` | 0 to 9223372036854775807; `0` means no retry delay |
 
 ## `snapshot-path` gotchas
 
@@ -70,7 +89,9 @@ save 60 10000
 ```
 
 Each line is one rule. A rule matches when both its time and write count
-have been reached. A save starts when any rule matches.
+have been reached. A save starts when any rule matches. Both fields must be
+positive: `seconds` is at most 9223372036854775807 and `changes` is at most
+4294967295.
 
 With no `save` line, automatic saving is off. Manual `SAVE` and `BGSAVE`
 still work. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)

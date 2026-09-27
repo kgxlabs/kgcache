@@ -8,7 +8,7 @@
 # Format: one directive per line, `directive value`. Blank lines and lines
 # starting with `#` are ignored. Anything else must be a recognized
 # directive with a value -- an unknown directive, a missing value, or a
-# value that doesn't fit the directive's type all fail the server at
+# value outside the directive's accepted range all fail the server at
 # startup with a message on stderr, rather than being silently ignored.
 #
 # Run with: ./zig-out/bin/kgcache path/to/kgcache.conf
@@ -16,7 +16,7 @@
 # Address the TCP server binds to.
 # bind 127.0.0.1
 
-# TCP port the server listens on.
+# TCP port the server listens on. Range: 1 to 65535.
 # port 6379
 
 # Whether to set SO_REUSEADDR on the listening socket, which lets the
@@ -26,9 +26,11 @@
 
 # Size, in bytes, of the per-connection read buffer. A request (or a
 # pipelined batch of requests) larger than this is not yet supported.
+# Range: 1 to the maximum usize value for this build.
 # connection-buffer-size 1024
 
 # Number of selectable databases: SELECT 0 through num-databases - 1.
+# Range: 1 to 4294967295.
 # num-databases 16
 
 # Path to the on-disk snapshot file: loaded on startup if it exists, and
@@ -41,19 +43,23 @@
 
 # How often, in milliseconds, background work runs. This includes active
 # expiration, AOF flushing, save checks, and child-process cleanup.
+# Range: 1 to 9223372036854775807.
 # cron-interval-ms 100
 
 # Time budget, in milliseconds, the active-expiration worker spends per
 # sweep before yielding, regardless of how many databases still have
 # expirable keys left unchecked.
+# Range: 1 to 127.
 # active-expire-budget-ms 10
 
 # Number of keys sampled per expiration batch, per database, before
 # deciding whether to keep going or move to the next database.
+# Range: 1 to 127.
 # active-expire-batch-size 20
 
 # If at least this percentage of a batch came back expired, immediately
 # run another batch on the same database instead of moving on.
+# Range: 1 to 100.
 # active-expire-threshold-percent 25
 
 # Prevent BGSAVE and BGREWRITEAOF from running at the same time. Keeping
@@ -68,6 +74,7 @@
 # background save is triggered. With no `save` line at all (the
 # default), automatic saving is disabled -- SAVE/BGSAVE still work
 # on demand.
+# Ranges: seconds 1 to 9223372036854775807; changes 1 to 4294967295.
 # save 3600 1
 # save 300 100
 # save 60 10000
@@ -87,12 +94,18 @@
 
 # Rewrite the AOF after incremental data grows by this percentage.
 # Set 0 to turn off automatic rewrites. Manual BGREWRITEAOF still works.
+# Range: 0 to 4294967295.
 # auto-aof-rewrite-percentage 100
 
 # Do not start an automatic rewrite until the total AOF size reaches this
 # many bytes. Values such as "64mb" are not accepted.
+# Range: 0 to the maximum usize value for this build.
 # auto-aof-rewrite-min-size 67108864
 
 # If the last incremental file ends with an incomplete command, remove
 # that command and continue loading. yes or no.
 # aof-load-truncated yes
+
+# Delay, in milliseconds, before retrying a failed automatic BGSAVE.
+# Set 0 for no retry delay. Range: 0 to 9223372036854775807.
+# bgsave-retry-delay-ms 5000
