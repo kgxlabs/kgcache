@@ -68,13 +68,34 @@ On a clean shutdown:
 
 SIGINT and SIGTERM now start the shutdown path. The signal handler only
 records the signal and wakes the application. Normal application code then
-cancels the blocked accept task, stops cron, closes the listener, and closes
-the AOF backend using the policy above.
+cancels the blocked accept task, stops cron, and closes the listener.
 
 Connection workers are tracked by `ConnectionManager`. During shutdown, the
 manager wakes blocked client receives, joins every worker, and only then lets
-the server release shared state and close the AOF backend. This connection
-draining is separate from the signal handler and listener wake-up behavior.
+the server check for persistence children. This connection draining is
+separate from the signal handler and listener wake-up behavior.
+
+## Shutdown
+
+After cron and all client workers have joined, the server waits for every
+tracked `BGSAVE` and `BGREWRITEAOF` child. A worker may start one while its
+connection is draining. The server logs the operation and PID immediately
+before each wait, then reaps the child. There is no shutdown deadline: a child
+that never exits can delay shutdown indefinitely. Shutdown does not terminate
+the child or retry a failed operation.
+
+The server handles each result while the persistence backends and borrowed
+logger are still alive. A successful rewrite publishes its new base and the
+live incremental file in the manifest, then removes retired files. A failed
+rewrite does not publish its base. The server tries to delete the incomplete
+base and keeps the manifest and incremental files that contain writes. If
+deletion fails, startup reconciliation can remove the orphaned file later.
+
+Rewrite completion happens before the final AOF flush and sync described
+above. The live AOF file closes only after the rewrite is settled and that
+final flush is attempted. If rewrite state cannot be settled, shutdown leaves
+the persistence resources open and reports an error. Other shutdown errors
+are reported after remaining safe cleanup, with the first error returned.
 
 ## Files on disk
 

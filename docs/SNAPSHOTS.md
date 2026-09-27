@@ -76,7 +76,7 @@ Since kgcache handles each connection on its own OS thread, this state is genuin
 
 When a child process exits, the kernel doesn't let it fully disappear until its parent calls `waitpid()` on it: until then it's a "zombie", just sitting in the process table. `bgsave()` itself can't be the one to reap its child: `waitpid()` without `WNOHANG` blocks until the child exits, which would make the parent wait anyway and defeat the entire point of `BGSAVE` being non-blocking.
 
-So reaping happens on its own timeline instead: the background housekeeping loop in `cron.zig` (`cron-interval-ms`, shared with active expiration; see [Configuration](CONFIGURATION.md)) polls with `waitpid(pid, &status, WNOHANG)` on every tick.
+During normal operation, reaping happens on its own timeline: the background housekeeping loop in `cron.zig` (`cron-interval-ms`, shared with active expiration; see [Configuration](CONFIGURATION.md)) polls with `waitpid(pid, &status, WNOHANG)` on every tick.
 
 ```text
 tick 1: fork() ── child starts dumping
@@ -84,11 +84,25 @@ tick 2: waitpid(WNOHANG) → still running → no-op
 tick 3: waitpid(WNOHANG) → still running → no-op
 tick 4: waitpid(WNOHANG) → exited
           ├─ success: account for the captured changes
-          └─ failure: keep all changes dirty; the child reports its source through the logger
+          └─ failure: keep all changes dirty; the child attempts to log its source
         then clear the in-progress flag
 ```
 
-If the child has not exited yet, the poll is a no-op. Once it has, `PersistenceState` clears the recorded child, returns its status and captured change count, and keeps the save claim active until the cron loop finishes accounting for the result. A successful child marks the captured changes as saved. A failed child leaves every change dirty. The child reports a failed save through the logger before exiting; cron does not report that exit again. Cron does report a reaper error if waiting for the child fails. The cron loop releases the save claim only after this work is complete.
+If the child has not exited yet, the poll is a no-op. Once it has, `PersistenceState` clears the recorded child, returns its status and captured change count, and keeps the save claim active until the cron loop finishes accounting for the result. A successful child marks the captured changes as saved. A failed child leaves every change dirty. The child attempts to report a failed save through the logger before exiting; cron does not report an ordinary failed exit again. Cron does report a reaper error if waiting for the child fails. The cron loop releases the save claim only after this work is complete.
+
+During shutdown, kgcache stops accepting work and stops cron, then drains and
+joins all client workers. A worker can start `BGSAVE` while it is finishing a
+request, so the server checks for tracked children after the workers have
+joined. For each tracked child, it logs `BGSAVE` and the PID immediately before
+waiting. The wait has no deadline: a child that never exits can delay shutdown
+indefinitely. Shutdown does not terminate the child or retry a failed save.
+
+The server reaps the child and handles its result before releasing snapshot
+state or the borrowed logger. A successful save becomes the latest completed
+snapshot, covering the data captured when the child forked. A failed save does
+not mark those changes as saved; the previous completed snapshot remains the
+latest one. Shutdown reports the failure and continues safe cleanup. See
+[AOF shutdown](AOF.md#shutdown) for the rewrite and final flush order.
 
 ### `exclusive-bg-persistence`
 

@@ -62,12 +62,16 @@ stops cron and closes the listener before AOF and Store cleanup begins. A
 server runtime failure reaches the same cleanup boundary and is reported as
 an error, while a requested signal shutdown is a normal exit.
 
-At shutdown, the accept loop is stopped first. `ConnectionManager` then marks
-connection shutdown, wakes blocked receives with socket shutdown, and joins
-every worker. Only after the workers have exited does `Server` release AOF,
-Store, Storage, persistence, and allocator-owned state. The logger owner keeps
-the logger alive through worker shutdown. A requested shutdown of an idle
-connection is cooperative and does not produce an error event.
+At shutdown, the accept loop and cron stop first. `ConnectionManager` then
+marks connection shutdown, wakes blocked receives with socket shutdown, and
+joins every worker. `Server` next waits for and reaps tracked snapshot and AOF
+children, then accounts for the save or finishes the rewrite. Only after that
+does it close AOF and release Store, Storage, persistence, and allocator-owned
+state. The logger owner keeps the logger alive through child completion and
+cleanup. A requested shutdown of an idle connection is cooperative and does
+not produce an error event. The child wait has no deadline; see
+[Snapshots](SNAPSHOTS.md#reaping-why-it-cant-happen-inside-bgsave) and
+[AOF](AOF.md#shutdown).
 
 ## Storage and concurrency trade-offs
 
@@ -117,6 +121,7 @@ and trace availability.
 │   ├── store/                   # Store abstraction, memory store, test mock
 │   ├── storage/                 # Storage abstraction and default backend
 │   ├── persistence/             # Snapshot (.kgc) and AOF backends, SAVE/BGSAVE
+│   │   └── drain.zig            # Shutdown child waits and result handling
 │   ├── persistence_state.zig    # Persistence lifecycle, retry, and snapshot change accounting
 │   ├── entry.zig                # Stored-value and expiration metadata
 │   └── tests.zig                # Unit-test entry point
