@@ -57,6 +57,17 @@ pub const AofReapResult = struct {
     report_error: ?anyerror = null,
 };
 
+pub const KgcShutdownState = union(enum) {
+    no_child,
+    child: KgcBackgroundSave,
+};
+
+pub const AofShutdownState = union(enum) {
+    no_child,
+    child: AofBackgroundRewrite,
+    completed: AofReapResult,
+};
+
 pub const Process = struct {
     wait_pid: *const fn (std.posix.pid_t) anyerror!?u32 = waitPidSystem,
 };
@@ -236,6 +247,26 @@ pub fn aofInProgress(self: *PersistenceState) bool {
 
 pub fn kgcInProgress(self: *PersistenceState) bool {
     return self._kgc_in_progress;
+}
+
+pub fn kgcShutdownState(self: *const PersistenceState) KgcShutdownState {
+    return if (self._in_flight_kgc_save) |save| .{ .child = save } else .no_child;
+}
+
+pub fn aofShutdownState(self: *const PersistenceState) AofShutdownState {
+    if (self._completed_aof_rewrite) |result| return .{ .completed = result };
+    return if (self._in_flight_aof_rewrite) |rewrite| .{ .child = rewrite } else .no_child;
+}
+
+pub fn waitForKgcShutdown(self: *PersistenceState, now_ms: time.UnixMs) anyerror!KgcReapResult {
+    _ = self;
+    _ = now_ms;
+    return error.PersistenceDrainNotImplemented;
+}
+
+pub fn waitForAofShutdown(self: *PersistenceState) anyerror!AofReapResult {
+    _ = self;
+    return error.PersistenceDrainNotImplemented;
 }
 
 pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {

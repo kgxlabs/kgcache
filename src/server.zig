@@ -176,6 +176,14 @@ pub fn destroy(self: *Server) anyerror!void {
         cleanup_error = err;
     };
 
+    const resources_can_close = self.drainPersistenceChildren() catch |err| blk: {
+        if (cleanup_error == null) cleanup_error = err;
+        break :blk false;
+    };
+    if (!resources_can_close) {
+        return cleanup_error orelse error.PersistenceDrainNotImplemented;
+    }
+
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {
             if (cleanup_error == null) cleanup_error = err;
@@ -190,6 +198,62 @@ pub fn destroy(self: *Server) anyerror!void {
     self._allocator.destroy(self);
 
     if (cleanup_error) |err| return err;
+}
+
+fn drainPersistenceChildren(self: *Server) !bool {
+    var state_tx = self._persistence_state.beginUncancelable();
+    const kgc_state = self._persistence_state.kgcShutdownState();
+    const aof_state = self._persistence_state.aofShutdownState();
+    state_tx.end();
+
+    var drain_error: ?anyerror = null;
+    var resources_can_close = true;
+    var log_buffer: [128]u8 = undefined;
+
+    switch (kgc_state) {
+        .no_child => {},
+        .child => |save| {
+            resources_can_close = false;
+            const message = std.fmt.bufPrint(
+                &log_buffer,
+                "server: waiting for BGSAVE child pid {d} during shutdown",
+                .{save.pid},
+            ) catch unreachable;
+            self._logger.info(message);
+
+            if (self._persistence_state.waitForKgcShutdown(time.nowMs(self._io))) |_| {
+                drain_error = error.PersistenceAccountingNotImplemented;
+            } else |err| {
+                drain_error = err;
+            }
+        },
+    }
+
+    switch (aof_state) {
+        .no_child => {},
+        .completed => {
+            resources_can_close = false;
+            if (drain_error == null) drain_error = error.PersistenceAccountingNotImplemented;
+        },
+        .child => |rewrite| {
+            resources_can_close = false;
+            const message = std.fmt.bufPrint(
+                &log_buffer,
+                "server: waiting for BGREWRITEAOF child pid {d} during shutdown",
+                .{rewrite.pid},
+            ) catch unreachable;
+            self._logger.info(message);
+
+            if (self._persistence_state.waitForAofShutdown()) |_| {
+                if (drain_error == null) drain_error = error.PersistenceAccountingNotImplemented;
+            } else |err| {
+                if (drain_error == null) drain_error = err;
+            }
+        },
+    }
+
+    if (drain_error) |err| return err;
+    return resources_can_close;
 }
 
 fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
