@@ -101,6 +101,10 @@ pub fn begin(self: JournalPersistence) std.Io.Cancelable!Tx {
     return self._lock.begin();
 }
 
+pub fn beginUncancelable(self: JournalPersistence) Tx {
+    return self._lock.beginUncancelable();
+}
+
 pub fn onWrite(self: JournalPersistence, event: WriteEvent) anyerror!void {
     var record = try self.prepareRecord(event);
     return record.publish();

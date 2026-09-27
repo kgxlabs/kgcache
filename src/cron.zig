@@ -132,6 +132,7 @@ fn finishAofIfCompleted(
 
     aof.finishRewrite(reap_result.status) catch |err| {
         logger.err("cron: failed to finish AOF rewrite", err, @errorReturnTrace());
+        return;
     };
     var state_tx = persistence_state.beginUncancelable();
     defer state_tx.end();
