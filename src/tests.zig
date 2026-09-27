@@ -28,5 +28,6 @@ test {
     _ = @import("persistence/aof_loader.zig");
     _ = @import("server.zig");
     _ = @import("server_tests.zig");
+    _ = @import("persistence_shutdown_tests.zig");
     _ = @import("main.zig");
 }
