@@ -30,7 +30,7 @@ pub const Error = error{
     MalformedLine,
     /// The first token on a line isn't one of the known `Directive`s.
     UnknownDirective,
-    /// The value couldn't be parsed into the type the directive expects.
+    /// The value couldn't be parsed or is outside the directive's valid range.
     InvalidValue,
     /// Allocating storage for a repeated directive's collected values failed.
     OutOfMemory,
@@ -63,15 +63,15 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
 
         switch (directive) {
             .bind => config.bind_address = value,
-            .port => config.port = try parseInt(u16, value),
+            .port => config.port = try parseIntInRange(u16, value, 1, std.math.maxInt(u16)),
             .@"reuse-address" => config.reuse_address = try parseBool(value),
-            .@"connection-buffer-size" => config.connection_buffer_size = try parseInt(usize, value),
-            .@"num-databases" => config.num_databases = try parseInt(usize, value),
+            .@"connection-buffer-size" => config.connection_buffer_size = try parseIntInRange(usize, value, 1, std.math.maxInt(usize)),
+            .@"num-databases" => config.num_databases = try parseIntInRange(usize, value, 1, std.math.maxInt(u32)),
             .@"snapshot-path" => config.snapshot_path = value,
-            .@"cron-interval-ms" => config.cron_interval_ms = try parseInt(i64, value),
-            .@"active-expire-budget-ms" => config.active_expire_budget_ms = try parseInt(i8, value),
-            .@"active-expire-batch-size" => config.active_expire_batch_size = try parseInt(i8, value),
-            .@"active-expire-threshold-percent" => config.active_expire_threshold_percent = try parseInt(i8, value),
+            .@"cron-interval-ms" => config.cron_interval_ms = try parseIntInRange(i64, value, 1, std.math.maxInt(i64)),
+            .@"active-expire-budget-ms" => config.active_expire_budget_ms = try parseIntInRange(i8, value, 1, std.math.maxInt(i8)),
+            .@"active-expire-batch-size" => config.active_expire_batch_size = try parseIntInRange(i8, value, 1, std.math.maxInt(i8)),
+            .@"active-expire-threshold-percent" => config.active_expire_threshold_percent = try parseIntInRange(i8, value, 1, 100),
             .@"exclusive-bg-persistence" => config.exclusive_bg_persistence = try parseBool(value),
             .save => {
                 var tokens = std.mem.tokenizeAny(u8, value, " \t");
@@ -80,8 +80,8 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
                 if (tokens.next() != null) return Error.MalformedLine;
 
                 try save_rules.append(allocator, .{
-                    .seconds = try parseInt(i64, seconds_str),
-                    .changes = try parseInt(u32, changes_str),
+                    .seconds = try parseIntInRange(i64, seconds_str, 1, std.math.maxInt(i64)),
+                    .changes = try parseIntInRange(u32, changes_str, 1, std.math.maxInt(u32)),
                 });
             },
             .appendonly => config.append_only = try parseBool(value),
@@ -105,6 +105,12 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
 
 fn parseInt(comptime T: type, value: []const u8) Error!T {
     return std.fmt.parseInt(T, value, 10) catch Error.InvalidValue;
+}
+
+fn parseIntInRange(comptime T: type, value: []const u8, min: T, max: T) Error!T {
+    const parsed = try parseInt(T, value);
+    if (parsed < min or parsed > max) return Error.InvalidValue;
+    return parsed;
 }
 
 fn parseBool(value: []const u8) Error!bool {
@@ -177,6 +183,86 @@ test "parse leaves directives absent from a partial file at their defaults" {
 test "parse rejects a negative bgsave retry delay" {
     const testing = std.testing;
     try testing.expectError(Error.InvalidValue, parse(testing.allocator, "bgsave-retry-delay-ms -1"));
+}
+
+test "parse enforces numeric directive boundaries" {
+    const testing = std.testing;
+    const cases = [_]struct {
+        minimum: []const u8,
+        maximum: []const u8,
+        below_minimum: []const u8,
+        above_maximum: []const u8,
+    }{
+        .{ .minimum = "port 1", .maximum = "port 65535", .below_minimum = "port 0", .above_maximum = "port 65536" },
+        .{ .minimum = "num-databases 1", .maximum = "num-databases 4294967295", .below_minimum = "num-databases 0", .above_maximum = "num-databases 4294967296" },
+        .{ .minimum = "cron-interval-ms 1", .maximum = "cron-interval-ms 9223372036854775807", .below_minimum = "cron-interval-ms 0", .above_maximum = "cron-interval-ms 9223372036854775808" },
+        .{ .minimum = "active-expire-budget-ms 1", .maximum = "active-expire-budget-ms 127", .below_minimum = "active-expire-budget-ms 0", .above_maximum = "active-expire-budget-ms 128" },
+        .{ .minimum = "active-expire-batch-size 1", .maximum = "active-expire-batch-size 127", .below_minimum = "active-expire-batch-size 0", .above_maximum = "active-expire-batch-size 128" },
+        .{ .minimum = "active-expire-threshold-percent 1", .maximum = "active-expire-threshold-percent 100", .below_minimum = "active-expire-threshold-percent 0", .above_maximum = "active-expire-threshold-percent 101" },
+    };
+
+    for (cases) |case| {
+        for ([_][]const u8{ case.minimum, case.maximum }) |line| {
+            const config = try parse(testing.allocator, line);
+            testing.allocator.free(config.save_rules);
+        }
+        for ([_][]const u8{ case.below_minimum, case.above_maximum }) |line| {
+            try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+        }
+    }
+
+    const max_buffer_size = try std.fmt.allocPrint(testing.allocator, "connection-buffer-size {d}", .{std.math.maxInt(usize)});
+    defer testing.allocator.free(max_buffer_size);
+    const above_max_buffer_size = try std.fmt.allocPrint(testing.allocator, "connection-buffer-size {d}", .{@as(u128, std.math.maxInt(usize)) + 1});
+    defer testing.allocator.free(above_max_buffer_size);
+
+    for ([_][]const u8{ "connection-buffer-size 1", max_buffer_size }) |line| {
+        const config = try parse(testing.allocator, line);
+        testing.allocator.free(config.save_rules);
+    }
+    for ([_][]const u8{ "connection-buffer-size 0", above_max_buffer_size }) |line| {
+        try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+    }
+}
+
+test "parse preserves zero controls and their upper boundaries" {
+    const testing = std.testing;
+    const config = try parse(
+        testing.allocator,
+        "auto-aof-rewrite-percentage 0\nbgsave-retry-delay-ms 0",
+    );
+    defer testing.allocator.free(config.save_rules);
+    try testing.expectEqual(0, config.auto_aof_rewrite_percentage);
+    try testing.expectEqual(0, config.bgsave_retry_delay_ms);
+
+    for ([_][]const u8{
+        "auto-aof-rewrite-percentage 4294967295",
+        "bgsave-retry-delay-ms 9223372036854775807",
+    }) |line| {
+        const boundary = try parse(testing.allocator, line);
+        testing.allocator.free(boundary.save_rules);
+    }
+    for ([_][]const u8{
+        "auto-aof-rewrite-percentage -1",
+        "auto-aof-rewrite-percentage 4294967296",
+        "bgsave-retry-delay-ms 9223372036854775808",
+    }) |line| {
+        try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+    }
+}
+
+test "parse accepts zero and the type limit for minimum AOF rewrite size" {
+    const testing = std.testing;
+    const max_size = try std.fmt.allocPrint(testing.allocator, "auto-aof-rewrite-min-size {d}", .{std.math.maxInt(usize)});
+    defer testing.allocator.free(max_size);
+    const above_max_size = try std.fmt.allocPrint(testing.allocator, "auto-aof-rewrite-min-size {d}", .{@as(u128, std.math.maxInt(usize)) + 1});
+    defer testing.allocator.free(above_max_size);
+
+    for ([_][]const u8{ "auto-aof-rewrite-min-size 0", max_size }) |line| {
+        const config = try parse(testing.allocator, line);
+        testing.allocator.free(config.save_rules);
+    }
+    try testing.expectError(Error.InvalidValue, parse(testing.allocator, above_max_size));
 }
 
 test "parse rejects a line with a directive but no value" {
@@ -252,6 +338,27 @@ test "parse rejects a save line with more than two values" {
 test "parse rejects a save line with a non-numeric value" {
     const testing = std.testing;
     try testing.expectError(Error.InvalidValue, parse(testing.allocator, "save 300 many"));
+}
+
+test "parse enforces both save rule boundaries" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "save 1 1",
+        "save 9223372036854775807 4294967295",
+    }) |line| {
+        const config = try parse(testing.allocator, line);
+        defer testing.allocator.free(config.save_rules);
+        try testing.expectEqual(1, config.save_rules.len);
+    }
+    for ([_][]const u8{
+        "save 0 1",
+        "save -1 1",
+        "save 9223372036854775808 1",
+        "save 1 0",
+        "save 1 4294967296",
+    }) |line| {
+        try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+    }
 }
 
 test "parse frees collected save rules if a later directive is invalid" {
