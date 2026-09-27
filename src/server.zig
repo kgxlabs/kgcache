@@ -9,6 +9,7 @@ const cron = @import("cron.zig");
 const ConnectionManager = @import("connection_manager.zig");
 const time = @import("time.zig");
 const logging = @import("logger.zig");
+const persistence_drain = @import("persistence/drain.zig");
 
 const Server = @This();
 
@@ -167,7 +168,8 @@ pub fn run(self: *Server) !void {
 /// Unwinds `create` in reverse. `_store.deinit()` chains through
 /// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
 /// so the storage backends must not be deinitialized separately here.
-/// Returns the first cleanup source after freeing the rest of the server.
+/// Returns the first cleanup source after releasing safe resources. An
+/// unresolved child keeps persistence resources alive.
 pub fn destroy(self: *Server) anyerror!void {
     self.stopCron();
 
@@ -175,6 +177,15 @@ pub fn destroy(self: *Server) anyerror!void {
     self._connection_manager.deinit() catch |err| {
         cleanup_error = err;
     };
+
+    const journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
+    const drain_result = persistence_drain.run(self._io, self._logger, &self._persistence_state, journal);
+
+    if (cleanup_error == null) cleanup_error = drain_result.err;
+    switch (drain_result.status) {
+        .complete => {},
+        .aof_unresolved => return cleanup_error orelse error.AofRewriteUnsettled,
+    }
 
     if (self._aof) |*aof| {
         aof.journal().deinit() catch |err| {

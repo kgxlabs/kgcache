@@ -43,6 +43,16 @@ pub const FlushOptions = struct {
     mode: FlushMode = .unconditional,
 };
 
+pub const RewriteResolution = enum {
+    /// No rewrite result is recorded in this backend.
+    none,
+    /// The new base still needs publication or rollback.
+    pending,
+    /// The manifest is safe after publication or rollback. File cleanup may
+    /// still have reported an error.
+    settled,
+};
+
 pub const Tx = Lock.Tx;
 
 pub const WriteEvent = union(enum) {
@@ -91,6 +101,7 @@ pub const VTable = struct {
     dispatchPendingRewrite: *const fn (*anyopaque, []const Storage) anyerror!bool,
     dueForRewrite: *const fn (*anyopaque, Config) anyerror!bool,
     finishRewrite: *const fn (*anyopaque, PersistenceState.ReapResult) anyerror!void,
+    getRewriteResolution: *const fn (*anyopaque) RewriteResolution,
     beginLoading: *const fn (*anyopaque) void,
     endLoading: *const fn (*anyopaque) void,
     reconcile: *const fn (*anyopaque, std.Io, std.mem.Allocator, std.Io.Dir, []const u8, ?Manifest.Manifest) anyerror!void,
@@ -99,6 +110,10 @@ pub const VTable = struct {
 
 pub fn begin(self: JournalPersistence) std.Io.Cancelable!Tx {
     return self._lock.begin();
+}
+
+pub fn beginUncancelable(self: JournalPersistence) Tx {
+    return self._lock.beginUncancelable();
 }
 
 pub fn onWrite(self: JournalPersistence, event: WriteEvent) anyerror!void {
@@ -128,6 +143,11 @@ pub fn dueForRewrite(self: JournalPersistence, config: Config) anyerror!bool {
 
 pub fn finishRewrite(self: JournalPersistence, reap_result: PersistenceState.ReapResult) anyerror!void {
     return self.vtable.finishRewrite(self.ptr, reap_result);
+}
+
+/// Call while holding a Journal session.
+pub fn getRewriteResolution(self: JournalPersistence) RewriteResolution {
+    return self.vtable.getRewriteResolution(self.ptr);
 }
 
 pub fn beginLoading(self: JournalPersistence) void {

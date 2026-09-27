@@ -39,6 +39,7 @@ _base_buffer: std.ArrayList(u8) = .empty,
 _base_encoder: ?AofEncoder = null,
 _base_size: u64,
 _pending_base_seq: ?u32 = null,
+_rewrite_settled: bool = false,
 _last_rewrite_attempt_ms: ?time.UnixMs = null,
 // Last successful everysec fsync; null means the next flush must sync.
 _last_fsync_ms: ?time.UnixMs = null,
@@ -52,6 +53,7 @@ const vtable: Journal.VTable = .{
     .dispatchPendingRewrite = dispatchPendingRewrite,
     .deinit = deinit,
     .finishRewrite = finishRewrite,
+    .getRewriteResolution = getRewriteResolution,
     .flush = flush,
     .prepareRecord = prepareRecord,
     .dueForRewrite = dueForRewrite,
@@ -337,7 +339,9 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
     }
 
     const previous_pending_base_seq = self._pending_base_seq;
+    const previous_rewrite_settled = self._rewrite_settled;
     self._pending_base_seq = base_seq;
+    self._rewrite_settled = false;
 
     // Fork succeeded, so cancellation must not leave the child untracked.
     const registration_error: ?PersistenceState.PendingStartError = blk: {
@@ -362,6 +366,7 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
 
         PersistenceState.terminateAndReapChild(pid);
         self._pending_base_seq = previous_pending_base_seq;
+        self._rewrite_settled = previous_rewrite_settled;
 
         return err;
     }
@@ -525,8 +530,21 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     if (reap_result == .running) return Journal.Error.RewriteStillRunning;
 
-    const base_seq = self._pending_base_seq orelse return Journal.Error.MissingPendingBase;
-    defer self._pending_base_seq = null;
+    const base_seq = self._pending_base_seq orelse {
+        if (self._rewrite_settled) return;
+        return Journal.Error.MissingPendingBase;
+    };
+
+    // A failed rewrite never publishes its base in the manifest. Even if
+    // deleting the orphan fails, the old manifest and incrementals remain
+    // usable, and startup reconciliation can remove the orphan later.
+    defer {
+        if (reap_result == .failed) {
+            self._pending_base_seq = null;
+            self._rewrite_settled = true;
+        }
+    }
+    if (reap_result == .failed) self._last_rewrite_attempt_ms = time.nowMs(self._io);
 
     const cwd = std.Io.Dir.cwd();
     const dir = try cwd.openDir(
@@ -544,7 +562,6 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     defer self._allocator.free(base_name);
 
     if (reap_result == .failed) {
-        self._last_rewrite_attempt_ms = time.nowMs(self._io);
         dir.deleteFile(self._io, base_name) catch |err| switch (err) {
             error.FileNotFound => {},
             else => return err,
@@ -604,6 +621,11 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
         .{ .base = new_base, .incrs = &new_incrs },
     );
 
+    // The manifest now names the new base. Errors deleting retired files can
+    // be reported without treating the rewrite as incomplete.
+    self._pending_base_seq = null;
+    self._rewrite_settled = true;
+
     // delete old base and incrs files
     var delete_error: ?anyerror = null;
     if (manifest.base) |old_base| {
@@ -630,6 +652,14 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     self._last_rewrite_attempt_ms = null;
 
     if (delete_error) |err| return err;
+}
+
+fn getRewriteResolution(ptr: *anyopaque) Journal.RewriteResolution {
+    const self: *AofBackend = @ptrCast(@alignCast(ptr));
+    // A pending base still needs publication or rollback, even after its
+    // child has been reaped.
+    if (self._pending_base_seq != null) return .pending;
+    return if (self._rewrite_settled) .settled else .none;
 }
 
 pub fn flush(ptr: *anyopaque, now_ms: i64, options: Journal.FlushOptions) anyerror!void {

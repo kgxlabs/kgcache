@@ -12,7 +12,8 @@ source to a boundary that can report it.
 | Application | Report configuration, server creation, runtime, and shutdown failures. Return a nonzero process status. |
 | Connection | Send a fixed RESP error for expected client errors. Report internal failures once and send a generic RESP error when possible. Report response write failures. |
 | Cron | Report failed automatic work, then retry on a later tick when appropriate. A busy save or rewrite is an expected condition. |
-| Persistence child | Report a failed save or rewrite before exiting. The parent accounts for the exit without repeating the child's report. The parent reports its own reaper failures. |
+| Persistence child | Attempt to report a failed save or rewrite before exiting. Cron accounts for an ordinary failed exit without repeating that report. |
+| Server shutdown | Report failed child exits, wait failures, and result handling failures. Return the first shutdown error after completing remaining safe cleanup. |
 
 A failed operation and a failed cleanup are separate errors, so each can have
 its own event. Repeated cron attempts are separate operations. A peer closing
@@ -45,9 +46,12 @@ because it has no other sink through which to report them.
 
 Persistence children currently use the borrowed logger directly to report
 their own errors. The production application passes `DefaultLogger`. Sending
-child errors to the parent through a pipe is future work. The current logger
-uses a mutex for threads, and its behavior after `fork()` has not been proven
-safe in all conditions.
+child errors to the parent through a pipe is tracked in issue #118. The
+current logger uses a mutex for threads, and its behavior after `fork()` has
+not been proven safe in all conditions. During shutdown, the parent also logs
+a failed child exit after reaping it. The parent knows the exit status, but
+does not receive the child's source error, so both processes may report the
+same failure until child-to-parent error reporting is available.
 
 Tests may ignore errors while removing scratch files or closing a backend in
 deferred fixture cleanup. Those cleanup calls are outside the assertion under

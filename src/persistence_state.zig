@@ -57,8 +57,20 @@ pub const AofReapResult = struct {
     report_error: ?anyerror = null,
 };
 
+pub const KgcShutdownState = union(enum) {
+    no_child,
+    child: KgcBackgroundSave,
+};
+
+pub const AofShutdownState = union(enum) {
+    no_child,
+    child: AofBackgroundRewrite,
+    completed: AofReapResult,
+};
+
 pub const Process = struct {
     wait_pid: *const fn (std.posix.pid_t) anyerror!?u32 = waitPidSystem,
+    wait_pid_blocking: *const fn (std.posix.pid_t) anyerror!u32 = waitPidBlockingSystem,
 };
 
 pub const Options = struct {
@@ -238,12 +250,45 @@ pub fn kgcInProgress(self: *PersistenceState) bool {
     return self._kgc_in_progress;
 }
 
+pub fn kgcShutdownState(self: *const PersistenceState) KgcShutdownState {
+    return if (self._in_flight_kgc_save) |save| .{ .child = save } else .no_child;
+}
+
+pub fn aofShutdownState(self: *const PersistenceState) AofShutdownState {
+    if (self._completed_aof_rewrite) |result| return .{ .completed = result };
+    return if (self._in_flight_aof_rewrite) |rewrite| .{ .child = rewrite } else .no_child;
+}
+
+pub fn waitForKgcShutdown(self: *PersistenceState, now_ms: time.UnixMs) anyerror!KgcReapResult {
+    var state_tx = self.beginUncancelable();
+    defer state_tx.end();
+
+    const save = self._in_flight_kgc_save orelse return error.NoTrackedKgcChild;
+    const child = try self.waitForPid(save.pid);
+    return self.completeKgcReap(save, child, now_ms);
+}
+
+pub fn waitForAofShutdown(self: *PersistenceState) anyerror!AofReapResult {
+    var state_tx = self.beginUncancelable();
+    defer state_tx.end();
+
+    if (self._completed_aof_rewrite) |completed| return completed;
+    const rewrite = self._in_flight_aof_rewrite orelse return error.NoTrackedAofChild;
+    const child = try self.waitForPid(rewrite.pid);
+    return self.completeAofReap(child);
+}
+
 pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
     const save = self._in_flight_kgc_save orelse return .{ .status = .running };
     const child = self.reapPid(save.pid);
     const status = child.status;
     if (status == .running) return .{ .status = .running, .report_error = child.report_error };
 
+    return self.completeKgcReap(save, child, now_ms);
+}
+
+fn completeKgcReap(self: *PersistenceState, save: KgcBackgroundSave, child: ChildResult, now_ms: time.UnixMs) KgcReapResult {
+    const status = child.status;
     // only start cooldown if failed and started by cron
     if (status == .failed and save.origin == .automatic) {
         self.startBgsaveCooldown(now_ms);
@@ -276,7 +321,18 @@ fn reapPid(self: *PersistenceState, pid: std.posix.pid_t) ChildResult {
     };
 
     const bits = maybe_status orelse return .{ .status = .running };
+    return decodeChildStatus(bits);
+}
 
+fn waitForPid(self: *PersistenceState, pid: std.posix.pid_t) anyerror!ChildResult {
+    const bits = self._process.wait_pid_blocking(pid) catch |err| switch (err) {
+        error.NoChildProcess => return .{ .status = .failed, .report_error = err },
+        else => return err,
+    };
+    return decodeChildStatus(bits);
+}
+
+fn decodeChildStatus(bits: u32) ChildResult {
     if (!std.c.W.IFEXITED(bits)) {
         return .{ .status = .failed, .report_error = error.ChildTerminatedAbnormally };
     }
@@ -306,6 +362,21 @@ fn waitPidSystem(pid: std.posix.pid_t) anyerror!?u32 {
     }
 }
 
+fn waitPidBlockingSystem(pid: std.posix.pid_t) anyerror!u32 {
+    var status: c_int = undefined;
+    while (true) {
+        const result = std.posix.system.waitpid(pid, &status, 0);
+        if (result < 0) {
+            switch (std.posix.errno(result)) {
+                .INTR => continue,
+                .CHILD => return error.NoChildProcess,
+                else => return error.Unexpected,
+            }
+        }
+        return @bitCast(status);
+    }
+}
+
 pub fn terminateAndReapChild(pid: std.posix.pid_t) void {
     std.posix.kill(pid, .KILL) catch {};
     var status: c_int = undefined;
@@ -322,6 +393,10 @@ pub fn reapAof(self: *PersistenceState) AofReapResult {
     const child = self.reapPid(rewrite.pid);
     if (child.status == .running) return .{ .status = .running, .report_error = child.report_error };
 
+    return self.completeAofReap(child);
+}
+
+fn completeAofReap(self: *PersistenceState, child: ChildResult) AofReapResult {
     self._in_flight_aof_rewrite = null;
     const completed: AofReapResult = .{ .status = child.status, .report_error = child.report_error };
     self._completed_aof_rewrite = completed;

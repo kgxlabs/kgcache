@@ -337,6 +337,7 @@ const FailingJournal = struct {
         .dispatchPendingRewrite = dispatchPendingRewrite,
         .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
+        .getRewriteResolution = getRewriteResolution,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
         .reconcile = reconcile,
@@ -362,6 +363,9 @@ const FailingJournal = struct {
         return false;
     }
     fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) anyerror!void {}
+    fn getRewriteResolution(_: *anyopaque) persistence.JournalPersistence.RewriteResolution {
+        return .none;
+    }
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
     fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) anyerror!void {}
@@ -578,6 +582,7 @@ const RecordingJournal = struct {
         .dispatchPendingRewrite = dispatchPendingRewrite,
         .dueForRewrite = dueForRewrite,
         .finishRewrite = finishRewrite,
+        .getRewriteResolution = getRewriteResolution,
         .beginLoading = beginLoading,
         .endLoading = endLoading,
         .reconcile = reconcile,
@@ -620,6 +625,9 @@ const RecordingJournal = struct {
         return false;
     }
     fn finishRewrite(_: *anyopaque, _: PersistenceState.ReapResult) anyerror!void {}
+    fn getRewriteResolution(_: *anyopaque) persistence.JournalPersistence.RewriteResolution {
+        return .none;
+    }
     fn beginLoading(_: *anyopaque) void {}
     fn endLoading(_: *anyopaque) void {}
     fn reconcile(_: *anyopaque, _: std.Io, _: std.mem.Allocator, _: std.Io.Dir, _: []const u8, _: ?persistence.AofManifest.Manifest) anyerror!void {}
