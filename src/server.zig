@@ -153,9 +153,10 @@ pub fn run(self: *Server) !void {
     var log_buffer: [96]u8 = undefined;
     const started_message = std.fmt.bufPrint(
         &log_buffer,
-        "server: started and listening on {s}:{d}",
-        .{ self._config.bind_address, self._config.port },
-    ) catch "server: started and listening";
+        "server: started and listening on {f}",
+        // better to use socket address than hand-assembling config.bind_address + config.port
+        .{self._listener.?.socket.address},
+    ) catch unreachable;
     self._logger.info(started_message);
 
     while (true) {
