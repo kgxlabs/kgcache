@@ -53,24 +53,11 @@ pub fn default() Config {
     return .{};
 }
 
-/// Reads the config file path from the first positional CLI argument, if
-/// any (`kgcache [path/to/kgcache.conf]`); with no argument, returns
-/// `Config.default()`.
+/// With no path, returns `Config.default()`.
 /// A path that can't be read or doesn't parse returns the source error rather
 /// than silently falling back to defaults. The application boundary reports it.
-pub fn loadFromArgs(init: std.process.Init) !Config {
-    // NOTE: Using arena allocator instead of gpa
-    // We are not copying the parsed bytes. Instead, we are pointing to the raw file bytes we read
-    // And we need those as long as the server lives , meaning we do not need to free them one by one
-    // with gpa, this will be flagged as a memory leak bug.
-    // with arena allocator, we can free when server dies.
-    const allocator = init.arena.allocator();
-
-    var args = init.minimal.args.iterate();
-    _ = args.skip(); // program name
-
-    const conf_path = args.next() orelse return Config.default();
-
-    const contents = try std.Io.Dir.cwd().readFileAlloc(init.io, conf_path, allocator, .unlimited);
+pub fn loadFromPath(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config {
+    const conf_path = path orelse return Config.default();
+    const contents = try std.Io.Dir.cwd().readFileAlloc(io, conf_path, allocator, .unlimited);
     return ConfigParser.parse(allocator, contents);
 }

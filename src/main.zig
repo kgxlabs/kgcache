@@ -1,4 +1,5 @@
 const std = @import("std");
+const Cli = @import("cli.zig");
 const Config = @import("config.zig");
 const Server = @import("server.zig");
 const logging = @import("logger.zig");
@@ -63,7 +64,13 @@ pub fn main(init: std.process.Init) u8 {
 }
 
 fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
-    const config = Config.loadFromArgs(init) catch |err| {
+    const cli = Cli.parse(init.minimal.args) catch |err| {
+        logger.err("app: invalid command line", err, @errorReturnTrace());
+        return err;
+    };
+
+    // Config values borrow the file buffer, so keep it in the application arena.
+    const config = Config.loadFromPath(init.io, init.arena.allocator(), cli.config_path) catch |err| {
         logger.err("app: failed to load configuration", err, @errorReturnTrace());
         return err;
     };
@@ -158,6 +165,32 @@ test "application reports a configuration read source once" {
     const events = test_logger.recordedEvents();
     try testing.expectEqual(1, events.len);
     try testing.expectEqual(error.FileNotFound, events[0].source.?);
+}
+
+test "application reports a CLI error once" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const args = [_][*:0]const u8{ "kgcache", "--ready-fd", "2" };
+    const init: std.process.Init = .{
+        .minimal = .{
+            .args = .{ .vector = &args },
+            .environ = std.process.Environ.empty,
+        },
+        .arena = &arena,
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .environ_map = undefined,
+        .preopens = undefined,
+    };
+    var test_logger = logging.TestLogger.init();
+
+    try testing.expectError(error.InvalidReadyFd, runApplication(init, test_logger.logger()));
+
+    const events = test_logger.recordedEvents();
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqualStrings("app: invalid command line", events[0].message());
+    try testing.expectEqual(error.InvalidReadyFd, events[0].source.?);
 }
 
 test "shutdown handler wakes the signal waiter with the received signal" {
