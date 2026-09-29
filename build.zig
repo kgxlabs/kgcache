@@ -14,10 +14,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // This declares intent for the executable to be installed into the
-    // standard location when the user invokes the "install" step (the default
-    // step when running `zig build`).
-    b.installArtifact(exe);
+    // Share the install step with the integration runner so it receives the
+    // absolute path of the executable that was just built.
+    const install_exe = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install_exe.step);
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
@@ -44,9 +44,27 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+
+    const integration_runner = b.addExecutable(.{
+        .name = "kgcache-integration",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/main.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run_integration = b.addRunArtifact(integration_runner);
+    run_integration.step.dependOn(&install_exe.step);
+    run_integration.addArg(b.getInstallPath(.bin, exe.out_filename));
+    run_integration.has_side_effects = true;
+
+    const integration_step = b.step("test-integration", "Run process integration tests");
+    integration_step.dependOn(&run_integration.step);
+
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
     if (b.args) |args| {
         run_cmd.addArgs(args);
+        run_integration.addArgs(args);
     }
 }
