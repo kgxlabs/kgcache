@@ -1,6 +1,6 @@
 # Process integration tests
 
-Run `zig build test-integration` to build kgcache and run this separate Zig runner. `zig build test` remains the unit suite. The runner starts kgcache with isolated data, checks an exact PONG reply to PING over TCP, then sends SIGTERM and reaps the process.
+Run `zig build test-integration` to build kgcache and run the Zig integration runner. `zig build test` remains the unit suite. The runner calls suite files in `tests/integration/suites/`. The PING smoke suite starts kgcache with isolated data, checks the exact PONG reply over TCP, then sends SIGTERM and reaps the process.
 
 ## Planned baseline cases
 
