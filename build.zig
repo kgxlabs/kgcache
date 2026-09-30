@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/integration/main.zig"),
             .target = b.graph.host,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     const run_integration = b.addRunArtifact(integration_runner);
