@@ -20,6 +20,7 @@ test {
     _ = @import("logger/test_logger.zig");
     _ = @import("config.zig");
     _ = @import("cli.zig");
+    _ = @import("readiness.zig");
     _ = @import("config_parser.zig");
     _ = @import("persistence/manifest.zig");
     _ = @import("persistence_state_tests.zig");

@@ -2,6 +2,7 @@ const std = @import("std");
 const Cli = @import("cli.zig");
 const Config = @import("config.zig");
 const Server = @import("server.zig");
+const ReadyPipe = @import("readiness.zig");
 const logging = @import("logger.zig");
 
 var shutdown_event: std.Io.Event = .unset;
@@ -68,6 +69,8 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
         logger.err("app: invalid command line", err, @errorReturnTrace());
         return err;
     };
+    var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
+    defer ready_pipe.close();
 
     // Config values borrow the file buffer, so keep it in the application arena.
     const config = Config.loadFromPath(init.io, init.arena.allocator(), cli.config_path) catch |err| {
@@ -89,7 +92,11 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     var runtime_error: ?anyerror = null;
     logger.info("app: starting server");
 
-    const received_signal = superviseServer(init.io, server, logger) catch |err| blk: {
+    const ready_callback: ?Server.ReadyCallback = if (cli.ready_fd != null) .{
+        .context = &ready_pipe,
+        .notify = ReadyPipe.notify,
+    } else null;
+    const received_signal = superviseServer(init.io, server, logger, ready_callback) catch |err| blk: {
         logger.err("app: server runtime failed", err, @errorReturnTrace());
         runtime_error = err;
         break :blk null;
@@ -109,11 +116,11 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
 }
 
 // create tasks and listen on their cancellation
-fn superviseServer(io: std.Io, server: *Server, logger: logging.Logger) !?std.posix.SIG {
+fn superviseServer(io: std.Io, server: *Server, logger: logging.Logger, ready_callback: ?Server.ReadyCallback) !?std.posix.SIG {
     var result_buffer: [2]RunOutcome = undefined;
     var select = std.Io.Select(RunOutcome).init(io, &result_buffer);
 
-    try select.concurrent(.server, Server.run, .{server});
+    try select.concurrent(.server, Server.run, .{ server, ready_callback });
     defer select.cancelDiscard();
 
     try select.concurrent(.shutdown_signal, waitForShutdownSignal, .{io});

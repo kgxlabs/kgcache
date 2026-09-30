@@ -3,7 +3,6 @@ const std = @import("std");
 const Cli = @This();
 
 config_path: ?[]const u8 = null,
-// Step 3 uses this descriptor to report the listener address.
 ready_fd: ?std.posix.fd_t = null,
 
 pub fn parse(process_args: std.process.Args) !Cli {

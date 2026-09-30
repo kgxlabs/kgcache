@@ -13,6 +13,11 @@ const persistence_drain = @import("persistence/drain.zig");
 
 const Server = @This();
 
+pub const ReadyCallback = struct {
+    context: *anyopaque,
+    notify: *const fn (*anyopaque, std.Io.net.IpAddress) anyerror!void,
+};
+
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _config: Config,
@@ -139,7 +144,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
 
 /// The listener is bound here rather than in `create` so `create` can be
 /// exercised in tests without touching the network.
-pub fn run(self: *Server) !void {
+pub fn run(self: *Server, ready_callback: ?ReadyCallback) !void {
     const address = try std.Io.net.IpAddress.parseIp4(self._config.bind_address, self._config.port);
 
     self._listener = try address.listen(self._io, .{
@@ -158,6 +163,10 @@ pub fn run(self: *Server) !void {
         .{self._listener.?.socket.address},
     ) catch unreachable;
     self._logger.info(started_message);
+
+    if (ready_callback) |callback| {
+        try callback.notify(callback.context, self._listener.?.socket.address);
+    }
 
     while (true) {
         const client_stream = try self._listener.?.accept(self._io);
