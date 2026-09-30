@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
     const cwd = std.Io.Dir.cwd();
     const stat = try cwd.statFile(io, executable_path, .{});
     if (stat.kind != .file) return error.ExecutablePathNotFile;
+    std.log.info("integration: PING smoke test started", .{});
 
     var random_bytes: [12]u8 = undefined;
     std.Io.random(io, &random_bytes);
@@ -111,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
 
     try cwd.deleteTree(io, temp_path);
     temp_exists = false;
+    std.log.info("integration: PING smoke test passed", .{});
 }
 
 fn readPipe(io: std.Io, file: std.Io.File, buffer: []u8) ![]const u8 {
