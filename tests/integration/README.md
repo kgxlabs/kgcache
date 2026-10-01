@@ -7,3 +7,5 @@ The baseline suite checks PING, SET/GET, database isolation, invalid config star
 The process harness in `tests/integration/harness/` owns each child from start through reaping. It enforces deadlines, captures bounded logs, and removes the fixture's temporary data. Set `KGCACHE_TEST_ARTIFACT_DIR` to keep a failed fixture's config and logs. The harness suite checks bad startup, malformed READY, timeouts, restarts, port conflicts, and two live servers.
 
 The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.
+
+Current split-request and pipelined-request failures are tracked in [issue #160](https://github.com/kgxlabs/kgcache/issues/160).

@@ -11,6 +11,8 @@
 
 Use the address from the child's `READY` line. The fixture sets deadlines for startup, protocol reads, and shutdown. It captures up to 16 KiB each of stdout and stderr while the child runs. It removes the temporary directory after each test. Set `KGCACHE_TEST_ARTIFACT_DIR` to retain the config and bounded logs for failed tests.
 
+When a test case fails, the fixture stops and reaps its child, then prints the captured stdout and stderr once. Startup and shutdown failures report their cause with the same output.
+
 ## Process contract
 
 Start the executable in its own data directory with `kgcache.conf --ready-fd <fd>`. The child writes `READY 127.0.0.1 <port>\n` to that pipe after it starts listening. Parse the port from this line. A restart writes that port into the next config and requires the same port in the next READY line. If startup fails or reaches its deadline, kill and reap the child before reporting the error.

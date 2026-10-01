@@ -27,6 +27,7 @@ pub const ServerProcess = struct {
     stdout: Log = .{},
     stderr: Log = .{},
     failed: bool = false,
+    failure_reported: bool = false,
     ready_buffer: [128]u8 = undefined,
 
     pub fn create(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, options: Options) !*ServerProcess {
@@ -68,6 +69,7 @@ pub const ServerProcess = struct {
 
     pub fn start(self: *ServerProcess) !void {
         if (self.pid != null) return error.AlreadyRunning;
+        self.failure_reported = false;
         self.last_exit_status = null;
         self.ready_bytes_read = 0;
 
@@ -234,7 +236,16 @@ pub const ServerProcess = struct {
             self.forceKill();
         }
         self.joinDrainer();
-        if (self.failed) self.saveFailure();
+
+        if (self.failed) {
+            if (self.options.report_failures and !self.failure_reported) {
+                std.log.err("integration: fixture failed; stdout: {s}; stderr: {s}", .{
+                    self.stdout.bytes(), self.stderr.bytes(),
+                });
+            }
+            self.saveFailure();
+        }
+
         std.Io.Dir.cwd().deleteTree(self.io, self.data_dir) catch |err| {
             std.log.err("integration: cannot remove fixture {s}: {s}", .{ self.data_dir, @errorName(err) });
         };
@@ -311,6 +322,7 @@ pub const ServerProcess = struct {
 
     fn report(self: *ServerProcess, phase: []const u8, err: anyerror) void {
         if (!self.options.report_failures) return;
+        self.failure_reported = true;
         std.log.err("integration: {s} failed: {s}; stdout: {s}; stderr: {s}", .{
             phase, @errorName(err), self.stdout.bytes(), self.stderr.bytes(),
         });
