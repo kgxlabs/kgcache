@@ -21,6 +21,8 @@ pub const ServerProcess = struct {
     config: ?[]const u8 = null,
     address: ?std.Io.net.IpAddress = null,
     pid: ?std.posix.pid_t = null,
+    last_exit_status: ?u32 = null,
+    ready_bytes_read: usize = 0,
     drainer: ?std.Thread = null,
     stdout: Log = .{},
     stderr: Log = .{},
@@ -28,6 +30,13 @@ pub const ServerProcess = struct {
     ready_buffer: [128]u8 = undefined,
 
     pub fn create(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, options: Options) !*ServerProcess {
+        const self = try createStopped(io, allocator, executable_path, options);
+        errdefer self.destroy();
+        try self.start();
+        return self;
+    }
+
+    pub fn createStopped(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, options: Options) !*ServerProcess {
         var random_bytes: [12]u8 = undefined;
         std.Io.random(io, &random_bytes);
         const suffix = std.fmt.bytesToHex(random_bytes, .lower);
@@ -54,15 +63,13 @@ pub const ServerProcess = struct {
         };
         paths_owned_by_self = true;
         directory_owned = false;
-        errdefer self.destroy();
-
-        try self.start();
-
         return self;
     }
 
     pub fn start(self: *ServerProcess) !void {
         if (self.pid != null) return error.AlreadyRunning;
+        self.last_exit_status = null;
+        self.ready_bytes_read = 0;
 
         const port: u16 = if (self.address) |address| address.getPort() else 0;
         const config = try std.fmt.allocPrint(
@@ -258,6 +265,7 @@ pub const ServerProcess = struct {
                 return error.EmptyReady;
             }
             used += n;
+            self.ready_bytes_read += n;
             if (std.mem.indexOfScalar(u8, self.ready_buffer[0..used], '\n')) |end| return self.ready_buffer[0 .. end + 1];
         }
         return error.ReadyTooLong;
@@ -274,7 +282,8 @@ pub const ServerProcess = struct {
         if (result == 0) return null;
         if (result == pid) {
             self.pid = null;
-            return @bitCast(status);
+            self.last_exit_status = @bitCast(status);
+            return self.last_exit_status;
         }
         return error.WaitFailed;
     }
