@@ -54,9 +54,27 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+
+    integration_runner.root_module.addImport("server_process", b.createModule(.{
+        .root_source_file = b.path("tests/integration/harness/server_process.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    }));
+
+    const fake_server = b.addExecutable(.{
+        .name = "kgcache-fake-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/harness/fake_server.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
     const run_integration = b.addRunArtifact(integration_runner);
     run_integration.step.dependOn(&install_exe.step);
     run_integration.addArg(b.getInstallPath(.bin, exe.out_filename));
+    run_integration.addArtifactArg(fake_server);
     run_integration.has_side_effects = true;
 
     const integration_step = b.step("test-integration", "Run process integration tests");
