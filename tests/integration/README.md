@@ -1,13 +1,9 @@
 # Process integration tests
 
-Run `zig build test-integration` to build kgcache and run the Zig integration runner. `zig build test` runs the unit suite. The runner calls suite files in `tests/integration/suites/`. The PING smoke suite checks the exact PONG reply over TCP. The SET/GET and SELECT baselines send commands over one connection and check their exact replies. The invalid config baseline requires exit status 1 without READY output. The idle client baseline keeps four connections open while SIGTERM shuts down the server with exit status 0. The restart baseline reconnects on the selected port and checks PONG again.
+Run `zig build test-integration` to build kgcache and run the Zig integration runner. `zig build test` runs the unit suite. The runner calls suite files in `tests/integration/suites/`.
+
+The baseline suite checks PING, SET/GET, database isolation, invalid config startup, idle client shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
 
 The process harness in `tests/integration/harness/` owns each child from start through reaping. It enforces deadlines, captures bounded logs, and removes the fixture's temporary data. Set `KGCACHE_TEST_ARTIFACT_DIR` to keep a failed fixture's config and logs. The harness suite checks bad startup, malformed READY, timeouts, restarts, port conflicts, and two live servers.
 
-## Planned baseline cases
-
-Add these behavior cases in later steps:
-
-1. Run two server fixtures together with separate ports and data directories.
-
-Each case must check replies or exit status from a real kgcache process. The harness must reap every child on success and failure.
+The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.
