@@ -63,7 +63,7 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
 
         switch (directive) {
             .bind => config.bind_address = value,
-            .port => config.port = try parseIntInRange(u16, value, 1, std.math.maxInt(u16)),
+            .port => config.port = try parseIntInRange(u16, value, 0, std.math.maxInt(u16)),
             .@"reuse-address" => config.reuse_address = try parseBool(value),
             .@"connection-buffer-size" => config.connection_buffer_size = try parseIntInRange(usize, value, 1, std.math.maxInt(usize)),
             .@"num-databases" => config.num_databases = try parseIntInRange(usize, value, 1, std.math.maxInt(u32)),
@@ -193,7 +193,7 @@ test "parse enforces numeric directive boundaries" {
         below_minimum: []const u8,
         above_maximum: []const u8,
     }{
-        .{ .minimum = "port 1", .maximum = "port 65535", .below_minimum = "port 0", .above_maximum = "port 65536" },
+        .{ .minimum = "port 0", .maximum = "port 65535", .below_minimum = "port -1", .above_maximum = "port 65536" },
         .{ .minimum = "num-databases 1", .maximum = "num-databases 4294967295", .below_minimum = "num-databases 0", .above_maximum = "num-databases 4294967296" },
         .{ .minimum = "cron-interval-ms 1", .maximum = "cron-interval-ms 9223372036854775807", .below_minimum = "cron-interval-ms 0", .above_maximum = "cron-interval-ms 9223372036854775808" },
         .{ .minimum = "active-expire-budget-ms 1", .maximum = "active-expire-budget-ms 127", .below_minimum = "active-expire-budget-ms 0", .above_maximum = "active-expire-budget-ms 128" },
@@ -223,6 +223,13 @@ test "parse enforces numeric directive boundaries" {
     for ([_][]const u8{ "connection-buffer-size 0", above_max_buffer_size }) |line| {
         try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
     }
+}
+
+test "parse accepts port zero for an OS-selected listener" {
+    const testing = std.testing;
+    const config = try parse(testing.allocator, "port 0");
+    defer testing.allocator.free(config.save_rules);
+    try testing.expectEqual(0, config.port);
 }
 
 test "parse preserves zero controls and their upper boundaries" {

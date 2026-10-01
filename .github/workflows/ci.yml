@@ -26,5 +26,8 @@ jobs:
         with:
           version: 0.16.0
 
-      - name: Run tests
+      - name: Run unit tests
         run: zig build test
+
+      - name: Run process integration tests
+        run: zig build test-integration
