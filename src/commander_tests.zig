@@ -94,6 +94,7 @@ test "commands reject invalid argument counts" {
         .{ "SAVE", 1 },
         .{ "SELECT", 0 },
         .{ "SELECT", 2 },
+        .{ "SET", 0 },
         .{ "SET", 1 },
     };
 
