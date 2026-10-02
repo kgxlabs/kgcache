@@ -4,6 +4,9 @@ Run `zig build test-integration` to build kgcache and run the Zig integration ru
 
 The baseline suite checks PING, SET/GET, recovery after command errors, database isolation, invalid config startup, idle client shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
 
+The PING cases check PONG without a message and exact bulk string replies for
+ordinary, empty, and binary messages containing NUL, CRLF, and a non-ASCII byte.
+
 The command error cases send an invalid SET, BGSAVE, or COMMAND request, read
 the error, then send PING on the same TCP connection and require PONG. They also
 check that invalid SET requests leave the stored value intact and that binary
