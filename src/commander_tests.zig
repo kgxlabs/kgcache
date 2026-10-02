@@ -2,6 +2,7 @@ const std = @import("std");
 const resp = @import("resp.zig");
 const commander = @import("commander.zig");
 const Commander = commander.Commander;
+const store = @import("store.zig");
 const MockStore = @import("store/mock_store.zig");
 const init = commander.init;
 
@@ -37,6 +38,12 @@ test "reject unsupported command input shapes" {
 }
 
 fn executeWithMockStore(keyword: []const u8, arguments: []const resp.RESPValue, mock_store: *MockStore) anyerror!Commander.Result {
+    var data_store = mock_store.store();
+    var client_state: Commander.ClientState = .{};
+    return executeWithStore(keyword, arguments, &data_store, &client_state);
+}
+
+fn executeWithStore(keyword: []const u8, arguments: []const resp.RESPValue, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
     const request = try std.testing.allocator.alloc(resp.RESPValue, arguments.len + 1);
     defer std.testing.allocator.free(request);
     request[0] = .{ .bulk_string = keyword };
@@ -45,9 +52,7 @@ fn executeWithMockStore(keyword: []const u8, arguments: []const resp.RESPValue, 
     const command = try init(std.testing.allocator, .{ .array = request });
     defer command.deinit();
 
-    var data_store = mock_store.store();
-    var client_state: Commander.ClientState = .{};
-    return command.execute(std.testing.io, &data_store, &client_state);
+    return command.execute(std.testing.io, data_store, client_state);
 }
 
 fn expectArray(value: resp.RESPValue) ![]resp.RESPValue {
@@ -140,6 +145,87 @@ test "command names are case-insensitive" {
     defer result.deinit();
 
     try testing.expectEqualStrings("PONG", result.value.simple_string);
+}
+
+test "invalid SET options preserve existing values and expiration and do not create keys" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    const time = @import("time.zig");
+
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    const storage = backend.storage();
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "set-options.kgc");
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{storage}, kgc.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+    var client_state: Commander.ClientState = .{};
+
+    const original_expiry = time.nowMs(testing.io) + 60_000;
+    const expiry_argument = try std.fmt.allocPrint(testing.allocator, "{d}", .{original_expiry});
+    defer testing.allocator.free(expiry_argument);
+    var initial_result = try executeWithStore("SET", &.{
+        .{ .bulk_string = "key" },  .{ .bulk_string = "original" },
+        .{ .bulk_string = "PXAT" }, .{ .bulk_string = expiry_argument },
+    }, &data_store, &client_state);
+    defer initial_result.deinit();
+    try testing.expectEqualStrings("OK", initial_result.value.simple_string);
+
+    const cases = [_]struct { options: []const []const u8, expected_error: Commander.Error }{
+        .{ .options = &.{"UNKNOWN"}, .expected_error = error.Syntax },
+        .{ .options = &.{"bad\x00\r\noption"}, .expected_error = error.Syntax },
+        .{ .options = &.{ "NX", "NX" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "XX", "XX" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "NX", "XX" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "XX", "NX" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "GET", "GET" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "EX", "60", "PX", "60000" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "EX", "60", "KEEPTTL" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "KEEPTTL", "EX", "60" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "KEEPTTL", "KEEPTTL" }, .expected_error = error.Syntax },
+        .{ .options = &.{"EX"}, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{"PX"}, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{"EXAT"}, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{"PXAT"}, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "GET", "EX" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "EX", "0" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "PX", "-1" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "EXAT", "0" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "PXAT", "-1" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "EX", "" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "PX", "not-a-number" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "EX", "9223372036854775808" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "EX", "9223372036854775807" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "PX", "9223372036854775807" }, .expected_error = error.UnsupportedOption },
+        .{ .options = &.{ "EXAT", "9223372036854775807" }, .expected_error = error.UnsupportedOption },
+    };
+
+    for (cases) |case| {
+        for ([_][]const u8{ "key", "missing" }) |key| {
+            const arguments = try testing.allocator.alloc(resp.RESPValue, case.options.len + 2);
+            defer testing.allocator.free(arguments);
+            arguments[0] = .{ .bulk_string = key };
+            arguments[1] = .{ .bulk_string = "replacement" };
+            for (case.options, 2..) |option, index| arguments[index] = .{ .bulk_string = option };
+
+            try testing.expectError(case.expected_error, executeWithStore("SET", arguments, &data_store, &client_state));
+
+            var current_value = try data_store.get("key", 0) orelse return error.TestUnexpectedResult;
+            defer current_value.deinit();
+            try testing.expectEqualStrings("original", current_value.value.string);
+            var missing_value = try data_store.get("missing", 0);
+            defer if (missing_value) |*value| value.deinit();
+            try testing.expect(missing_value == null);
+
+            var tx = try storage.begin();
+            defer tx.end();
+            const expiration = try storage.getExp("key") orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(original_expiry, expiration.expires_at);
+            try testing.expect(try storage.getExp("missing") == null);
+        }
+    }
 }
 
 test "COMMAND, COUNT, and LIST describe the available commands" {
