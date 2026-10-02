@@ -1,6 +1,7 @@
 const std = @import("std");
 const ping_smoke = @import("suites/ping_smoke.zig");
 const set_get = @import("suites/set_get.zig");
+const command_errors = @import("suites/command_errors.zig");
 const select_isolation = @import("suites/select_isolation.zig");
 const invalid_config = @import("suites/invalid_config.zig");
 const idle_clients_shutdown = @import("suites/idle_clients_shutdown.zig");
@@ -27,6 +28,7 @@ pub fn main(init: std.process.Init) !void {
     const artifact_dir = std.process.Environ.getPosix(init.minimal.environ, "KGCACHE_TEST_ARTIFACT_DIR");
     try ping_smoke.run(init.io, init.gpa, executable_path, artifact_dir);
     try set_get.run(init.io, init.gpa, executable_path, artifact_dir);
+    try command_errors.run(init.io, init.gpa, executable_path, artifact_dir);
     try select_isolation.run(init.io, init.gpa, executable_path, artifact_dir);
     try invalid_config.run(init.io, init.gpa, executable_path, artifact_dir);
     try idle_clients_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);

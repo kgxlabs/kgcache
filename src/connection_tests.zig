@@ -142,26 +142,33 @@ test "a Storage source crosses Store and Commander to the connection logger" {
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
 }
 
-test "argument count errors keep their wire responses and allow another request" {
+test "argument count errors use ERR for every command and allow another request" {
     const testing = std.testing;
-    var fake_io: TestConnectionIo = .{ .requests = &.{
+    const requests = [_][]const u8{
+        "*2\r\n$12\r\nBGREWRITEAOF\r\n$1\r\nx\r\n",
+        "*3\r\n$6\r\nBGSAVE\r\n$8\r\nSCHEDULE\r\n$1\r\nx\r\n",
         "*2\r\n$6\r\nDBSIZE\r\n$1\r\nx\r\n",
+        "*1\r\n$3\r\nDEL\r\n",
+        "*1\r\n$4\r\nECHO\r\n",
         "*1\r\n$3\r\nGET\r\n",
-        "*1\r\n$4\r\nPING\r\n",
-    } };
-    var test_logger = logging.TestLogger.init();
-    var mock = store.MockStore.init();
-    var data_store = mock.store();
+        "*3\r\n$4\r\nPING\r\n$1\r\nx\r\n$1\r\ny\r\n",
+        "*2\r\n$4\r\nSAVE\r\n$1\r\nx\r\n",
+        "*1\r\n$6\r\nSELECT\r\n",
+        "*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n",
+        "*3\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n$1\r\nx\r\n",
+    };
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+    for (requests) |request| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{ request, "*1\r\n$4\r\nPING\r\n" } };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
 
-    try testing.expectEqualStrings(
-        "-Wrong number of arguments\r\n-ERR wrong number of arguments\r\n+PONG\r\n",
-        fake_io.written(),
-    );
-    try testing.expectEqual(3, fake_io.next_request);
-    try testing.expectEqual(0, test_logger.recordedEvents().len);
-    try testing.expectEqual(0, fake_io.close_calls);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        try testing.expectEqualStrings("-ERR wrong number of arguments\r\n+PONG\r\n", fake_io.written());
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+    }
 }
 
 test "commands preserve replies and database state through a connection" {
