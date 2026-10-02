@@ -82,7 +82,7 @@ fn handleConnection(
         defer parser.deinit(req_allocator, commands);
 
         const c = commander.init(req_allocator, commands) catch |err| {
-            const response = initErrorResponse(err, commands) orelse {
+            const response = initErrorResponse(err) orelse {
                 logger.err("connection: command initialization failed", err, @errorReturnTrace());
                 _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
                 return;
@@ -97,7 +97,7 @@ fn handleConnection(
         // How do we handle that scenario to free the memory?
 
         var result = c.execute(io, data_store, &client_state) catch |err| {
-            if (executeErrorResponse(err, commands)) |response| {
+            if (executeErrorResponse(err)) |response| {
                 if (!writeResponse(logger, &connection_writer, response, stop_requested)) return;
                 continue;
             }
@@ -151,24 +151,24 @@ fn writeResponse(
     return true;
 }
 
-fn initErrorResponse(err: commander.Error, request: resp.RESPValue) ?[]const u8 {
+fn initErrorResponse(err: commander.Error) ?[]const u8 {
     return switch (err) {
         error.UnknownCommand => "-ERR unknown command\r\n",
         error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
         error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
         error.MalformedCommandRequest => "-ERR malformed command request\r\n",
-        error.WrongNumberArguments => wrongNumberArgumentsResponse(request),
+        error.WrongNumberArguments => "-ERR wrong number of arguments\r\n",
         else => null,
     };
 }
 
-fn executeErrorResponse(err: anyerror, request: resp.RESPValue) ?[]const u8 {
+fn executeErrorResponse(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.UnknownCommand => "-ERR unknown command\r\n",
         error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
         error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
         error.MalformedCommandRequest => "-ERR malformed command request\r\n",
-        error.WrongNumberArguments => wrongNumberArgumentsResponse(request),
+        error.WrongNumberArguments => "-ERR wrong number of arguments\r\n",
         error.DbIndexOutOfRange => "-ERR DB index is out of range\r\n",
         error.UnsupportedOption => "-ERR unsupported option\r\n",
         error.Syntax => "-ERR syntax error\r\n",
@@ -179,28 +179,4 @@ fn executeErrorResponse(err: anyerror, request: resp.RESPValue) ?[]const u8 {
         error.AofDisabled => "-ERR AOF is disabled\r\n",
         else => null,
     };
-}
-
-fn wrongNumberArgumentsResponse(request: resp.RESPValue) []const u8 {
-    return if (usesLegacyArgumentResponse(request))
-        "-Wrong number of arguments\r\n"
-    else
-        "-ERR wrong number of arguments\r\n";
-}
-
-// These commands sent this exact wire response before validation moved here.
-fn usesLegacyArgumentResponse(request: resp.RESPValue) bool {
-    const values = switch (request) {
-        .array => |maybe_values| maybe_values orelse return false,
-        else => return false,
-    };
-    if (values.len == 0) return false;
-    const keyword = switch (values[0]) {
-        .bulk_string => |maybe_keyword| maybe_keyword orelse return false,
-        else => return false,
-    };
-    return std.ascii.eqlIgnoreCase(keyword, "DBSIZE") or
-        std.ascii.eqlIgnoreCase(keyword, "SELECT") or
-        std.ascii.eqlIgnoreCase(keyword, "COMMAND") or
-        std.ascii.eqlIgnoreCase(keyword, "ECHO");
 }

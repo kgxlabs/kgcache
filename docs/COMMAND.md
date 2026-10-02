@@ -9,6 +9,9 @@ goal. For connection behavior and other server limitations, see
 The commands below start with connection and database selection, move through
 key operations, then cover persistence and command introspection.
 
+Invalid argument counts return `ERR wrong number of arguments` for every
+command. The connection remains open so the client can send another request.
+
 ## `PING`
 
 `PING [message]`
