@@ -29,6 +29,9 @@ The invalid config cases require exit status 1 and no READY notification for
 an unknown directive and the removed `num-databases`, `append-dirname`,
 `append-filename`, and `snapshot-path` names.
 
+See [Configuration](../../docs/CONFIGURATION.md#redis-config-compatibility)
+for the supported config subset and the `.kgc` and port 0 differences.
+
 The process harness in `tests/integration/harness/` owns each child from start through reaping. It enforces deadlines, captures bounded logs, and removes the fixture's temporary data. Set `KGCACHE_TEST_ARTIFACT_DIR` to keep a failed fixture's config and logs. The harness suite checks bad startup, malformed READY, timeouts, restarts, port conflicts, and two live servers.
 
 The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.
