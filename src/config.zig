@@ -23,7 +23,10 @@ port: u16 = 6379,
 reuse_address: bool = true,
 connection_buffer_size: usize = 1024,
 num_databases: usize = 16,
-snapshot_path: []const u8 = "dump.kgc",
+/// Shared persistence directory, resolved from the process working directory.
+dir: []const u8 = ".",
+/// Snapshot filename within `dir`. Must end in `.kgc`.
+dbfilename: []const u8 = "dump.kgc",
 cron_interval_ms: i64 = 100,
 active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
@@ -37,7 +40,7 @@ append_only: bool = false,
 /// (e.g. `appendonly.aof.1.base`, `appendonly.aof.2.incr`,
 /// `appendonly.aof.manifest`).
 append_filename: []const u8 = "appendonly.aof",
-/// Directory holding all AOF files, resolved against the process's cwd.
+/// Name of the directory holding all AOF files within `dir`.
 /// kgcache owns this directory entirely: an interrupted rewrite can leave
 /// orphan files behind, and cleaning those up is only safe if nothing else
 /// shares the directory.
@@ -51,6 +54,44 @@ bgsave_retry_delay_ms: i64 = 5000,
 
 pub fn default() Config {
     return .{};
+}
+
+pub fn validateDir(value: []const u8) error{InvalidValue}!void {
+    if (value.len == 0 or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidValue;
+}
+
+pub fn validateDbfilename(value: []const u8) error{InvalidValue}!void {
+    if (!isBasename(value) or !std.mem.endsWith(u8, value, ".kgc")) return error.InvalidValue;
+}
+
+pub fn validateAppendDirname(value: []const u8) error{InvalidValue}!void {
+    if (!isBasename(value)) return error.InvalidValue;
+}
+
+fn isBasename(value: []const u8) bool {
+    return value.len > 0 and
+        !std.mem.eql(u8, value, ".") and
+        !std.mem.eql(u8, value, "..") and
+        std.mem.indexOfAny(u8, value, "/\\\x00") == null;
+}
+
+fn validatePersistence(self: Config) error{InvalidValue}!void {
+    try validateDir(self.dir);
+    try validateDbfilename(self.dbfilename);
+    try validateAppendDirname(self.append_dirname);
+}
+
+/// Resolve the effective settings without changing them or the working directory.
+/// The caller owns the returned path and must keep it alive while in use.
+pub fn resolveSnapshotPath(self: Config, allocator: std.mem.Allocator) ![]u8 {
+    try self.validatePersistence();
+    return std.fs.path.join(allocator, &.{ self.dir, self.dbfilename });
+}
+
+/// The caller owns the returned path. Reuse it for the AOF backend lifetime.
+pub fn resolveAofDirectory(self: Config, allocator: std.mem.Allocator) ![]u8 {
+    try self.validatePersistence();
+    return std.fs.path.join(allocator, &.{ self.dir, self.append_dirname });
 }
 
 /// With no path, returns `Config.default()`.

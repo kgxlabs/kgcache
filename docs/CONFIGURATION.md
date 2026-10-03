@@ -28,7 +28,8 @@ For settings such as `databases`, `appenddirname`, and `appendfilename`, the las
 | `reuse-address` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
 | `connection-buffer-size` | `1024` | Per-connection read buffer size, in bytes |
 | `databases` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
-| `snapshot-path` | `dump.kgc` | Path to the `.kgc` snapshot file loaded on startup and written by `SAVE`/`BGSAVE` |
+| `dir` | `.` | Shared directory for snapshots and the AOF directory |
+| `dbfilename` | `dump.kgc` | Snapshot filename within `dir`, loaded on startup and written by `SAVE`/`BGSAVE` |
 | `cron-interval-ms` | `100` | How often background work runs, including expiration, AOF flushing, save checks, and child cleanup |
 | `active-expire-budget-ms` | `10` | Time budget per expiration sweep before the worker yields |
 | `active-expire-batch-size` | `20` | Keys sampled per expiration batch, per database |
@@ -37,7 +38,7 @@ For settings such as `databases`, `appenddirname`, and `appendfilename`, the las
 | `save` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
 | `appendonly` | `no` | Turn the append-only file on (`yes`/`no`) |
 | `appendfsync` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
-| `appenddirname` | `appendonlydir` | Directory that holds AOF data and its manifest |
+| `appenddirname` | `appendonlydir` | Directory name within `dir` that holds AOF data and its manifest |
 | `appendfilename` | `appendonly.aof` | Base name used to build AOF file names |
 | `auto-aof-rewrite-percentage` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
 | `auto-aof-rewrite-min-size` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
@@ -64,12 +65,24 @@ All limits are inclusive. `usize` is the size of a machine word in the server bu
 | `auto-aof-rewrite-min-size` | 0 to maximum `usize` |
 | `bgsave-retry-delay-ms` | 0 to 9223372036854775807; `0` means no retry delay |
 
-## `snapshot-path` gotchas
+## Persistence paths
 
-- Must end in `.kgc`.
-- A relative path resolves against the server's current working directory, not the config file's location.
-- The parent directory must already exist: it is not created automatically.
-- `~` is not expanded, since that's a shell feature rather than something the config parser does; use an absolute path like `/absolute/path/to/dump.kgc` instead of `~/dump.kgc`.
+```conf
+dir ./data
+dbfilename dump.kgc
+appenddirname appendonlydir
+```
+
+This config uses `./data/dump.kgc` for snapshots and
+`./data/appendonlydir` for AOF files.
+
+- A relative `dir` resolves from the process working directory, not the config file's location. The process working directory is not changed.
+- `dir` must already exist. kgcache creates the AOF subdirectory when AOF is enabled.
+- `dbfilename` must be a nonempty filename ending in `.kgc`, without path separators.
+- `appenddirname` must be a nonempty directory name without path separators. `.` and `..` are rejected.
+- `~` is not expanded. Use an absolute `dir` such as `/absolute/path/to/data` instead of a home-directory shorthand.
+
+The removed `snapshot-path` directive is rejected as an unknown name.
 
 ## `exclusive-bg-persistence` recommendation
 
@@ -102,7 +115,7 @@ for the write counter and rule checks.
 ## AOF settings
 
 `appendonly yes` turns on the append-only file. With AOF on, startup loads
-the AOF and does not load `snapshot-path`. `SAVE` and `BGSAVE` still write
+the AOF and does not load the snapshot at `dir/dbfilename`. `SAVE` and `BGSAVE` still write
 snapshots.
 
 `appendfsync` controls when AOF data is forced to the storage device:
@@ -113,7 +126,7 @@ snapshots.
 | `everysec` | Write from cron and fsync at most once per second |
 | `no` | Write from cron and let the OS decide when to fsync |
 
-`appenddirname` is resolved from the process working directory. kgcache
+`appenddirname` names a directory within `dir`. kgcache
 owns this directory and may remove AOF data files that are not listed in
 the manifest. Do not share it with other files.
 

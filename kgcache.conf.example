@@ -33,13 +33,15 @@
 # Range: 1 to 4294967295.
 # databases 16
 
-# Path to the on-disk snapshot file: loaded on startup if it exists, and
-# written out by the SAVE command. Must end in `.kgc`. A relative path is
-# resolved against the server's current working directory, not this
-# config file's location. The parent directory must already exist -- it
-# is not created automatically. `~` is not expanded; use an absolute path
-# instead of a home-directory shorthand.
-# snapshot-path dump.kgc
+# Shared directory for snapshots and the AOF directory. It must already
+# exist. A relative path resolves from the process working directory,
+# not this config file's location. `~` is not expanded.
+# dir .
+
+# Snapshot filename within dir, loaded on startup when AOF is off and
+# written by SAVE and BGSAVE. Must end in `.kgc` and contain no path
+# separators.
+# dbfilename dump.kgc
 
 # How often, in milliseconds, background work runs. This includes active
 # expiration, AOF flushing, save checks, and child-process cleanup.
@@ -85,8 +87,9 @@
 # AOF fsync policy: always, everysec, or no.
 # appendfsync everysec
 
-# Directory that holds AOF files. It is relative to the process working
-# directory. kgcache owns this directory; do not store other files in it.
+# Name of the AOF directory within dir. Must contain no path separators
+# and cannot be `.` or `..`. kgcache creates and owns this directory when
+# AOF is enabled; do not store other files in it.
 # appenddirname appendonlydir
 
 # Base name used to build AOF data and manifest file names.
