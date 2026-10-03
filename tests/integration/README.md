@@ -16,6 +16,19 @@ the error, then send PING on the same TCP connection and require PONG. They also
 check that invalid SET requests leave the stored value intact and that binary
 option bytes do not appear in the error response.
 
+The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
+and `appendfilename` with a real process. They check the first and last valid
+database indices and reject the next index. Snapshot cases call `SAVE`, then
+restart and read the saved data. AOF cases use `appendfsync always`, then
+restart and read the journaled data without a snapshot. Both use relative and
+absolute persistence directories and check the expected files. The config
+file sits in another subdirectory, and the cases require no persistence files
+in the working directory or under the config file's directory.
+
+The invalid config cases require exit status 1 and no READY notification for
+an unknown directive and the removed `num-databases`, `append-dirname`,
+`append-filename`, and `snapshot-path` names.
+
 The process harness in `tests/integration/harness/` owns each child from start through reaping. It enforces deadlines, captures bounded logs, and removes the fixture's temporary data. Set `KGCACHE_TEST_ARTIFACT_DIR` to keep a failed fixture's config and logs. The harness suite checks bad startup, malformed READY, timeouts, restarts, port conflicts, and two live servers.
 
 The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.

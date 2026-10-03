@@ -6,6 +6,8 @@ pub const Options = struct {
     startup_timeout_ms: i64 = 5_000,
     read_timeout_ms: i64 = 3_000,
     stop_timeout_ms: i64 = 5_000,
+    /// Config path relative to the fixture's working directory.
+    config_subpath: []const u8 = "kgcache.conf",
     extra_config: []const u8 = "",
     artifact_dir: ?[]const u8 = null,
     report_failures: bool = true,
@@ -45,13 +47,14 @@ pub const ServerProcess = struct {
         var paths_owned_by_self = false;
         errdefer if (!paths_owned_by_self) allocator.free(data_dir);
 
-        const config_path = try std.fmt.allocPrint(allocator, "{s}/kgcache.conf", .{data_dir});
+        const config_path = try std.fs.path.join(allocator, &.{ data_dir, options.config_subpath });
         errdefer if (!paths_owned_by_self) allocator.free(config_path);
 
         const cwd = std.Io.Dir.cwd();
         try cwd.createDir(io, data_dir, .default_dir);
         var directory_owned = true;
         errdefer if (directory_owned) cwd.deleteTree(io, data_dir) catch {};
+        try cwd.createDirPath(io, std.fs.path.dirname(config_path).?);
 
         const self = try allocator.create(ServerProcess);
         self.* = .{
@@ -97,7 +100,7 @@ pub const ServerProcess = struct {
         var fd_buffer: [16]u8 = undefined;
         const ready_fd_arg = try std.fmt.bufPrint(&fd_buffer, "{d}", .{ready_fds[1]});
         var child = try std.process.spawn(self.io, .{
-            .argv = &.{ self.executable_path, "kgcache.conf", "--ready-fd", ready_fd_arg },
+            .argv = &.{ self.executable_path, self.options.config_subpath, "--ready-fd", ready_fd_arg },
             .cwd = .{ .path = self.data_dir },
             .stdin = .ignore,
             .stdout = .pipe,
