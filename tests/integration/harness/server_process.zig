@@ -76,7 +76,7 @@ pub const ServerProcess = struct {
         const port: u16 = if (self.address) |address| address.getPort() else 0;
         const config = try std.fmt.allocPrint(
             self.allocator,
-            "bind 127.0.0.1\nport {d}\nreuse-address yes\ncron-interval-ms 20\nsnapshot-path dump.kgc\nappend-dirname aof\nappend-filename appendonly.aof\n{s}",
+            "bind 127.0.0.1\nport {d}\nreuse-address yes\ncron-interval-ms 20\nsnapshot-path dump.kgc\nappenddirname aof\nappendfilename appendonly.aof\n{s}",
             .{ port, self.options.extra_config },
         );
 
