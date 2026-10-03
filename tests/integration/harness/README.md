@@ -6,7 +6,7 @@
 - `port 0`, so the OS selects an available port
 - `cron-interval-ms 20`, short enough for tests without a busy loop
 - `snapshot-path dump.kgc`
-- `append-dirname aof` and `append-filename appendonly.aof`
+- `appenddirname aof` and `appendfilename appendonly.aof`
 - `reuse-address yes`, so a stopped fixture can restart on its selected port
 
 Use the address from the child's `READY` line. The fixture sets deadlines for startup, protocol reads, and shutdown. It captures up to 16 KiB each of stdout and stderr while the child runs. It removes the temporary directory after each test. Set `KGCACHE_TEST_ARTIFACT_DIR` to retain the config and bounded logs for failed tests.

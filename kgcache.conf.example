@@ -29,9 +29,9 @@
 # Range: 1 to the maximum usize value for this build.
 # connection-buffer-size 1024
 
-# Number of selectable databases: SELECT 0 through num-databases - 1.
+# Number of selectable databases: SELECT 0 through databases - 1.
 # Range: 1 to 4294967295.
-# num-databases 16
+# databases 16
 
 # Path to the on-disk snapshot file: loaded on startup if it exists, and
 # written out by the SAVE command. Must end in `.kgc`. A relative path is
@@ -87,10 +87,10 @@
 
 # Directory that holds AOF files. It is relative to the process working
 # directory. kgcache owns this directory; do not store other files in it.
-# append-dirname appendonlydir
+# appenddirname appendonlydir
 
 # Base name used to build AOF data and manifest file names.
-# append-filename appendonly.aof
+# appendfilename appendonly.aof
 
 # Rewrite the AOF after incremental data grows by this percentage.
 # Set 0 to turn off automatic rewrites. Manual BGREWRITEAOF still works.

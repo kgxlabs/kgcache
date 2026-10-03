@@ -12,10 +12,12 @@ A config file is one directive per line, `directive value`, the same shape as `r
 
 ```
 port 7000
-num-databases 4
+databases 4
 ```
 
 Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
+
+For settings such as `databases`, `appenddirname`, and `appendfilename`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect all rules instead.
 
 ## Directives
 
@@ -25,7 +27,7 @@ Blank lines and lines starting with `#` are ignored. Anything else is validated 
 | `port` | `6379` | TCP port the server listens on |
 | `reuse-address` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
 | `connection-buffer-size` | `1024` | Per-connection read buffer size, in bytes |
-| `num-databases` | `16` | Number of selectable databases (`SELECT 0` .. `num-databases - 1`) |
+| `databases` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
 | `snapshot-path` | `dump.kgc` | Path to the `.kgc` snapshot file loaded on startup and written by `SAVE`/`BGSAVE` |
 | `cron-interval-ms` | `100` | How often background work runs, including expiration, AOF flushing, save checks, and child cleanup |
 | `active-expire-budget-ms` | `10` | Time budget per expiration sweep before the worker yields |
@@ -35,8 +37,8 @@ Blank lines and lines starting with `#` are ignored. Anything else is validated 
 | `save` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
 | `appendonly` | `no` | Turn the append-only file on (`yes`/`no`) |
 | `appendfsync` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
-| `append-dirname` | `appendonlydir` | Directory that holds AOF data and its manifest |
-| `append-filename` | `appendonly.aof` | Base name used to build AOF file names |
+| `appenddirname` | `appendonlydir` | Directory that holds AOF data and its manifest |
+| `appendfilename` | `appendonly.aof` | Base name used to build AOF file names |
 | `auto-aof-rewrite-percentage` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
 | `auto-aof-rewrite-min-size` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
 | `aof-load-truncated` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
@@ -52,7 +54,7 @@ All limits are inclusive. `usize` is the size of a machine word in the server bu
 | --- | --- |
 | `port` | 1 to 65535 |
 | `connection-buffer-size` | 1 to maximum `usize` |
-| `num-databases` | 1 to 4294967295 |
+| `databases` | 1 to 4294967295 |
 | `cron-interval-ms` | 1 to 9223372036854775807 |
 | `active-expire-budget-ms` | 1 to 127 |
 | `active-expire-batch-size` | 1 to 127 |
@@ -111,11 +113,11 @@ snapshots.
 | `everysec` | Write from cron and fsync at most once per second |
 | `no` | Write from cron and let the OS decide when to fsync |
 
-`append-dirname` is resolved from the process working directory. kgcache
+`appenddirname` is resolved from the process working directory. kgcache
 owns this directory and may remove AOF data files that are not listed in
 the manifest. Do not share it with other files.
 
-`append-filename` is a base name, not a full path. For example,
+`appendfilename` is a base name, not a full path. For example,
 `appendonly.aof` produces names such as `appendonly.aof.1.base`,
 `appendonly.aof.2.incr`, and `appendonly.aof.manifest`.
 
