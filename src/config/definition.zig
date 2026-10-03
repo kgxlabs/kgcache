@@ -3,11 +3,9 @@ const Config = @import("../config.zig");
 
 pub const Arity = @import("../arity.zig");
 
-/// Selects a variable CLI value count from the remaining arguments.
-/// The CLI parser checks that the selected count is available before preparation.
+/// The CLI parser checks that the returned count fits the remaining arguments.
 pub const CliValueCountFn = *const fn (remaining_values: []const []const u8) usize;
 
-/// Source syntax rules used before the registry validates values.
 pub const InputRules = struct {
     pub const FileValues = enum {
         unsplit_value,
@@ -27,11 +25,10 @@ pub const RepeatPolicy = enum {
 
 pub const SaveOperation = union(enum) {
     rule: Config.SaveRule,
-    /// Reserved for the later save clearing support.
     clear,
 };
 
-/// Parsed values are copied, except strings, which borrow their source input.
+/// Strings borrow the source input.
 pub const Value = union(enum) {
     u16_value: u16,
     u32_value: u32,
@@ -44,18 +41,63 @@ pub const Value = union(enum) {
     save: SaveOperation,
 };
 
-/// Metadata for one supported config directive.
+pub const ParseError = error{
+    InvalidArity,
+    InvalidValue,
+};
+
+pub const ApplyError = std.mem.Allocator.Error;
+
+pub const BuildError = std.mem.Allocator.Error;
+
+pub const ApplyContext = struct {
+    allocator: std.mem.Allocator,
+    config: *Config,
+    state: ?*anyopaque = null,
+};
+
+pub const ParseFn = *const fn (values: []const []const u8) ParseError!Value;
+
+pub const ApplyFn = *const fn (context: *ApplyContext, value: Value) ApplyError!void;
+
+/// Clears this directive's accumulated values without allocating.
+pub const ResetFn = *const fn (context: *ApplyContext) void;
+
+pub const CleanupMode = enum {
+    /// Free temporary state and any finalized output.
+    discard,
+    /// Free temporary state, keeping data referenced by the returned Config.
+    retain_config,
+};
+
+/// Releases partial allocations on failure.
+pub const StateInitFn = *const fn (allocator: std.mem.Allocator) ApplyError!*anyopaque;
+
+/// State owns finalized output until builder finish succeeds.
+pub const StateFinalizeFn = *const fn (context: *ApplyContext) BuildError!void;
+
+pub const StateDeinitFn = *const fn (context: *ApplyContext, mode: CleanupMode) void;
+
+pub const StateLifecycle = struct {
+    init: StateInitFn,
+    finalize: StateFinalizeFn,
+    deinit: StateDeinitFn,
+};
+
 pub const Definition = struct {
     name: []const u8,
     arity: Arity,
     input: InputRules = .{},
     repeat: RepeatPolicy = .replace,
-    /// Static, case-sensitive spellings for a directive with exact arity one.
-    /// Null leaves value validation to the parser; a list must be nonempty and unique.
+    /// Static, case-sensitive choices for exact arity one; nonempty and unique.
     choices: ?[]const []const u8 = null,
+    parse: ParseFn,
+    apply: ApplyFn,
+    reset: ?ResetFn = null,
+    /// Mutable state is created separately for each build.
+    state_lifecycle: ?StateLifecycle = null,
 };
 
-/// A static definition and its parsed value, ready for later application.
 pub const PreparedDirective = struct {
     definition: *const Definition,
     value: Value,
@@ -63,4 +105,7 @@ pub const PreparedDirective = struct {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @sizeOf(Definition);
+    _ = @sizeOf(ApplyContext);
+    _ = @sizeOf(StateLifecycle);
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Config = @import("config.zig");
+const DirectiveDefinition = @import("config/definition.zig");
 
 /// Directive names accepted in a kgcache.conf file, one per `Config` field.
 const Directive = enum {
@@ -27,7 +28,7 @@ const Directive = enum {
 };
 
 pub const Error = error{
-    /// A non-blank, non-comment line didn't split into a directive and a value.
+    /// A line is missing a directive or value, or has an invalid value count.
     MalformedLine,
     /// The first token on a line isn't one of the known `Directive`s.
     UnknownDirective,
@@ -84,9 +85,9 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
             .@"exclusive-bg-persistence" => config.exclusive_bg_persistence = try parseBool(value),
             .save => {
                 var tokens = std.mem.tokenizeAny(u8, value, " \t");
-                const seconds_str = tokens.next() orelse return Error.MalformedLine;
-                const changes_str = tokens.next() orelse return Error.MalformedLine;
-                if (tokens.next() != null) return Error.MalformedLine;
+                const seconds_str = tokens.next() orelse return mapParseError(error.InvalidArity);
+                const changes_str = tokens.next() orelse return mapParseError(error.InvalidArity);
+                if (tokens.next() != null) return mapParseError(error.InvalidArity);
 
                 try save_rules.append(allocator, .{
                     .seconds = try parseIntInRange(i64, seconds_str, 1, std.math.maxInt(i64)),
@@ -115,8 +116,15 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
     return config;
 }
 
+fn mapParseError(err: DirectiveDefinition.ParseError) Error {
+    return switch (err) {
+        error.InvalidArity => Error.MalformedLine,
+        error.InvalidValue => Error.InvalidValue,
+    };
+}
+
 fn parseInt(comptime T: type, value: []const u8) Error!T {
-    return std.fmt.parseInt(T, value, 10) catch Error.InvalidValue;
+    return std.fmt.parseInt(T, value, 10) catch mapParseError(error.InvalidValue);
 }
 
 fn parseIntInRange(comptime T: type, value: []const u8, min: T, max: T) Error!T {
