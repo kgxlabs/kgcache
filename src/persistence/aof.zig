@@ -20,6 +20,7 @@ _allocator: std.mem.Allocator,
 _encoder: AofEncoder,
 _persistence_state: *PersistenceState,
 _config: Config,
+_directory_path: []u8,
 _logger: logging.Logger = logging.NoopLogger.logger(),
 //NOTE: base file is only for parent process. never use it in child fork
 // Live incr file handle, will keep the file handle for the lifetime of the process (we can because we open it in append mode)
@@ -86,13 +87,15 @@ pub fn finishLoading(self: *AofBackend, base_size: u64, incr_bytes: u64, file_of
 // TODO: Refactor init. separate concerns
 pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, config: Config) !AofBackend {
     const cwd = std.Io.Dir.cwd();
+    const directory_path = try config.resolveAofDirectory(allocator);
+    errdefer allocator.free(directory_path);
 
-    cwd.createDir(io, config.append_dirname, .default_dir) catch |err| switch (err) {
+    cwd.createDir(io, directory_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    const dir = try cwd.openDir(io, config.append_dirname, .{});
+    const dir = try cwd.openDir(io, directory_path, .{});
     defer dir.close(io);
 
     var incr_seq: u32 = 1;
@@ -170,6 +173,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, 
         ._encoder = AofEncoder.init(),
         ._persistence_state = state,
         ._config = config,
+        ._directory_path = directory_path,
         ._incr_seq = incr_seq,
         ._file = file,
         ._incr_bytes = incr_bytes,
@@ -247,7 +251,7 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
     try flushLocked(self, time.nowMs(self._io));
 
     const cwd = std.Io.Dir.cwd();
-    cwd.createDir(self._io, self._config.append_dirname, .default_dir) catch |err| switch (err) {
+    cwd.createDir(self._io, self._directory_path, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
@@ -255,7 +259,7 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
     // read existing manifest
     const manifest_name = try Manifest.manifestName(self._allocator, self._config.append_filename);
     defer self._allocator.free(manifest_name);
-    const dir = try cwd.openDir(self._io, self._config.append_dirname, .{});
+    const dir = try cwd.openDir(self._io, self._directory_path, .{});
     defer dir.close(self._io);
 
     const maybe_manifest = try Manifest.read(
@@ -454,7 +458,7 @@ fn beginBase(self: *AofBackend, seq: u32) !void {
     const cwd = std.Io.Dir.cwd();
     const dir = try cwd.openDir(
         self._io,
-        self._config.append_dirname,
+        self._directory_path,
         .{},
     );
     defer dir.close(self._io);
@@ -549,7 +553,7 @@ pub fn finishRewrite(ptr: *anyopaque, reap_result: PersistenceState.ReapResult) 
     const cwd = std.Io.Dir.cwd();
     const dir = try cwd.openDir(
         self._io,
-        self._config.append_dirname,
+        self._directory_path,
         .{},
     );
     defer dir.close(self._io);
@@ -820,6 +824,7 @@ pub fn deinit(ptr: *anyopaque) anyerror!void {
     }
 
     self._buffer.deinit(self._allocator);
+    self._allocator.free(self._directory_path);
     if (close_error) |err| return err;
 }
 

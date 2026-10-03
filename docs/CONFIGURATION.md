@@ -1,6 +1,6 @@
 # Configuration
 
-kgcache runs entirely off built-in defaults, mirroring `redis-server`, until you hand it a config file as the first argument:
+kgcache starts with built-in defaults. To use a config file, pass its path as the first argument:
 
 ```bash
 ./zig-out/bin/kgcache path/to/kgcache.conf
@@ -8,25 +8,28 @@ kgcache runs entirely off built-in defaults, mirroring `redis-server`, until you
 
 Omit the argument and it starts from `Config.default()` (`src/config.zig`): `127.0.0.1:6379`, 16 databases, a `dump.kgc` snapshot in the current directory, and so on.
 
-A config file is one directive per line, `directive value`, the same shape as `redis.conf`:
+A config file has one directive per line, in the form `directive value`:
 
 ```
 port 7000
-num-databases 4
+databases 4
 ```
 
 Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
+
+For settings such as `databases`, `appenddirname`, and `appendfilename`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect all rules instead.
 
 ## Directives
 
 | Directive | Default | Meaning |
 | --- | --- | --- |
 | `bind` | `127.0.0.1` | Address the TCP server binds to |
-| `port` | `6379` | TCP port the server listens on |
+| `port` | `6379` | TCP port; `0` asks the OS to select an available port |
 | `reuse-address` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
 | `connection-buffer-size` | `1024` | Per-connection read buffer size, in bytes |
-| `num-databases` | `16` | Number of selectable databases (`SELECT 0` .. `num-databases - 1`) |
-| `snapshot-path` | `dump.kgc` | Path to the `.kgc` snapshot file loaded on startup and written by `SAVE`/`BGSAVE` |
+| `databases` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
+| `dir` | `.` | Shared directory for snapshots and the AOF directory |
+| `dbfilename` | `dump.kgc` | Snapshot filename within `dir`, loaded on startup and written by `SAVE`/`BGSAVE` |
 | `cron-interval-ms` | `100` | How often background work runs, including expiration, AOF flushing, save checks, and child cleanup |
 | `active-expire-budget-ms` | `10` | Time budget per expiration sweep before the worker yields |
 | `active-expire-batch-size` | `20` | Keys sampled per expiration batch, per database |
@@ -35,8 +38,8 @@ Blank lines and lines starting with `#` are ignored. Anything else is validated 
 | `save` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
 | `appendonly` | `no` | Turn the append-only file on (`yes`/`no`) |
 | `appendfsync` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
-| `append-dirname` | `appendonlydir` | Directory that holds AOF data and its manifest |
-| `append-filename` | `appendonly.aof` | Base name used to build AOF file names |
+| `appenddirname` | `appendonlydir` | Directory name within `dir` that holds AOF data and its manifest |
+| `appendfilename` | `appendonly.aof` | Base name used to build AOF file names |
 | `auto-aof-rewrite-percentage` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
 | `auto-aof-rewrite-min-size` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
 | `aof-load-truncated` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
@@ -50,9 +53,9 @@ All limits are inclusive. `usize` is the size of a machine word in the server bu
 
 | Directive | Accepted range |
 | --- | --- |
-| `port` | 1 to 65535 |
+| `port` | 0 to 65535; `0` selects an available TCP port |
 | `connection-buffer-size` | 1 to maximum `usize` |
-| `num-databases` | 1 to 4294967295 |
+| `databases` | 1 to 4294967295 |
 | `cron-interval-ms` | 1 to 9223372036854775807 |
 | `active-expire-budget-ms` | 1 to 127 |
 | `active-expire-batch-size` | 1 to 127 |
@@ -62,12 +65,70 @@ All limits are inclusive. `usize` is the size of a machine word in the server bu
 | `auto-aof-rewrite-min-size` | 0 to maximum `usize` |
 | `bgsave-retry-delay-ms` | 0 to 9223372036854775807; `0` means no retry delay |
 
-## `snapshot-path` gotchas
+## Persistence paths
 
-- Must end in `.kgc`.
-- A relative path resolves against the server's current working directory, not the config file's location.
-- The parent directory must already exist: it is not created automatically.
-- `~` is not expanded, since that's a shell feature rather than something the config parser does; use an absolute path like `/absolute/path/to/dump.kgc` instead of `~/dump.kgc`.
+```conf
+databases 16
+dir ./data
+dbfilename dump.kgc
+appenddirname appendonlydir
+appendfilename appendonly.aof
+```
+
+This config uses `./data/dump.kgc` for snapshots and
+`./data/appendonlydir` for AOF files.
+
+- A relative `dir` resolves from the process working directory, not the config file's location. The process working directory is not changed.
+- `dir` must already exist. Give the user running kgcache read and write access for persistence operations. kgcache creates the AOF subdirectory when AOF is enabled.
+- `dbfilename` must be a nonempty filename ending in `.kgc`, without path separators.
+- `appenddirname` must be a nonempty directory name without path separators. `.` and `..` are rejected.
+- `~` is not expanded. Use an absolute `dir` such as `/absolute/path/to/data` instead of a home-directory shorthand.
+
+For a relative directory, prepare it from the working directory where you
+will start kgcache:
+
+```bash
+mkdir -p ./data
+```
+
+Changing persistence paths or file names selects new locations. It does not
+move, rename, or convert existing persistence files.
+
+### Existing config files
+
+Update existing config files to use the supported names:
+
+| Removed directive | Use |
+| --- | --- |
+| `num-databases` | `databases` |
+| `append-dirname` | `appenddirname` |
+| `append-filename` | `appendfilename` |
+| `snapshot-path` | `dir` and `dbfilename` |
+
+Removed names stop startup with an unknown-directive error. There are no
+aliases or a legacy path mode.
+
+## Redis config compatibility
+
+kgcache supports the directives listed in this page. Redis names are used
+for the supported database and persistence settings. A complete Redis
+config file may contain unsupported directives, which stop startup.
+
+Write values without surrounding quotes. Quote characters are treated as
+part of the value.
+Numeric sizes use decimal bytes, such as `67108864`; size suffixes such as
+`64mb` are not supported. Config directive overrides on the command line
+are not available yet.
+
+| Setting or format | kgcache | Redis |
+| --- | --- | --- |
+| Snapshot files | `.kgc` format, with `dbfilename dump.kgc` by default | RDB format, with `dbfilename dump.rdb` by default |
+| `port 0` | Starts a TCP listener on an OS-selected port | Disables the TCP listener |
+
+The Redis defaults and port behavior are documented in the
+[Redis 8.2 example configuration](https://github.com/redis/redis/blob/8.2/redis.conf).
+kgcache does not read or write Redis RDB snapshots. Renaming an RDB file
+to `.kgc` does not convert it.
 
 ## `exclusive-bg-persistence` recommendation
 
@@ -99,9 +160,9 @@ for the write counter and rule checks.
 
 ## AOF settings
 
-`appendonly yes` turns on the append-only file. With AOF on, startup loads
-the AOF and does not load `snapshot-path`. `SAVE` and `BGSAVE` still write
-snapshots.
+`appendonly yes` turns on AOF. Startup then loads AOF and skips the
+snapshot. `SAVE` and `BGSAVE` still write snapshots using the directory
+configured by `dir` and the filename configured by `dbfilename`.
 
 `appendfsync` controls when AOF data is forced to the storage device:
 
@@ -111,11 +172,11 @@ snapshots.
 | `everysec` | Write from cron and fsync at most once per second |
 | `no` | Write from cron and let the OS decide when to fsync |
 
-`append-dirname` is resolved from the process working directory. kgcache
+`appenddirname` names a directory within `dir`. kgcache
 owns this directory and may remove AOF data files that are not listed in
 the manifest. Do not share it with other files.
 
-`append-filename` is a base name, not a full path. For example,
+`appendfilename` is a base name, not a full path. For example,
 `appendonly.aof` produces names such as `appendonly.aof.1.base`,
 `appendonly.aof.2.incr`, and `appendonly.aof.manifest`.
 

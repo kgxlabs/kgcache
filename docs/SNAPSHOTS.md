@@ -7,6 +7,34 @@ For a comparison with AOF, see [Persistence](PERSISTENCE.md). For AOF
 setup, fsync choices, startup, and rewrites, see
 [Append-only file](AOF.md).
 
+## Snapshot location and format
+
+Configure the base directory and snapshot filename in `kgcache.conf`:
+
+```conf
+dir ./data
+dbfilename dump.kgc
+```
+
+Create `./data` before starting kgcache, and give the user running the
+server read and write access. A relative `dir` uses the process working
+directory as its base. This example reads and writes `./data/dump.kgc`.
+The defaults, `dir .` and `dbfilename dump.kgc`, use `dump.kgc` in the
+process working directory.
+
+`dbfilename` must be a nonempty filename ending in `.kgc`, with no path
+separators. The old `snapshot-path` directive is rejected. Changing the
+settings does not move, rename, or convert an existing snapshot.
+
+Snapshots use kgcache's `.kgc` format. Redis RDB files cannot be loaded as
+`.kgc` files, including after renaming their extension. See
+[Persistence paths](CONFIGURATION.md#persistence-paths) and
+[Redis config compatibility](CONFIGURATION.md#redis-config-compatibility).
+
+When AOF is disabled, startup loads the configured snapshot if it exists.
+With `appendonly yes`, startup loads AOF; `SAVE` and `BGSAVE` still write to
+the configured snapshot path.
+
 ## Background saving (`BGSAVE`)
 
 `SAVE` writes a full snapshot to disk on the connection thread that asked for it: simple, but the client is stuck waiting for however long the write takes. `BGSAVE` runs without blocking the client. It returns `Background saving started` when the save begins. If an AOF rewrite is active and background persistence is exclusive, it returns `Background saving scheduled`, then starts the save after the rewrite finishes.

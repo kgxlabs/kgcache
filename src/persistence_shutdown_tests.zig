@@ -9,30 +9,29 @@ const testing = std.testing;
 
 const Scratch = struct {
     tmp: testing.TmpDir,
-    snapshot_path: []u8,
+    data_dir: []u8,
     aof_dir: []u8,
 
     fn init() !Scratch {
         var tmp = testing.tmpDir(.{});
         errdefer tmp.cleanup();
-        const snapshot_path = try std.fmt.allocPrint(
+        const data_dir = try std.fmt.allocPrint(
             testing.allocator,
-            ".zig-cache/tmp/{s}/dump.kgc",
+            ".zig-cache/tmp/{s}",
             .{tmp.sub_path},
         );
-        errdefer testing.allocator.free(snapshot_path);
+        errdefer testing.allocator.free(data_dir);
         const aof_dir = try std.fmt.allocPrint(
             testing.allocator,
             ".zig-cache/tmp/{s}/appendonlydir",
             .{tmp.sub_path},
         );
-        return .{ .tmp = tmp, .snapshot_path = snapshot_path, .aof_dir = aof_dir };
+        return .{ .tmp = tmp, .data_dir = data_dir, .aof_dir = aof_dir };
     }
 
     fn config(self: *const Scratch, append_only: bool) Config {
         var result = Config.default();
-        result.snapshot_path = self.snapshot_path;
-        result.append_dirname = self.aof_dir;
+        result.dir = self.data_dir;
         result.append_only = append_only;
         result.append_fsync = .always;
         result.exclusive_bg_persistence = false;
@@ -42,7 +41,7 @@ const Scratch = struct {
 
     fn deinit(self: *Scratch) void {
         testing.allocator.free(self.aof_dir);
-        testing.allocator.free(self.snapshot_path);
+        testing.allocator.free(self.data_dir);
         self.tmp.cleanup();
     }
 };

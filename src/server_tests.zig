@@ -165,6 +165,104 @@ test "create builds the full object graph and destroy leaks nothing" {
     try server.destroy();
 }
 
+test "snapshot and AOF persistence use relative and absolute dir" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |absolute_dir| {
+        for ([_]bool{ false, true }) |append_only| {
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const relative_dir = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+            defer testing.allocator.free(relative_dir);
+            var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const absolute_len = try tmp.dir.realPath(testing.io, &path_buffer);
+            const config: Config = .{
+                .dir = if (absolute_dir) path_buffer[0..absolute_len] else relative_dir,
+                .dbfilename = if (absolute_dir) "custom.kgc" else "dump.kgc",
+                .append_only = append_only,
+                .append_dirname = "history",
+                .append_filename = "journal.aof",
+                .append_fsync = .always,
+                .num_databases = 1,
+            };
+
+            {
+                const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+                defer server.destroy() catch unreachable;
+                _ = try server._store.set(.{
+                    .key = "persistent",
+                    .value = "snapshot-value",
+                    .condition = null,
+                    .expires_at = null,
+                    .keepttl = false,
+                    .response = null,
+                }, 0);
+                try server._store.save();
+                if (append_only) {
+                    _ = try server._store.set(.{
+                        .key = "persistent",
+                        .value = "aof-value",
+                        .condition = null,
+                        .expires_at = null,
+                        .keepttl = false,
+                        .response = null,
+                    }, 0);
+                }
+            }
+
+            try tmp.dir.access(testing.io, config.dbfilename, .{});
+            if (append_only) {
+                try tmp.dir.access(testing.io, "history/journal.aof.manifest", .{});
+                try tmp.dir.access(testing.io, "history/journal.aof.1.incr", .{});
+                try tmp.dir.writeFile(testing.io, .{
+                    .sub_path = "history/journal.aof.99.base",
+                    .data = "interrupted rewrite",
+                });
+            } else {
+                try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "history", .{}));
+            }
+
+            const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+            defer restarted.destroy() catch unreachable;
+            var loaded = try restarted._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
+            defer loaded.deinit();
+            try testing.expectEqualStrings(if (append_only) "aof-value" else "snapshot-value", loaded.value.string);
+            if (append_only) {
+                try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "history/journal.aof.99.base", .{}));
+            }
+        }
+    }
+}
+
+test "create rejects a missing persistence directory without creating it" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const missing_dir = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/missing", .{tmp.sub_path});
+    defer testing.allocator.free(missing_dir);
+
+    for ([_]bool{ false, true }) |append_only| {
+        try testing.expectError(error.FileNotFound, Server.create(
+            testing.io,
+            testing.allocator,
+            .{ .dir = missing_dir, .append_only = append_only },
+            logging.NoopLogger.logger(),
+        ));
+        try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "missing", .{}));
+    }
+}
+
+test "create validates persistence names supplied directly in Config" {
+    const testing = std.testing;
+    for ([_]Config{
+        .{ .dir = "" },
+        .{ .dbfilename = "../dump.kgc" },
+        .{ .dbfilename = "dump.rdb" },
+        .{ .append_dirname = "../aof" },
+    }) |config| {
+        try testing.expectError(error.InvalidValue, Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger()));
+    }
+}
+
 test "server destroy keeps Store alive until a connection command finishes" {
     const testing = std.testing;
     const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
@@ -294,7 +392,7 @@ test "create with appendonly on does not load the kgc snapshot" {
     var config = Config.default();
     config.append_only = true;
     config.append_dirname = dirname;
-    config.snapshot_path = snapshot_path;
+    config.dbfilename = snapshot_path;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
     defer server.destroy() catch unreachable;
@@ -313,7 +411,7 @@ test "create with appendonly off still loads the kgc snapshot" {
     try writeKgcSnapshotWithFooBar(testing.io, testing.allocator, snapshot_path);
 
     var config = Config.default();
-    config.snapshot_path = snapshot_path;
+    config.dbfilename = snapshot_path;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
     defer server.destroy() catch unreachable;

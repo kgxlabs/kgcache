@@ -7,8 +7,9 @@ const Directive = enum {
     port,
     @"reuse-address",
     @"connection-buffer-size",
-    @"num-databases",
-    @"snapshot-path",
+    databases,
+    dir,
+    dbfilename,
     @"cron-interval-ms",
     @"active-expire-budget-ms",
     @"active-expire-batch-size",
@@ -17,8 +18,8 @@ const Directive = enum {
     save,
     appendonly,
     appendfsync,
-    @"append-dirname",
-    @"append-filename",
+    appenddirname,
+    appendfilename,
     @"auto-aof-rewrite-percentage",
     @"auto-aof-rewrite-min-size",
     @"aof-load-truncated",
@@ -39,7 +40,8 @@ pub const Error = error{
 /// blank lines and lines starting with `#` are skipped, everything else must be `directive value`.
 /// Returns `Config.default()` overlaid with whatever directives were present.
 ///
-/// The returned `Config`'s string fields (`bind_address`, `snapshot_path`) borrow directly from `contents`, so `contents` must outlive the `Config`.
+/// The returned `Config`'s string fields borrow directly from `contents`,
+/// so `contents` must outlive the `Config`.
 /// `allocator` backs `Config.save_rules`, since a repeated `save` directive is
 /// assembled line-by-line rather than borrowed as one contiguous slice of
 /// `contents` -- pass the same arena used for the rest of `Config` so it's
@@ -66,8 +68,15 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
             .port => config.port = try parseIntInRange(u16, value, 0, std.math.maxInt(u16)),
             .@"reuse-address" => config.reuse_address = try parseBool(value),
             .@"connection-buffer-size" => config.connection_buffer_size = try parseIntInRange(usize, value, 1, std.math.maxInt(usize)),
-            .@"num-databases" => config.num_databases = try parseIntInRange(usize, value, 1, std.math.maxInt(u32)),
-            .@"snapshot-path" => config.snapshot_path = value,
+            .databases => config.num_databases = try parseIntInRange(usize, value, 1, std.math.maxInt(u32)),
+            .dir => {
+                try Config.validateDir(value);
+                config.dir = value;
+            },
+            .dbfilename => {
+                try Config.validateDbfilename(value);
+                config.dbfilename = value;
+            },
             .@"cron-interval-ms" => config.cron_interval_ms = try parseIntInRange(i64, value, 1, std.math.maxInt(i64)),
             .@"active-expire-budget-ms" => config.active_expire_budget_ms = try parseIntInRange(i8, value, 1, std.math.maxInt(i8)),
             .@"active-expire-batch-size" => config.active_expire_batch_size = try parseIntInRange(i8, value, 1, std.math.maxInt(i8)),
@@ -86,8 +95,11 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
             },
             .appendonly => config.append_only = try parseBool(value),
             .appendfsync => config.append_fsync = try parseEnum(Config.AppendFsync, value),
-            .@"append-dirname" => config.append_dirname = value,
-            .@"append-filename" => config.append_filename = value,
+            .appenddirname => {
+                try Config.validateAppendDirname(value);
+                config.append_dirname = value;
+            },
+            .appendfilename => config.append_filename = value,
             .@"auto-aof-rewrite-percentage" => config.auto_aof_rewrite_percentage = try parseInt(u32, value),
             .@"auto-aof-rewrite-min-size" => config.auto_aof_rewrite_min_size = try parseInt(usize, value),
             .@"aof-load-truncated" => config.aof_load_truncated = try parseBool(value),
@@ -133,8 +145,9 @@ test "parse overlays every directive onto the defaults" {
         \\
         \\reuse-address no
         \\connection-buffer-size 2048
-        \\num-databases 4
-        \\snapshot-path /var/lib/kgcache/dump.kgc
+        \\databases 4
+        \\dir /var/lib/kgcache
+        \\dbfilename custom.kgc
         \\cron-interval-ms 250
         \\active-expire-budget-ms 20
         \\active-expire-batch-size 40
@@ -149,7 +162,8 @@ test "parse overlays every directive onto the defaults" {
     try testing.expectEqual(false, config.reuse_address);
     try testing.expectEqual(2048, config.connection_buffer_size);
     try testing.expectEqual(4, config.num_databases);
-    try testing.expectEqualStrings("/var/lib/kgcache/dump.kgc", config.snapshot_path);
+    try testing.expectEqualStrings("/var/lib/kgcache", config.dir);
+    try testing.expectEqualStrings("custom.kgc", config.dbfilename);
     try testing.expectEqual(250, config.cron_interval_ms);
     try testing.expectEqual(20, config.active_expire_budget_ms);
     try testing.expectEqual(40, config.active_expire_batch_size);
@@ -172,7 +186,8 @@ test "parse leaves directives absent from a partial file at their defaults" {
     try testing.expectEqual(defaults.reuse_address, config.reuse_address);
     try testing.expectEqual(defaults.connection_buffer_size, config.connection_buffer_size);
     try testing.expectEqual(defaults.num_databases, config.num_databases);
-    try testing.expectEqualStrings(defaults.snapshot_path, config.snapshot_path);
+    try testing.expectEqualStrings(defaults.dir, config.dir);
+    try testing.expectEqualStrings(defaults.dbfilename, config.dbfilename);
     try testing.expectEqual(defaults.cron_interval_ms, config.cron_interval_ms);
     try testing.expectEqual(defaults.active_expire_budget_ms, config.active_expire_budget_ms);
     try testing.expectEqual(defaults.active_expire_batch_size, config.active_expire_batch_size);
@@ -194,7 +209,7 @@ test "parse enforces numeric directive boundaries" {
         above_maximum: []const u8,
     }{
         .{ .minimum = "port 0", .maximum = "port 65535", .below_minimum = "port -1", .above_maximum = "port 65536" },
-        .{ .minimum = "num-databases 1", .maximum = "num-databases 4294967295", .below_minimum = "num-databases 0", .above_maximum = "num-databases 4294967296" },
+        .{ .minimum = "databases 1", .maximum = "databases 4294967295", .below_minimum = "databases 0", .above_maximum = "databases 4294967296" },
         .{ .minimum = "cron-interval-ms 1", .maximum = "cron-interval-ms 9223372036854775807", .below_minimum = "cron-interval-ms 0", .above_maximum = "cron-interval-ms 9223372036854775808" },
         .{ .minimum = "active-expire-budget-ms 1", .maximum = "active-expire-budget-ms 127", .below_minimum = "active-expire-budget-ms 0", .above_maximum = "active-expire-budget-ms 128" },
         .{ .minimum = "active-expire-batch-size 1", .maximum = "active-expire-batch-size 127", .below_minimum = "active-expire-batch-size 0", .above_maximum = "active-expire-batch-size 128" },
@@ -280,6 +295,104 @@ test "parse rejects a line with a directive but no value" {
 test "parse rejects a directive name that isn't recognized" {
     const testing = std.testing;
     try testing.expectError(Error.UnknownDirective, parse(testing.allocator, "maxmemory 100mb"));
+}
+
+test "parse rejects removed database and AOF directive names" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "num-databases 4",
+        "append-dirname appendonlydir",
+        "append-filename appendonly.aof",
+    }) |contents| {
+        try testing.expectError(Error.UnknownDirective, parse(testing.allocator, contents));
+    }
+}
+
+test "parse uses the last value for repeated database and AOF settings" {
+    const testing = std.testing;
+    const contents =
+        \\databases 4
+        \\appenddirname first-aof
+        \\appendfilename first.aof
+        \\databases 8
+        \\appenddirname second-aof
+        \\appendfilename second.aof
+    ;
+
+    const config = try parse(testing.allocator, contents);
+    defer testing.allocator.free(config.save_rules);
+
+    try testing.expectEqual(8, config.num_databases);
+    try testing.expectEqualStrings("second-aof", config.append_dirname);
+    try testing.expectEqualStrings("second.aof", config.append_filename);
+}
+
+test "parse uses the last dir and dbfilename values" {
+    const testing = std.testing;
+    const contents =
+        \\dir ./first
+        \\dbfilename first.kgc
+        \\dir ./second
+        \\dbfilename second.kgc
+    ;
+
+    const config = try parse(testing.allocator, contents);
+    defer testing.allocator.free(config.save_rules);
+
+    try testing.expectEqualStrings("./second", config.dir);
+    try testing.expectEqualStrings("second.kgc", config.dbfilename);
+}
+
+test "parse rejects the removed snapshot-path directive" {
+    const testing = std.testing;
+    try testing.expectError(Error.UnknownDirective, parse(testing.allocator, "snapshot-path dump.kgc"));
+}
+
+test "parse requires a snapshot basename ending in kgc" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "dbfilename dump.rdb",
+        "dbfilename /absolute/path/dump.kgc",
+        "dbfilename data/dump.kgc",
+        "dbfilename ../dump.kgc",
+        "dbfilename data\\dump.kgc",
+        "dbfilename dump\x00.kgc",
+    }) |contents| {
+        try testing.expectError(Error.InvalidValue, parse(testing.allocator, contents));
+    }
+}
+
+test "parse requires an AOF directory name within dir" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "appenddirname .",
+        "appenddirname ..",
+        "appenddirname /absolute/path/aof",
+        "appenddirname data/aof",
+        "appenddirname ../aof",
+        "appenddirname data\\aof",
+        "appenddirname aof\x00dir",
+    }) |contents| {
+        try testing.expectError(Error.InvalidValue, parse(testing.allocator, contents));
+    }
+}
+
+test "parse rejects persistence directives without values" {
+    const testing = std.testing;
+    for ([_][]const u8{ "dir", "dbfilename", "appenddirname" }) |contents| {
+        try testing.expectError(Error.MalformedLine, parse(testing.allocator, contents));
+    }
+}
+
+test "parse validates every occurrence of persistence settings" {
+    const testing = std.testing;
+    for ([_][]const u8{
+        "dir data\x00dir\ndir ./data",
+        "dbfilename dump.rdb\ndbfilename dump.kgc",
+        "appenddirname ../aof\nappenddirname aof",
+    }) |contents| {
+        try testing.expectError(Error.InvalidValue, parse(testing.allocator, contents));
+    }
 }
 
 test "parse rejects a value that doesn't fit the directive's type" {
@@ -382,8 +495,8 @@ test "parse reads every aof directive" {
     const contents =
         \\appendonly yes
         \\appendfsync always
-        \\append-dirname /var/lib/kgcache/appendonlydir
-        \\append-filename myappendonly.aof
+        \\appenddirname custom-aof
+        \\appendfilename myappendonly.aof
         \\auto-aof-rewrite-percentage 50
         \\auto-aof-rewrite-min-size 1024
         \\aof-load-truncated no
@@ -394,7 +507,7 @@ test "parse reads every aof directive" {
 
     try testing.expectEqual(true, config.append_only);
     try testing.expectEqual(Config.AppendFsync.always, config.append_fsync);
-    try testing.expectEqualStrings("/var/lib/kgcache/appendonlydir", config.append_dirname);
+    try testing.expectEqualStrings("custom-aof", config.append_dirname);
     try testing.expectEqualStrings("myappendonly.aof", config.append_filename);
     try testing.expectEqual(50, config.auto_aof_rewrite_percentage);
     try testing.expectEqual(1024, config.auto_aof_rewrite_min_size);

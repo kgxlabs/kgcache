@@ -21,6 +21,8 @@ pub const ReadyCallback = struct {
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _config: Config,
+// Owned here and borrowed by the snapshot backend until persistence is drained.
+_snapshot_path: []u8,
 // Borrowed from the caller. Server does not own or release the logger implementation.
 _logger: logging.Logger,
 
@@ -51,11 +53,17 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     const self = try allocator.create(Server);
     errdefer allocator.destroy(self);
 
+    const snapshot_path = try config.resolveSnapshotPath(allocator);
+    errdefer allocator.free(snapshot_path);
+    const persistence_dir = try std.Io.Dir.cwd().openDir(io, config.dir, .{});
+    persistence_dir.close(io);
+
     const num_databases = config.num_databases;
 
     self._io = io;
     self._allocator = allocator;
     self._config = config;
+    self._snapshot_path = snapshot_path;
     self._logger = logger;
     self._listener = null;
     self._cron_stop_requested = .init(false);
@@ -71,7 +79,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
 
     self._persistence_state = PersistenceState.init(io, .{ .mutual_exclusive = config.exclusive_bg_persistence });
 
-    self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, config.snapshot_path);
+    self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, snapshot_path);
     self._kgc._logger = logger;
     if (config.append_only) {
         self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
@@ -208,6 +216,7 @@ pub fn destroy(self: *Server) anyerror!void {
     self._allocator.free(self._data_storages);
     self._allocator.free(self._notifier_storages);
     self._allocator.free(self._default_storages);
+    self._allocator.free(self._snapshot_path);
     self._allocator.destroy(self);
 
     if (cleanup_error) |err| return err;
@@ -240,7 +249,7 @@ fn cleanupFailedAof(self: *Server, io: std.Io, allocator: std.mem.Allocator, con
 
     const cwd = std.Io.Dir.cwd();
     // open in iterate mode
-    var dir = try cwd.openDir(io, config.append_dirname, .{ .iterate = true });
+    var dir = try cwd.openDir(io, aof._directory_path, .{ .iterate = true });
     defer dir.close(io);
 
     const manifest_name = try Manifest.manifestName(allocator, config.append_filename);

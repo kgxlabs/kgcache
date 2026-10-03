@@ -11,17 +11,31 @@ Snapshots and AOF can both be enabled, but they have different jobs:
 | Snapshot | A full copy of the data at one point in time | Simple and compact, but newer writes are not in it |
 | AOF | Each write command, in order | Keeps newer writes, but the log grows until it is rewritten |
 
-When `appendonly yes` is set, startup uses AOF and does not load
-`dump.kgc`. `SAVE` and `BGSAVE` still work and still write snapshots.
+When `appendonly yes` is set, startup loads AOF and skips the snapshot.
+`SAVE` and `BGSAVE` still write snapshots using the directory configured
+by `dir` and the filename configured by `dbfilename`.
 
 ## Turn AOF on
 
 Add this to `kgcache.conf`:
 
-```text
+```conf
+dir ./data
+appenddirname appendonlydir
+appendfilename appendonly.aof
 appendonly yes
 appendfsync everysec
 ```
+
+Create `./data` before starting kgcache, and give the user running the
+server read and write access. A relative `dir` uses the process working
+directory as its base. kgcache creates the AOF subdirectory when AOF is
+enabled. This example writes AOF files under `./data/appendonlydir`.
+
+Changing `dir`, `appenddirname`, or `appendfilename` does not move, rename,
+or convert existing files. See [Persistence paths](CONFIGURATION.md#persistence-paths)
+and [Redis config compatibility](CONFIGURATION.md#redis-config-compatibility)
+for the supported names and remaining differences.
 
 `everysec` is the default and is the best choice for most uses. See
 [AOF settings](CONFIGURATION.md#aof-settings) for every AOF option.
@@ -99,7 +113,10 @@ are reported after remaining safe cleanup, with the first error returned.
 
 ## Files on disk
 
-After the first rewrite, the default directory looks like this:
+AOF files are stored in the subdirectory named by `appenddirname`, inside
+the directory configured by `dir`. With the default settings `dir .`,
+`appenddirname appendonlydir`, and `appendfilename appendonly.aof`, the
+directory after the first rewrite looks like this:
 
 ```text
 appendonlydir/

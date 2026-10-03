@@ -27,7 +27,10 @@ pub const ReplayStats = struct {
 
 pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) !ReplayStats {
     const cwd = std.Io.Dir.cwd();
-    var dir = cwd.openDir(io, config.append_dirname, .{}) catch |err| switch (err) {
+    const directory_path = try config.resolveAofDirectory(allocator);
+    defer allocator.free(directory_path);
+
+    var dir = cwd.openDir(io, directory_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return .{},
         else => return err,
     };

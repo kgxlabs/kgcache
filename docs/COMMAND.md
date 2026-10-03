@@ -86,7 +86,7 @@ Returns the number of stored keys in the selected database as an integer.
 Writes a `.kgc` snapshot of all databases to disk and blocks the calling
 connection until the write finishes. Returns `OK` on success, or an error if
 the write fails or a save is already running. The output path is set by
-`snapshot-path` in [Configuration](CONFIGURATION.md).
+`dir` and `dbfilename` in [Configuration](CONFIGURATION.md).
 
 ## `BGSAVE`
 
