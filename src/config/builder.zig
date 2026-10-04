@@ -7,7 +7,7 @@ const DirectiveDefinition = directive_definition.Definition;
 
 const ConfigBuilder = @This();
 
-/// File callers use .file. The CLI tag is reserved; layer precedence is not applied yet.
+/// Apply file directives first, then CLI overrides, before finishing the build.
 pub const Layer = enum {
     file,
     cli,
@@ -40,14 +40,14 @@ pub fn init(allocator: std.mem.Allocator) ConfigBuilder {
 
 /// Apply a prepared value, creating or reusing its definition's state (null if stateless).
 /// A failure ends the build. Failed registration discards the new state immediately;
-/// other owned state remains for deinit. Layer precedence is reserved.
+/// other owned state remains for deinit. The first CLI occurrence of an append
+/// definition resets the file's collection; later CLI occurrences append in order.
 pub fn apply(
     self: *ConfigBuilder,
     directive: directive_definition.PreparedDirective,
     layer: Layer,
 ) directive_definition.ApplyError!void {
     std.debug.assert(self.status == .building);
-    _ = layer;
     errdefer self.status = .failed;
 
     const definition = directive.definition;
@@ -58,8 +58,10 @@ pub fn apply(
     };
 
     if (definition.state_lifecycle) |lifecycle| {
-        for (self.states.items) |entry| {
+        var state_entry: ?*StateEntry = null;
+        for (self.states.items) |*entry| {
             if (entry.definition == definition) {
+                state_entry = entry;
                 context.state = entry.state;
                 break;
             }
@@ -74,6 +76,12 @@ pub fn apply(
                 lifecycle.deinit(&context, .discard);
                 return err;
             };
+            state_entry = &self.states.items[self.states.items.len - 1];
+        }
+
+        if (layer == .cli and definition.repeat == .append and !state_entry.?.applied_in_cli) {
+            definition.reset.?(&context);
+            state_entry.?.applied_in_cli = true;
         }
     }
 

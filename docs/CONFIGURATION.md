@@ -1,12 +1,33 @@
 # Configuration
 
-kgcache starts with built-in defaults. To use a config file, pass its path as the first argument:
+kgcache starts with built-in defaults. To use a config file, pass its path as a positional argument:
 
 ```bash
 ./zig-out/bin/kgcache path/to/kgcache.conf
 ```
 
-Omit the argument and it starts from `Config.default()` (`src/config.zig`): `127.0.0.1:6379`, 16 databases, a `dump.kgc` snapshot in the current directory, and so on.
+Omit the path and it starts from `Config.default()` (`src/config.zig`): `127.0.0.1:6379`, 16 databases, a `dump.kgc` snapshot in the current directory, and so on. Command-line overrides apply after the optional file.
+
+Use `--<directive> <value>` to override any supported setting:
+
+```bash
+./zig-out/bin/kgcache path/to/kgcache.conf --port 7000 --databases 4
+./zig-out/bin/kgcache --dir 'data files' --save 60 1 --save 300 10
+./zig-out/bin/kgcache path/to/kgcache.conf --save ''
+```
+
+The shell supplies each value as one argument. Single-value directives consume
+one argument, and `--save` consumes two numbers or one empty argument. A value
+starting with `--` is treated as a missing value before the next option. Use
+separate arguments, such as `--port 7000`; `--port=7000` is not supported.
+The optional config path and the process option `--ready-fd <fd>` may appear
+beside directive overrides. `--ready-fd` requires a decimal descriptor of at
+least 3 and may appear only once.
+
+For single-value settings, the last CLI occurrence wins. Every CLI and file
+occurrence is validated, even if a later value replaces it. The first `--save`
+replaces all file save rules; further CLI rules append in order. `--save ''`
+clears rules collected so far, and later rules can enable automatic saving again.
 
 A config file has one directive per line, in the form `directive value`:
 
@@ -17,9 +38,9 @@ databases 4
 
 Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
 
-Names and `yes`/`no` or enum spellings are case-sensitive. Leading and trailing whitespace is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` requires exactly two values separated by spaces or tabs. Inline comments are not supported; a `#` after a directive is part of its value.
+Names and `yes`/`no` or enum spellings are case-sensitive. Leading and trailing whitespace is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` accepts two values separated by spaces or tabs, or `save ""` to clear prior rules. Inline comments are not supported; a `#` after a directive is part of its value.
 
-For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect all rules in file order.
+For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect rules in file order, with `save ""` clearing earlier rules.
 
 ## Directives
 
@@ -116,11 +137,11 @@ kgcache supports the directives listed in this page. Redis names are used
 for the supported database and persistence settings. A complete Redis
 config file may contain unsupported directives, which stop startup.
 
-Write values without surrounding quotes. Quote characters are treated as
-part of the value.
+Write file values without surrounding quotes. Quote characters are treated as
+part of the value, except for `save ""`, which clears prior save rules.
 Numeric sizes use decimal bytes, such as `67108864`; size suffixes such as
-`64mb` are not supported. Config directive overrides on the command line
-are not available yet.
+`64mb` are not supported. CLI values may use shell quotes to keep spaces within
+one argument; the shell removes those quotes before kgcache parses the value.
 
 | Setting or format | kgcache | Redis |
 | --- | --- | --- |
@@ -156,8 +177,9 @@ have been reached. A save starts when any rule matches. Both fields must be
 positive: `seconds` is at most 9223372036854775807 and `changes` is at most
 4294967295.
 
-With no `save` line, automatic saving is off. Manual `SAVE` and `BGSAVE`
-still work. `save ""` is not supported yet. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
+With no `save` line, automatic saving is off. `save ""` clears earlier file rules,
+and `--save ''` clears file rules and earlier CLI rules. Manual `SAVE` and `BGSAVE`
+still work. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
 for the write counter and rule checks.
 
 ## AOF settings

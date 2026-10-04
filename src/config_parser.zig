@@ -1,5 +1,6 @@
 //! Apply file syntax through registry preparation and builder application.
-//! Blank lines and full-line comments are skipped; quotes and inline # stay literal.
+//! Blank lines and full-line comments are skipped. Quotes and inline # stay literal
+//! except for empty values explicitly normalized by a definition's InputRules.
 
 const std = @import("std");
 const Config = @import("config.zig");
@@ -53,8 +54,15 @@ pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
         if (value.len == 0) return Error.MalformedLine;
 
         const definition = registry.find(directive_name) orelse return Error.UnknownDirective;
-        const unsplit_value = [_][]const u8{value};
-        const values: []const []const u8 = switch (definition.input.file_values) {
+        // accept "" as empty value
+        const normalize_empty = definition.input.normalize_empty_file_value and std.mem.eql(u8, value, "\"\"");
+        var normalized_value = value;
+        if (normalize_empty) {
+            normalized_value = "";
+        }
+
+        const unsplit_value = [_][]const u8{normalized_value};
+        const values: []const []const u8 = if (normalize_empty) &unsplit_value else switch (definition.input.file_values) {
             .unsplit_value => &unsplit_value,
             .tokens => blk: {
                 token_values.clearRetainingCapacity();
@@ -653,7 +661,7 @@ test "parse preserves arity, value, and name errors for every occurrence" {
     for ([_]struct { contents: []const u8, err: Error }{
         .{ .contents = "port \t\r\n", .err = Error.MalformedLine },
         .{ .contents = "unknown", .err = Error.MalformedLine },
-        .{ .contents = "save \"\"", .err = Error.MalformedLine },
+        .{ .contents = "save \"\" extra", .err = Error.InvalidValue },
         .{ .contents = "save 60 1 " ++ ("extra " ** 24), .err = Error.MalformedLine },
         .{ .contents = "port 7000 extra", .err = Error.InvalidValue },
         .{ .contents = "port 7000 # inline", .err = Error.InvalidValue },
@@ -672,6 +680,21 @@ test "parse preserves arity, value, and name errors for every occurrence" {
     }) |case| {
         try testing.expectError(case.err, parse(testing.allocator, case.contents));
     }
+}
+
+test "file save clearing removes prior rules and preserves later rules" {
+    const testing = std.testing;
+    const cleared = try parse(testing.allocator, "save 60 1\nsave \"\"\nport 7000");
+    defer testing.allocator.free(cleared.save_rules);
+    try testing.expectEqual(0, cleared.save_rules.len);
+    try testing.expectEqual(7000, cleared.port);
+
+    const config = try parse(testing.allocator, "save 60 1\nsave \t\"\" \r\nsave 300 10\nsave 900 100");
+    defer testing.allocator.free(config.save_rules);
+    try testing.expectEqualDeep(&[_]Config.SaveRule{
+        .{ .seconds = 300, .changes = 10 },
+        .{ .seconds = 900, .changes = 100 },
+    }, config.save_rules);
 }
 
 test "parse discards accumulated states and token storage after file errors" {

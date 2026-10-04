@@ -33,8 +33,9 @@ active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
-/// Empty rules `""` disable automatic saving. Parsing appends rules in file order;
-/// the caller owns the allocated slice after successful construction.
+/// Empty rules disable automatic saving. File rules are collected in order;
+/// CLI save rules replace that collection. A clear operation removes prior rules.
+/// The caller owns the allocated slice after successful construction.
 save_rules: []const SaveRule = &.{},
 append_only: bool = false,
 /// A *base* name, not a real file: the files on disk derive from it

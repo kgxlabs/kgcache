@@ -65,15 +65,17 @@ pub fn main(init: std.process.Init) u8 {
 }
 
 fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
-    const cli = Cli.parse(init.minimal.args) catch |err| {
+    var cli = Cli.parse(init.gpa, init.minimal.args) catch |err| {
         logger.err("app: invalid command line", err, @errorReturnTrace());
         return err;
     };
+    defer cli.deinit();
+
     var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
     defer ready_pipe.close();
 
-    // Config values borrow the file buffer, so keep it in the application arena.
-    const config = ConfigLoader.loadFromPath(init.io, init.arena.allocator(), cli.config_path) catch |err| {
+    // Config strings borrow argv or the file buffer kept in the application arena.
+    const config = ConfigLoader.load(init.io, init.arena.allocator(), cli.config_path, cli.overrides.items) catch |err| {
         logger.err("app: failed to load configuration", err, @errorReturnTrace());
         return err;
     };

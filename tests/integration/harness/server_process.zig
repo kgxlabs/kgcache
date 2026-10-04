@@ -9,6 +9,8 @@ pub const Options = struct {
     /// Config path relative to the fixture's working directory.
     config_subpath: []const u8 = "kgcache.conf",
     extra_config: []const u8 = "",
+    /// Borrowed CLI arguments appended after the config path and readiness option.
+    extra_args: []const []const u8 = &.{},
     artifact_dir: ?[]const u8 = null,
     report_failures: bool = true,
 };
@@ -99,8 +101,12 @@ pub const ServerProcess = struct {
 
         var fd_buffer: [16]u8 = undefined;
         const ready_fd_arg = try std.fmt.bufPrint(&fd_buffer, "{d}", .{ready_fds[1]});
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
+        try argv.appendSlice(self.allocator, &.{ self.executable_path, self.options.config_subpath, "--ready-fd", ready_fd_arg });
+        try argv.appendSlice(self.allocator, self.options.extra_args);
         var child = try std.process.spawn(self.io, .{
-            .argv = &.{ self.executable_path, self.options.config_subpath, "--ready-fd", ready_fd_arg },
+            .argv = argv.items,
             .cwd = .{ .path = self.data_dir },
             .stdin = .ignore,
             .stdout = .pipe,

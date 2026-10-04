@@ -113,8 +113,10 @@ and trace availability.
 │   ├── connection_manager.zig   # Worker ownership, shutdown, joining, reaping
 │   ├── cron.zig                 # Background housekeeping loop (tick schedule)
 │   ├── expiration.zig           # Active expiration round/batch policy
-│   ├── config.zig               # Config struct, defaults, and CLI/file loading
+│   ├── cli.zig                  # Process options and owned prepared config overrides
+│   ├── config.zig               # Config struct, defaults, and path helpers
 │   ├── config_parser.zig        # kgcache.conf parser
+│   ├── config/                  # Definitions, registry, builder, and layered loader
 │   ├── resp.zig                 # RESP2 parser and serializer
 │   ├── commander.zig            # Command parsing and dispatch
 │   ├── commander/               # Individual commands, schemas, requests

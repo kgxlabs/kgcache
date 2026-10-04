@@ -288,7 +288,12 @@ fn saveDirective() DirectiveDefinition {
         }
 
         fn parse(values: []const []const u8) ParseError!Value {
+            // save ""
+            if (values.len == 1 and values[0].len == 0) return .{ .save = .clear };
+
             if (values.len != 2) return error.InvalidArity;
+
+            // save 60 1
             return .{ .save = .{ .rule = .{
                 .seconds = try parseIntegerInRange(i64, values[0], 1, std.math.maxInt(i64)),
                 .changes = try parseIntegerInRange(u32, values[1], 1, std.math.maxInt(u32)),
@@ -298,7 +303,15 @@ fn saveDirective() DirectiveDefinition {
         fn apply(context: *directive_definition.ApplyContext, value: Value) directive_definition.ApplyError!void {
             const state = stateFrom(context);
             std.debug.assert(state.finalized_rules == null);
-            try state.rules.append(context.allocator, value.save.rule);
+            switch (value.save) {
+                .rule => |rule| try state.rules.append(context.allocator, rule),
+                .clear => reset(context),
+            }
+        }
+
+        fn cliValueCount(remaining_values: []const []const u8) usize {
+            if (remaining_values.len > 0 and remaining_values[0].len == 0) return 1;
+            return 2;
         }
 
         fn reset(context: *directive_definition.ApplyContext) void {
@@ -334,8 +347,12 @@ fn saveDirective() DirectiveDefinition {
 
     return .{
         .name = "save",
-        .arity = Arity.exact(2),
-        .input = .{ .file_values = .tokens },
+        .arity = Arity.range(1, 2),
+        .input = .{
+            .file_values = .tokens,
+            .cli_value_count = Callbacks.cliValueCount,
+            .normalize_empty_file_value = true,
+        },
         .repeat = .append,
         .parse = Callbacks.parse,
         .apply = Callbacks.apply,
@@ -681,15 +698,20 @@ test "prepare supports exact, bounded, and unbounded token counts above two" {
     }
 }
 
-test "save parser accepts exactly two positive numbers without enabling clearing" {
+test "save parser accepts two positive numbers or one empty value for clearing" {
     const testing = std.testing;
     const definition = find("save").?;
-    try testing.expectEqualDeep(Arity.exact(2), definition.arity);
+    try testing.expectEqualDeep(Arity.range(1, 2), definition.arity);
     try testing.expectEqual(.tokens, definition.input.file_values);
     try testing.expectEqual(.append, definition.repeat);
     try testing.expect(definition.choices == null);
-    try testing.expect(definition.input.cli_value_count == null);
-    try testing.expect(!definition.input.normalize_empty_file_value);
+    try testing.expect(definition.input.normalize_empty_file_value);
+    const value_count = definition.input.cli_value_count.?;
+    try testing.expectEqual(1, value_count(&.{ "", "--port", "7000" }));
+    try testing.expectEqual(2, value_count(&.{ "60", "1", "--port", "7000" }));
+    try testing.expectEqual(2, value_count(&.{"60"}));
+    try testing.expectEqual(2, value_count(&.{}));
+    try testing.expectEqualDeep(Value{ .save = .clear }, (try prepare(definition, &.{""})).value);
 
     try testing.expectEqualDeep(
         Value{ .save = .{ .rule = .{ .seconds = 1, .changes = 1 } } },
@@ -699,7 +721,7 @@ test "save parser accepts exactly two positive numbers without enabling clearing
         Value{ .save = .{ .rule = .{ .seconds = std.math.maxInt(i64), .changes = std.math.maxInt(u32) } } },
         try definition.parse(&.{ "9223372036854775807", "4294967295" }),
     );
-    for ([_][]const []const u8{ &.{}, &.{"60"}, &.{""}, &.{"\"\""}, &.{ "60", "1", "2" } }) |values| {
+    for ([_][]const []const u8{ &.{}, &.{"60"}, &.{"\"\""}, &.{ "60", "1", "2" } }) |values| {
         try testing.expectError(error.InvalidArity, definition.parse(values));
     }
     for ([_][2][]const u8{

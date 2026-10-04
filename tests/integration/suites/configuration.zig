@@ -13,8 +13,40 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             try checkPersistence(io, allocator, executable_path, artifact_dir, directory, persistence);
         }
     }
+    try checkCliOverrides(io, allocator, executable_path, artifact_dir);
 
     std.log.info("integration: config names and persistence paths passed", .{});
+}
+
+fn checkCliOverrides(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
+    const server = try support.ServerProcess.createStopped(io, allocator, executable_path, .{
+        .extra_config = "databases 1\ndir .\ndbfilename file.kgc\nappendonly yes\nsave 60 1\n",
+        .extra_args = &.{
+            "--databases",  "2",  "--dir",  "data files", "--dbfilename", "override.kgc",
+            "--appendonly", "no", "--save", "",
+        },
+        .artifact_dir = artifact_dir,
+    });
+    defer server.destroy();
+    errdefer server.failed = true;
+    var working_dir = try std.Io.Dir.cwd().openDir(io, server.data_dir, .{});
+    defer working_dir.close(io);
+    try working_dir.createDir(io, "data files", .default_dir);
+    try server.start();
+    {
+        const client = try server.address.?.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        const fd = client.socket.handle;
+        try resp_client.sendAndExpect(io, server, fd, "*2\r\n$6\r\nSELECT\r\n$1\r\n1\r\n", "+OK\r\n");
+        try resp_client.sendAndExpect(io, server, fd, "*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n", "-ERR DB index is out of range\r\n");
+        try resp_client.sendAndExpect(io, server, fd, "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n", "+OK\r\n");
+        try resp_client.sendAndExpect(io, server, fd, "*1\r\n$4\r\nSAVE\r\n", "+OK\r\n");
+    }
+    try server.stop();
+    try working_dir.access(io, "data files/override.kgc", .{});
+    try expectMissing(io, working_dir, "file.kgc");
+    try expectMissing(io, working_dir, "aof");
+    try expectMissing(io, working_dir, "data files/aof");
 }
 
 fn checkPersistence(

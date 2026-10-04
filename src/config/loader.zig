@@ -1,21 +1,42 @@
 const std = @import("std");
 const Config = @import("../config.zig");
+const ConfigBuilder = @import("builder.zig");
 const ConfigParser = @import("../config_parser.zig");
+const PreparedDirective = @import("definition.zig").PreparedDirective;
 
-/// Null path returns defaults without allocation; otherwise, read and parse the file.
+/// Build defaults, apply an optional file, then apply prepared CLI values in order.
+/// Borrows the override slice only during construction and never frees it. String
+/// bytes borrowed from argv must remain alive while the returned Config is used.
 /// Use an arena that outlives Config: on success, the file buffer is retained for
 /// borrowed strings and is not returned separately. The arena also owns save_rules.
-/// On failure, the parser frees builder data and this function frees the file buffer.
+/// On failure, frees builder data and the file buffer.
+pub fn load(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: ?[]const u8,
+    overrides: []const PreparedDirective,
+) anyerror!Config {
+    var contents: ?[]u8 = null;
+    errdefer if (contents) |bytes| allocator.free(bytes);
+    var builder = ConfigBuilder.init(allocator);
+    defer builder.deinit();
+
+    if (path) |config_path| {
+        contents = try std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .unlimited);
+        try ConfigParser.apply(&builder, contents.?);
+    }
+    for (overrides) |prepared| try builder.apply(prepared, .cli);
+    return builder.finish();
+}
+
+/// Compatibility wrapper for file-only loading. Null path returns defaults
+/// without allocation. Ownership and cleanup match load.
 pub fn loadFromPath(
     io: std.Io,
     allocator: std.mem.Allocator,
     path: ?[]const u8,
 ) anyerror!Config {
-    const config_path = path orelse return Config.default();
-    const contents = try std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .unlimited);
-    errdefer allocator.free(contents);
-
-    return ConfigParser.parse(allocator, contents);
+    return load(io, allocator, path, &.{});
 }
 
 test {
