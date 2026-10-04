@@ -2,48 +2,16 @@ const std = @import("std");
 const resp = @import("../resp.zig");
 const Commander = @import("interface.zig");
 
-pub const Arity = struct {
-    minimum: usize,
-    maximum: ?usize,
+pub const Arity = @import("../arity.zig");
 
-    pub fn exact(count: usize) Arity {
-        return .{
-            .minimum = count,
-            .maximum = count,
-        };
+/// Encode command arity for Redis metadata, including the command name.
+pub fn redisArity(arity: Arity) i64 {
+    const minimum_with_name: i64 = @intCast(arity.minimum + 1);
+    if (arity.maximum) |maximum| {
+        if (maximum == arity.minimum) return minimum_with_name;
     }
-
-    pub fn range(minimum: usize, maximum: usize) Arity {
-        std.debug.assert(minimum <= maximum);
-        return .{
-            .minimum = minimum,
-            .maximum = maximum,
-        };
-    }
-
-    pub fn atLeast(minimum: usize) Arity {
-        return .{
-            .minimum = minimum,
-            .maximum = null,
-        };
-    }
-
-    pub fn accepts(self: Arity, argument_count: usize) bool {
-        if (argument_count < self.minimum) return false;
-        if (self.maximum) |maximum| {
-            if (argument_count > maximum) return false;
-        }
-        return true;
-    }
-
-    pub fn redisValue(self: Arity) i64 {
-        const minimum_with_name: i64 = @intCast(self.minimum + 1);
-        if (self.maximum) |maximum| {
-            if (maximum == self.minimum) return minimum_with_name;
-        }
-        return -minimum_with_name;
-    }
-};
+    return -minimum_with_name;
+}
 
 pub const KeySpec = union(enum) {
     none,

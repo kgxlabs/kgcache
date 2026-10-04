@@ -17,7 +17,9 @@ databases 4
 
 Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
 
-For settings such as `databases`, `appenddirname`, and `appendfilename`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect all rules instead.
+Names and `yes`/`no` or enum spellings are case-sensitive. Leading and trailing whitespace is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` requires exactly two values separated by spaces or tabs. Inline comments are not supported; a `#` after a directive is part of its value.
+
+For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect all rules in file order.
 
 ## Directives
 
@@ -155,7 +157,7 @@ positive: `seconds` is at most 9223372036854775807 and `changes` is at most
 4294967295.
 
 With no `save` line, automatic saving is off. Manual `SAVE` and `BGSAVE`
-still work. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
+still work. `save ""` is not supported yet. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
 for the write counter and rule checks.
 
 ## AOF settings

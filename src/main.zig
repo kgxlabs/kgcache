@@ -1,6 +1,6 @@
 const std = @import("std");
 const Cli = @import("cli.zig");
-const Config = @import("config.zig");
+const ConfigLoader = @import("config/loader.zig");
 const Server = @import("server.zig");
 const ReadyPipe = @import("readiness.zig");
 const logging = @import("logger.zig");
@@ -73,7 +73,7 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     defer ready_pipe.close();
 
     // Config values borrow the file buffer, so keep it in the application arena.
-    const config = Config.loadFromPath(init.io, init.arena.allocator(), cli.config_path) catch |err| {
+    const config = ConfigLoader.loadFromPath(init.io, init.arena.allocator(), cli.config_path) catch |err| {
         logger.err("app: failed to load configuration", err, @errorReturnTrace());
         return err;
     };

@@ -1,55 +1,46 @@
+//! Apply file syntax through registry preparation and builder application.
+//! Blank lines and full-line comments are skipped; quotes and inline # stay literal.
+
 const std = @import("std");
 const Config = @import("config.zig");
-
-/// Directive names accepted in a kgcache.conf file, one per `Config` field.
-const Directive = enum {
-    bind,
-    port,
-    @"reuse-address",
-    @"connection-buffer-size",
-    databases,
-    dir,
-    dbfilename,
-    @"cron-interval-ms",
-    @"active-expire-budget-ms",
-    @"active-expire-batch-size",
-    @"active-expire-threshold-percent",
-    @"exclusive-bg-persistence",
-    save,
-    appendonly,
-    appendfsync,
-    appenddirname,
-    appendfilename,
-    @"auto-aof-rewrite-percentage",
-    @"auto-aof-rewrite-min-size",
-    @"aof-load-truncated",
-    @"bgsave-retry-delay-ms",
-};
+const ConfigBuilder = @import("config/builder.zig");
+const registry = @import("config/registry.zig");
+const directive_definition = @import("config/definition.zig");
 
 pub const Error = error{
-    /// A non-blank, non-comment line didn't split into a directive and a value.
+    /// A line is missing a directive or value, or has an invalid value count.
     MalformedLine,
-    /// The first token on a line isn't one of the known `Directive`s.
+    /// The first token on a line isn't a supported directive name.
     UnknownDirective,
     /// The value couldn't be parsed or is outside the directive's valid range.
     InvalidValue,
-    /// Allocating storage for a repeated directive's collected values failed.
+    /// Allocating parsing or builder storage failed.
     OutOfMemory,
 };
 
-/// blank lines and lines starting with `#` are skipped, everything else must be `directive value`.
-/// Returns `Config.default()` overlaid with whatever directives were present.
-///
-/// The returned `Config`'s string fields borrow directly from `contents`,
-/// so `contents` must outlive the `Config`.
-/// `allocator` backs `Config.save_rules`, since a repeated `save` directive is
-/// assembled line-by-line rather than borrowed as one contiguous slice of
-/// `contents` -- pass the same arena used for the rest of `Config` so it's
-/// freed the same way (server lifetime).
+/// Start a builder, apply this file, finish once, and always clean up temporary state.
+/// Returned strings borrow contents, which must remain alive while Config is used.
+/// The caller owns allocated save_rules: free with allocator or release its arena.
+/// On failure, builder-owned output and temporary token storage are freed.
 pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
-    var config = Config.default();
-    var save_rules: std.ArrayList(Config.SaveRule) = .empty;
-    errdefer save_rules.deinit(allocator);
+    var builder = ConfigBuilder.init(allocator);
+    defer builder.deinit();
+
+    try apply(&builder, contents);
+    return builder.finish();
+}
+
+/// Apply to an existing builder; the caller finishes once and always calls deinit.
+/// Keep contents alive for borrowed Config strings; temporary tokens are freed on exit.
+/// Invalid arity maps to MalformedLine. Any file error ends the build.
+pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
+    std.debug.assert(builder.status == .building);
+    errdefer builder.status = .failed;
+
+    // Reuse the slice array across token-based lines. Values borrow contents,
+    // not this array; preparation copies save numbers before the array is cleared.
+    var token_values: std.ArrayList([]const u8) = .empty;
+    defer token_values.deinit(builder.allocator);
 
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw_line| {
@@ -61,78 +52,32 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
         const value = std.mem.trim(u8, line[space..], " \t");
         if (value.len == 0) return Error.MalformedLine;
 
-        const directive = std.meta.stringToEnum(Directive, directive_name) orelse return Error.UnknownDirective;
+        const definition = registry.find(directive_name) orelse return Error.UnknownDirective;
+        const unsplit_value = [_][]const u8{value};
+        const values: []const []const u8 = switch (definition.input.file_values) {
+            .unsplit_value => &unsplit_value,
+            .tokens => blk: {
+                token_values.clearRetainingCapacity();
 
-        switch (directive) {
-            .bind => config.bind_address = value,
-            .port => config.port = try parseIntInRange(u16, value, 0, std.math.maxInt(u16)),
-            .@"reuse-address" => config.reuse_address = try parseBool(value),
-            .@"connection-buffer-size" => config.connection_buffer_size = try parseIntInRange(usize, value, 1, std.math.maxInt(usize)),
-            .databases => config.num_databases = try parseIntInRange(usize, value, 1, std.math.maxInt(u32)),
-            .dir => {
-                try Config.validateDir(value);
-                config.dir = value;
-            },
-            .dbfilename => {
-                try Config.validateDbfilename(value);
-                config.dbfilename = value;
-            },
-            .@"cron-interval-ms" => config.cron_interval_ms = try parseIntInRange(i64, value, 1, std.math.maxInt(i64)),
-            .@"active-expire-budget-ms" => config.active_expire_budget_ms = try parseIntInRange(i8, value, 1, std.math.maxInt(i8)),
-            .@"active-expire-batch-size" => config.active_expire_batch_size = try parseIntInRange(i8, value, 1, std.math.maxInt(i8)),
-            .@"active-expire-threshold-percent" => config.active_expire_threshold_percent = try parseIntInRange(i8, value, 1, 100),
-            .@"exclusive-bg-persistence" => config.exclusive_bg_persistence = try parseBool(value),
-            .save => {
                 var tokens = std.mem.tokenizeAny(u8, value, " \t");
-                const seconds_str = tokens.next() orelse return Error.MalformedLine;
-                const changes_str = tokens.next() orelse return Error.MalformedLine;
-                if (tokens.next() != null) return Error.MalformedLine;
+                while (tokens.next()) |token| try token_values.append(builder.allocator, token);
+                break :blk token_values.items;
+            },
+        };
 
-                try save_rules.append(allocator, .{
-                    .seconds = try parseIntInRange(i64, seconds_str, 1, std.math.maxInt(i64)),
-                    .changes = try parseIntInRange(u32, changes_str, 1, std.math.maxInt(u32)),
-                });
-            },
-            .appendonly => config.append_only = try parseBool(value),
-            .appendfsync => config.append_fsync = try parseEnum(Config.AppendFsync, value),
-            .appenddirname => {
-                try Config.validateAppendDirname(value);
-                config.append_dirname = value;
-            },
-            .appendfilename => config.append_filename = value,
-            .@"auto-aof-rewrite-percentage" => config.auto_aof_rewrite_percentage = try parseInt(u32, value),
-            .@"auto-aof-rewrite-min-size" => config.auto_aof_rewrite_min_size = try parseInt(usize, value),
-            .@"aof-load-truncated" => config.aof_load_truncated = try parseBool(value),
-            .@"bgsave-retry-delay-ms" => {
-                const retry_delay_ms = try parseInt(i64, value);
-                if (retry_delay_ms < 0) return Error.InvalidValue;
-                config.bgsave_retry_delay_ms = retry_delay_ms;
-            },
-        }
+        const prepared = registry.prepare(
+            definition,
+            values,
+        ) catch |err| return mapParseError(err);
+        try builder.apply(prepared, .file);
     }
-
-    config.save_rules = try save_rules.toOwnedSlice(allocator);
-    return config;
 }
 
-fn parseInt(comptime T: type, value: []const u8) Error!T {
-    return std.fmt.parseInt(T, value, 10) catch Error.InvalidValue;
-}
-
-fn parseIntInRange(comptime T: type, value: []const u8, min: T, max: T) Error!T {
-    const parsed = try parseInt(T, value);
-    if (parsed < min or parsed > max) return Error.InvalidValue;
-    return parsed;
-}
-
-fn parseBool(value: []const u8) Error!bool {
-    if (std.mem.eql(u8, value, "yes")) return true;
-    if (std.mem.eql(u8, value, "no")) return false;
-    return Error.InvalidValue;
-}
-
-fn parseEnum(comptime T: type, value: []const u8) Error!T {
-    return std.meta.stringToEnum(T, value) orelse Error.InvalidValue;
+fn mapParseError(err: directive_definition.ParseError) Error {
+    return switch (err) {
+        error.InvalidArity => Error.MalformedLine,
+        error.InvalidValue => Error.InvalidValue,
+    };
 }
 
 test "parse overlays every directive onto the defaults" {
@@ -564,4 +509,202 @@ test "parse rejects a non-numeric auto-aof-rewrite-percentage" {
 test "parse rejects a size suffix in auto-aof-rewrite-min-size" {
     const testing = std.testing;
     try testing.expectError(Error.InvalidValue, parse(testing.allocator, "auto-aof-rewrite-min-size 64mb"));
+}
+
+test "apply adds file contents to an existing builder without finishing it" {
+    const testing = std.testing;
+    const config = blk: {
+        var builder = ConfigBuilder.init(testing.allocator);
+        defer builder.deinit();
+        try builder.apply(try registry.prepare(registry.find("port").?, &.{"8000"}), .file);
+        try builder.apply(try registry.prepare(registry.find("appendonly").?, &.{"yes"}), .file);
+        try builder.apply(try registry.prepare(registry.find("save").?, &.{ "900", "1" }), .file);
+
+        try apply(&builder, "port 7000\ndir data files\nsave 60 1");
+        try apply(&builder, " \t# nothing to apply\r\n\r\n");
+        try apply(&builder, "save 300 10\nappendfsync always");
+        try testing.expectEqual(.building, builder.status);
+        try testing.expectEqual(1, builder.states.items.len);
+        try testing.expectEqual(0, builder.config.save_rules.len);
+        break :blk try builder.finish();
+    };
+    defer testing.allocator.free(config.save_rules);
+    var expected = Config.default();
+    expected.port = 7000;
+    expected.dir = "data files";
+    expected.append_only = true;
+    expected.append_fsync = .always;
+    expected.save_rules = &.{
+        .{ .seconds = 900, .changes = 1 },
+        .{ .seconds = 60, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+    };
+    try testing.expectEqualDeep(expected, config);
+}
+
+test "apply failure leaves builder cleanup with its caller" {
+    const testing = std.testing;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    {
+        var builder = ConfigBuilder.init(failing.allocator());
+        defer builder.deinit();
+        try testing.expectError(
+            Error.InvalidValue,
+            apply(&builder, "port 7000\nsave 60 1\nsave 300 invalid"),
+        );
+        try testing.expectEqual(.failed, builder.status);
+        try testing.expectEqual(7000, builder.config.port);
+        try testing.expectEqual(0, builder.config.save_rules.len);
+        try testing.expectEqual(1, builder.states.items.len);
+        try testing.expect(failing.allocated_bytes > failing.freed_bytes);
+    }
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "parse returns defaults for empty and comment-only files without allocation" {
+    for ([_][]const u8{ "", " \t\r\n\n\t# comment\r\n# another comment" }) |contents| {
+        const config = try parse(std.testing.failing_allocator, contents);
+        try std.testing.expectEqualDeep(Config.default(), config);
+    }
+}
+
+test "parse builds all 21 directive fields through the registry" {
+    const testing = std.testing;
+    const contents =
+        \\bind example host
+        \\port 7000
+        \\reuse-address no
+        \\connection-buffer-size 2048
+        \\databases 4
+        \\dir data files
+        \\dbfilename state.kgc
+        \\cron-interval-ms 250
+        \\active-expire-budget-ms 15
+        \\active-expire-batch-size 30
+        \\active-expire-threshold-percent 50
+        \\exclusive-bg-persistence no
+        \\save 60 1
+        \\save 300 10
+        \\appendonly yes
+        \\appendfsync always
+        \\appenddirname history
+        \\appendfilename history/journal.aof
+        \\auto-aof-rewrite-percentage 0
+        \\auto-aof-rewrite-min-size 2048
+        \\aof-load-truncated no
+        \\bgsave-retry-delay-ms 0
+    ;
+    const config = try parse(testing.allocator, contents);
+    defer testing.allocator.free(config.save_rules);
+    const expected: Config = .{
+        .bind_address = "example host",
+        .port = 7000,
+        .reuse_address = false,
+        .connection_buffer_size = 2048,
+        .num_databases = 4,
+        .dir = "data files",
+        .dbfilename = "state.kgc",
+        .cron_interval_ms = 250,
+        .active_expire_budget_ms = 15,
+        .active_expire_batch_size = 30,
+        .active_expire_threshold_percent = 50,
+        .exclusive_bg_persistence = false,
+        .save_rules = &.{
+            .{ .seconds = 60, .changes = 1 },
+            .{ .seconds = 300, .changes = 10 },
+        },
+        .append_only = true,
+        .append_fsync = .always,
+        .append_dirname = "history",
+        .append_filename = "history/journal.aof",
+        .auto_aof_rewrite_percentage = 0,
+        .auto_aof_rewrite_min_size = 2048,
+        .aof_load_truncated = false,
+        .bgsave_retry_delay_ms = 0,
+    };
+    try testing.expectEqualDeep(expected, config);
+}
+
+test "parse preserves file whitespace, literal quotes, and borrowed strings" {
+    const testing = std.testing;
+    var contents = (" \t# full-line comment\r\n \t\r\n\tport\t7000 \r\n" ++
+        " dir\t \"data\tfiles\" \r\n bind example host # literal\r\n" ++
+        "save\t60\t1\r\nsave  300\t10").*;
+    const config = try parse(testing.allocator, &contents);
+    defer testing.allocator.free(config.save_rules);
+    try testing.expectEqual(7000, config.port);
+    try testing.expectEqualStrings("\"data\tfiles\"", config.dir);
+    try testing.expectEqualStrings("example host # literal", config.bind_address);
+    try testing.expectEqualDeep(&[_]Config.SaveRule{
+        .{ .seconds = 60, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+    }, config.save_rules);
+    const directory_offset = std.mem.indexOf(u8, &contents, "\"data\tfiles\"").?;
+    try testing.expect(config.dir.ptr == contents[directory_offset..].ptr);
+    contents[directory_offset + 1] = 'D';
+    try testing.expectEqualStrings("\"Data\tfiles\"", config.dir);
+
+    const quoted_empty = try parse(testing.failing_allocator, "dir \"\"");
+    try testing.expectEqualStrings("\"\"", quoted_empty.dir);
+}
+
+test "parse preserves arity, value, and name errors for every occurrence" {
+    const testing = std.testing;
+    for ([_]struct { contents: []const u8, err: Error }{
+        .{ .contents = "port \t\r\n", .err = Error.MalformedLine },
+        .{ .contents = "unknown", .err = Error.MalformedLine },
+        .{ .contents = "save \"\"", .err = Error.MalformedLine },
+        .{ .contents = "save 60 1 " ++ ("extra " ** 24), .err = Error.MalformedLine },
+        .{ .contents = "port 7000 extra", .err = Error.InvalidValue },
+        .{ .contents = "port 7000 # inline", .err = Error.InvalidValue },
+        .{ .contents = "port \"7000\"", .err = Error.InvalidValue },
+        .{ .contents = "appendonly \"yes\"", .err = Error.InvalidValue },
+        .{ .contents = "appendfsync \"always\"", .err = Error.InvalidValue },
+        .{ .contents = "port invalid\nport 7000", .err = Error.InvalidValue },
+        .{ .contents = "appendonly YES\nappendonly yes", .err = Error.InvalidValue },
+        .{ .contents = "save 0 1\nsave 60 1", .err = Error.InvalidValue },
+        .{ .contents = "Port 7000", .err = Error.UnknownDirective },
+        .{ .contents = "--port 7000", .err = Error.UnknownDirective },
+        .{ .contents = "ready-fd 4", .err = Error.UnknownDirective },
+        .{ .contents = "help yes", .err = Error.UnknownDirective },
+        .{ .contents = "version yes", .err = Error.UnknownDirective },
+        .{ .contents = "healthcheck yes", .err = Error.UnknownDirective },
+    }) |case| {
+        try testing.expectError(case.err, parse(testing.allocator, case.contents));
+    }
+}
+
+test "parse discards accumulated states and token storage after file errors" {
+    const testing = std.testing;
+    for ([_]struct { contents: []const u8, err: Error }{
+        .{ .contents = "save 60 1\nunknown value", .err = Error.UnknownDirective },
+        .{ .contents = "save 60 1\nport", .err = Error.MalformedLine },
+        .{ .contents = "save 60 1\nsave 300 10 extra", .err = Error.MalformedLine },
+        .{ .contents = "save 60 1\nport invalid", .err = Error.InvalidValue },
+        .{ .contents = "save 60 1\nsave 0 1", .err = Error.InvalidValue },
+    }) |case| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        try testing.expectError(case.err, parse(failing.allocator(), case.contents));
+        try testing.expect(failing.allocated_bytes > 0);
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "parse cleans up every allocation failure in file application and finish" {
+    const Run = struct {
+        fn run(backing_allocator: std.mem.Allocator) !void {
+            var failing_resize = std.testing.FailingAllocator.init(backing_allocator, .{ .resize_fail_index = 0 });
+            const allocator = failing_resize.allocator();
+            const contents = "port 7000\ndir data files\n" ++ ("save 60 1\n" ** 64);
+            const config = try parse(allocator, contents);
+            defer allocator.free(config.save_rules);
+            try std.testing.expectEqual(7000, config.port);
+            try std.testing.expectEqualStrings("data files", config.dir);
+            try std.testing.expectEqual(64, config.save_rules.len);
+            for (config.save_rules) |rule| {
+                try std.testing.expectEqualDeep(Config.SaveRule{ .seconds = 60, .changes = 1 }, rule);
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Run.run, .{});
 }

@@ -1,5 +1,6 @@
+//! Parsed strings borrow input bytes; callers own allocated save_rules.
+
 const std = @import("std");
-const ConfigParser = @import("config_parser.zig");
 
 const Config = @This();
 
@@ -32,8 +33,8 @@ active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
-/// No `save` line means no automatic BGSAVE triggering at all (matches
-/// Redis's `save ""` meaning "disable automatic saving").
+/// Empty rules `""` disable automatic saving. Parsing appends rules in file order;
+/// the caller owns the allocated slice after successful construction.
 save_rules: []const SaveRule = &.{},
 append_only: bool = false,
 /// A *base* name, not a real file: the files on disk derive from it
@@ -92,13 +93,4 @@ pub fn resolveSnapshotPath(self: Config, allocator: std.mem.Allocator) ![]u8 {
 pub fn resolveAofDirectory(self: Config, allocator: std.mem.Allocator) ![]u8 {
     try self.validatePersistence();
     return std.fs.path.join(allocator, &.{ self.dir, self.append_dirname });
-}
-
-/// With no path, returns `Config.default()`.
-/// A path that can't be read or doesn't parse returns the source error rather
-/// than silently falling back to defaults. The application boundary reports it.
-pub fn loadFromPath(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config {
-    const conf_path = path orelse return Config.default();
-    const contents = try std.Io.Dir.cwd().readFileAlloc(io, conf_path, allocator, .unlimited);
-    return ConfigParser.parse(allocator, contents);
 }

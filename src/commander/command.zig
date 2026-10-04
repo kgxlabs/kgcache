@@ -273,7 +273,7 @@ fn describe(allocator: std.mem.Allocator, item: *const definition.Definition) Co
 
     return array(allocator, &.{
         bulk(item.name),
-        .{ .integer = item.arity.redisValue() },
+        .{ .integer = definition.redisArity(item.arity) },
         .{ .array = flags },
         .{ .integer = first },
         .{ .integer = last },
