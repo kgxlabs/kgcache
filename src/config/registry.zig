@@ -38,6 +38,10 @@ const definitions = [_]DirectiveDefinition{
     integerDirective("bgsave-retry-delay-ms", "bgsave_retry_delay_ms", i64, 0, std.math.maxInt(i64)),
 };
 
+comptime {
+    validateDefinitions(&definitions);
+}
+
 pub fn find(name: []const u8) ?*const DirectiveDefinition {
     for (&definitions) |*definition| {
         if (std.mem.eql(u8, name, definition.name)) return definition;
@@ -53,9 +57,104 @@ pub fn prepare(
     definition: *const DirectiveDefinition,
     values: []const []const u8,
 ) directive_definition.ParseError!directive_definition.PreparedDirective {
-    _ = definition;
-    _ = values;
-    @panic("config directive preparation is not implemented");
+    if (!definition.arity.accepts(values.len)) return error.InvalidArity;
+    if (definition.choices) |choices| {
+        std.debug.assert(values.len == 1);
+        const matches_choice = for (choices) |choice| {
+            if (std.mem.eql(u8, values[0], choice)) break true;
+        } else false;
+        if (!matches_choice) return error.InvalidValue;
+    }
+    return .{
+        .definition = definition,
+        .value = try definition.parse(values),
+    };
+}
+
+fn validateDefinitions(comptime entries: []const DirectiveDefinition) void {
+    @setEvalBranchQuota(10000);
+    inline for (entries, 0..) |definition, index| {
+        validateName(definition);
+        validateArityAndInput(definition);
+        validateRepeat(definition);
+        validateChoices(definition);
+
+        inline for (entries[index + 1 ..]) |other| {
+            if (std.mem.eql(u8, definition.name, other.name)) {
+                invalidDefinition(definition.name, "duplicates directive `" ++ other.name ++ "`");
+            }
+        }
+    }
+}
+
+fn validateName(comptime definition: DirectiveDefinition) void {
+    if (definition.name.len == 0) invalidDefinition(definition.name, "has an empty name");
+
+    if (std.mem.startsWith(u8, definition.name, "--")) {
+        invalidDefinition(definition.name, "name must not include the CLI `--` prefix");
+    }
+
+    inline for (definition.name) |byte| {
+        const valid = std.ascii.isLower(byte) or std.ascii.isDigit(byte) or
+            byte == '_' or byte == '-' or byte == '.';
+
+        if (!valid) invalidDefinition(definition.name, "name must use lowercase ASCII letters, digits, `_`, `-`, or `.`");
+    }
+
+    inline for (.{ "ready-fd", "help", "version", "healthcheck" }) |reserved| {
+        if (std.mem.eql(u8, definition.name, reserved)) {
+            invalidDefinition(definition.name, "name is reserved for a process option or subcommand");
+        }
+    }
+}
+
+fn validateArityAndInput(comptime definition: DirectiveDefinition) void {
+    if (definition.arity.maximum) |maximum| {
+        if (definition.arity.minimum > maximum) {
+            invalidDefinition(definition.name, "minimum arity exceeds maximum arity");
+        }
+    }
+
+    if (definition.input.file_values == .unsplit_value and !hasExactSingleValue(definition.arity)) {
+        invalidDefinition(definition.name, "unsplit file input requires exact arity one");
+    }
+}
+
+fn validateRepeat(comptime definition: DirectiveDefinition) void {
+    switch (definition.repeat) {
+        .replace => if (definition.reset != null) {
+            invalidDefinition(definition.name, "replacement policy must not have a reset callback");
+        },
+        .append => {
+            if (definition.reset == null) invalidDefinition(definition.name, "append policy requires a reset callback");
+            if (definition.state_lifecycle == null) invalidDefinition(definition.name, "append policy requires a state lifecycle");
+        },
+    }
+}
+
+fn validateChoices(comptime definition: DirectiveDefinition) void {
+    if (definition.choices) |choices| {
+        if (!hasExactSingleValue(definition.arity)) {
+            invalidDefinition(definition.name, "choices require exact arity one");
+        }
+        if (choices.len == 0) invalidDefinition(definition.name, "choices must have a nonempty list");
+        inline for (choices, 0..) |choice, index| {
+            inline for (choices[index + 1 ..]) |other| {
+                if (std.mem.eql(u8, choice, other)) {
+                    invalidDefinition(definition.name, "choices contain a duplicate spelling");
+                }
+            }
+        }
+    }
+}
+
+fn hasExactSingleValue(arity: Arity) bool {
+    return arity.minimum == 1 and arity.maximum != null and arity.maximum.? == 1;
+}
+
+fn invalidDefinition(comptime name: []const u8, comptime reason: []const u8) noreturn {
+    const label = if (name.len == 0) "<empty>" else name;
+    @compileError("invalid config directive definition `" ++ label ++ "`: " ++ reason);
 }
 
 fn integerDirective(
@@ -278,7 +377,7 @@ test "find excludes process options, CLI prefixes, and unsupported names" {
     }
 }
 
-test "single-value callbacks match the existing file parser for every setting" {
+test "single-value preparation and application match the existing file parser for every setting" {
     const testing = std.testing;
     const ConfigParser = @import("../config_parser.zig");
     const cases = [_]struct { line: []const u8, value: Value }{
@@ -307,15 +406,17 @@ test "single-value callbacks match the existing file parser for every setting" {
     for (cases) |case| {
         const space = std.mem.indexOfScalar(u8, case.line, ' ').?;
         const definition = find(case.line[0..space]).?;
-        const value = try definition.parse(&.{case.line[space + 1 ..]});
-        try testing.expectEqualDeep(case.value, value);
-
         var config = Config.default();
+        const prepared = try prepare(definition, &.{case.line[space + 1 ..]});
+        try testing.expect(prepared.definition == definition);
+        try testing.expectEqualDeep(case.value, prepared.value);
+        try testing.expectEqualDeep(Config.default(), config);
+
         var context: directive_definition.ApplyContext = .{
             .allocator = testing.failing_allocator,
             .config = &config,
         };
-        try definition.apply(&context, value);
+        try prepared.definition.apply(&context, prepared.value);
         const expected = try ConfigParser.parse(testing.failing_allocator, case.line);
         try testing.expectEqualDeep(expected, config);
     }
@@ -363,29 +464,29 @@ test "integer callbacks enforce every directive's boundaries and number syntax" 
     }
 }
 
-test "boolean callbacks expose and accept exact yes and no choices" {
+test "boolean preparation exposes and accepts exact yes and no choices" {
     const testing = std.testing;
     for ([_][]const u8{ "reuse-address", "exclusive-bg-persistence", "appendonly", "aof-load-truncated" }) |name| {
         const definition = find(name).?;
         try testing.expectEqualDeep(&boolean_choices, definition.choices.?);
-        try testing.expectEqualDeep(Value{ .boolean = true }, try definition.parse(&.{"yes"}));
-        try testing.expectEqualDeep(Value{ .boolean = false }, try definition.parse(&.{"no"}));
+        try testing.expectEqualDeep(Value{ .boolean = true }, (try prepare(definition, &.{"yes"})).value);
+        try testing.expectEqualDeep(Value{ .boolean = false }, (try prepare(definition, &.{"no"})).value);
         for ([_][]const u8{ "", "YES", "No", "true", "false", "1", "0", "\"yes\"", "yes no" }) |text| {
-            try testing.expectError(error.InvalidValue, definition.parse(&.{text}));
+            try testing.expectError(error.InvalidValue, prepare(definition, &.{text}));
         }
     }
 }
 
-test "enum callbacks expose tag names and return typed enum values" {
+test "enum preparation exposes tag names and returns typed enum values" {
     const testing = std.testing;
     const definition = find("appendfsync").?;
     const expected_choices = [_][]const u8{ "always", "everysec", "no" };
     try testing.expectEqualDeep(&expected_choices, definition.choices.?);
     for ([_]Config.AppendFsync{ .always, .everysec, .no }) |choice| {
-        try testing.expectEqualDeep(Value{ .append_fsync = choice }, try definition.parse(&.{@tagName(choice)}));
+        try testing.expectEqualDeep(Value{ .append_fsync = choice }, (try prepare(definition, &.{@tagName(choice)})).value);
     }
     for ([_][]const u8{ "", "Always", "EVERYSEC", "yes", "invalid", "\"no\"", "no always" }) |text| {
-        try testing.expectError(error.InvalidValue, definition.parse(&.{text}));
+        try testing.expectError(error.InvalidValue, prepare(definition, &.{text}));
     }
 }
 
@@ -443,6 +544,128 @@ test "single-value callbacks reject missing and extra values" {
         if (definition.repeat == .append) continue;
         try std.testing.expectError(error.InvalidArity, definition.parse(&.{}));
         try std.testing.expectError(error.InvalidArity, definition.parse(&.{ "1", "2" }));
+    }
+}
+
+test "prepare checks arity and choices before parsing and never applies" {
+    const Probe = struct {
+        var parse_calls: usize = 0;
+
+        fn parse(values: []const []const u8) ParseError!Value {
+            parse_calls += 1;
+            return .{ .boolean = std.mem.eql(u8, values[0], "yes") };
+        }
+
+        fn apply(_: *directive_definition.ApplyContext, _: Value) directive_definition.ApplyError!void {
+            @panic("preparation must not apply a directive");
+        }
+    };
+    const definition = comptime DirectiveDefinition{
+        .name = "choice-probe",
+        .arity = Arity.exact(1),
+        .choices = &.{ "yes", "no" },
+        .parse = Probe.parse,
+        .apply = Probe.apply,
+    };
+    comptime validateDefinitions(&.{definition});
+    Probe.parse_calls = 0;
+    const testing = std.testing;
+    try testing.expectError(error.InvalidArity, prepare(&definition, &.{}));
+    try testing.expectError(error.InvalidArity, prepare(&definition, &.{ "invalid", "yes" }));
+    try testing.expectError(error.InvalidValue, prepare(&definition, &.{"YES"}));
+    try testing.expectEqual(0, Probe.parse_calls);
+
+    const prepared = try prepare(&definition, &.{"yes"});
+    try testing.expect(prepared.definition == &definition);
+    try testing.expectEqualDeep(Value{ .boolean = true }, prepared.value);
+    try testing.expectEqual(1, Probe.parse_calls);
+}
+
+test "prepare leaves numeric and path constraints active with null choices" {
+    const testing = std.testing;
+    for ([_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "port", .value = "65536" },
+        .{ .name = "connection-buffer-size", .value = "0" },
+        .{ .name = "dir", .value = "data\x00files" },
+        .{ .name = "dbfilename", .value = "../state.kgc" },
+        .{ .name = "appenddirname", .value = ".." },
+    }) |case| {
+        const definition = find(case.name).?;
+        try testing.expect(definition.choices == null);
+        try testing.expectError(error.InvalidValue, prepare(definition, &.{case.value}));
+    }
+
+    const definition = comptime blk: {
+        var entry = integerDirective("limited-port", "port", u16, 0, 100);
+        entry.choices = &.{ "50", "200" };
+        break :blk entry;
+    };
+    comptime validateDefinitions(&.{definition});
+    try testing.expectEqualDeep(Value{ .u16_value = 50 }, (try prepare(&definition, &.{"50"})).value);
+    try testing.expectError(error.InvalidValue, prepare(&definition, &.{"200"}));
+}
+
+test "prepare borrows string storage and copies save numbers independently of token arrays" {
+    const testing = std.testing;
+    var text = "data files".*;
+    var string_values = [_][]const u8{&text};
+    const string_prepared = try prepare(find("dir").?, &string_values);
+    string_values[0] = "other";
+    try testing.expect(string_prepared.value.string.ptr == text[0..].ptr);
+    text[0] = 'D';
+    try testing.expectEqualStrings("Data files", string_prepared.value.string);
+
+    var seconds = "60".*;
+    var changes = "1".*;
+    var save_values = [_][]const u8{ &seconds, &changes };
+    const definition = find("save").?;
+    const prepared = try prepare(definition, &save_values);
+    seconds[0] = '9';
+    changes[0] = '2';
+    save_values = .{ "300", "10" };
+    try testing.expect(prepared.definition == definition);
+    try testing.expectEqualDeep(
+        Value{ .save = .{ .rule = .{ .seconds = 60, .changes = 1 } } },
+        prepared.value,
+    );
+    try testing.expectError(error.InvalidArity, prepare(definition, &.{"60"}));
+    try testing.expectError(error.InvalidArity, prepare(definition, &.{ "60", "1", "2" }));
+    try testing.expectError(error.InvalidValue, prepare(definition, &.{ "0", "1" }));
+}
+
+test "prepare supports exact, bounded, and unbounded token counts above two" {
+    const Parser = struct {
+        fn parse(values: []const []const u8) ParseError!Value {
+            return .{ .usize_value = values.len };
+        }
+
+        fn apply(_: *directive_definition.ApplyContext, _: Value) directive_definition.ApplyError!void {
+            @panic("preparation must not apply a directive");
+        }
+    };
+    const testing = std.testing;
+    inline for (comptime .{ Arity.exact(3), Arity.range(3, 5), Arity.atLeast(3) }) |arity| {
+        const definition = comptime DirectiveDefinition{
+            .name = "count-probe",
+            .arity = arity,
+            .input = .{ .file_values = .tokens },
+            .parse = Parser.parse,
+            .apply = Parser.apply,
+        };
+        comptime validateDefinitions(&.{definition});
+        try testing.expectError(error.InvalidArity, prepare(&definition, &.{ "one", "two" }));
+        try testing.expectEqualDeep(
+            Value{ .usize_value = 3 },
+            (try prepare(&definition, &.{ "one", "two", "three" })).value,
+        );
+        if (arity.accepts(5)) {
+            try testing.expectEqualDeep(
+                Value{ .usize_value = 5 },
+                (try prepare(&definition, &.{ "one", "two", "three", "four", "five" })).value,
+            );
+        } else {
+            try testing.expectError(error.InvalidArity, prepare(&definition, &.{ "one", "two", "three", "four", "five" }));
+        }
     }
 }
 
