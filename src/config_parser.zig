@@ -1,3 +1,6 @@
+//! Apply file syntax through registry preparation and builder application.
+//! Blank lines and full-line comments are skipped; quotes and inline # stay literal.
+
 const std = @import("std");
 const Config = @import("config.zig");
 const ConfigBuilder = @import("config/builder.zig");
@@ -15,6 +18,10 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// Start a builder, apply this file, finish once, and always clean up temporary state.
+/// Returned strings borrow contents, which must remain alive while Config is used.
+/// The caller owns allocated save_rules: free with allocator or release its arena.
+/// On failure, builder-owned output and temporary token storage are freed.
 pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
     var builder = ConfigBuilder.init(allocator);
     defer builder.deinit();
@@ -23,15 +30,15 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
     return builder.finish();
 }
 
-/// Applies file directives without finishing the builder. The caller owns cleanup
-/// and keeps contents alive for borrowed strings.
+/// Apply to an existing builder; the caller finishes once and always calls deinit.
+/// Keep contents alive for borrowed Config strings; temporary tokens are freed on exit.
+/// Invalid arity maps to MalformedLine. Any file error ends the build.
 pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
     std.debug.assert(builder.status == .building);
     errdefer builder.status = .failed;
 
-    // NOTE: we are reusing this list across lines for optimization
-    // This will save us from having to allocate -> free work every single iteration
-    // only thing to aware is we need to clear the retaining capacity before using it
+    // Reuse the slice array across token-based lines. Values borrow contents,
+    // not this array; preparation copies save numbers before the array is cleared.
     var token_values: std.ArrayList([]const u8) = .empty;
     defer token_values.deinit(builder.allocator);
 
@@ -47,7 +54,6 @@ pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
 
         const definition = registry.find(directive_name) orelse return Error.UnknownDirective;
         const unsplit_value = [_][]const u8{value};
-        // check the type
         const values: []const []const u8 = switch (definition.input.file_values) {
             .unsplit_value => &unsplit_value,
             .tokens => blk: {

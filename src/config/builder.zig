@@ -1,3 +1,5 @@
+//! Build Config from prepared directives: init, apply, finish once, then deinit.
+
 const std = @import("std");
 const Config = @import("../config.zig");
 const directive_definition = @import("definition.zig");
@@ -5,6 +7,7 @@ const DirectiveDefinition = directive_definition.Definition;
 
 const ConfigBuilder = @This();
 
+/// File callers use .file. The CLI tag is reserved; layer precedence is not applied yet.
 pub const Layer = enum {
     file,
     cli,
@@ -27,6 +30,7 @@ config: Config,
 states: std.ArrayList(StateEntry) = .empty,
 status: Status = .building,
 
+/// Start with Config defaults without allocating. Always call deinit afterward.
 pub fn init(allocator: std.mem.Allocator) ConfigBuilder {
     return .{
         .allocator = allocator,
@@ -34,6 +38,9 @@ pub fn init(allocator: std.mem.Allocator) ConfigBuilder {
     };
 }
 
+/// Apply a prepared value, creating or reusing its definition's state (null if stateless).
+/// A failure ends the build. Failed registration discards the new state immediately;
+/// other owned state remains for deinit. Layer precedence is reserved.
 pub fn apply(
     self: *ConfigBuilder,
     directive: directive_definition.PreparedDirective,
@@ -51,7 +58,6 @@ pub fn apply(
     };
 
     if (definition.state_lifecycle) |lifecycle| {
-        // get previous state and add it to context so that defnition apply can use that and append new states
         for (self.states.items) |entry| {
             if (entry.definition == definition) {
                 context.state = entry.state;
@@ -74,6 +80,10 @@ pub fn apply(
     try definition.apply(&context, directive.value);
 }
 
+/// Finalize active states once, keeping defaults for untouched fields.
+/// State owns output until all finalizers succeed; deinit discards it after any failure.
+/// Success transfers allocated output to the caller: free with this allocator or
+/// release its arena. Strings stay borrowed. Call deinit after either result.
 pub fn finish(self: *ConfigBuilder) directive_definition.BuildError!Config {
     std.debug.assert(self.status == .building);
     errdefer self.status = .failed;
@@ -90,6 +100,8 @@ pub fn finish(self: *ConfigBuilder) directive_definition.BuildError!Config {
     return self.config;
 }
 
+/// Free states and entry storage using discard before successful finish or
+/// retain_config afterward. Borrowed input is never freed. Invalidates the builder.
 pub fn deinit(self: *ConfigBuilder) void {
     const mode: directive_definition.CleanupMode = if (self.status == .finished) .retain_config else .discard;
     for (self.states.items) |entry| {

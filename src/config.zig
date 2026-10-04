@@ -1,3 +1,5 @@
+//! Parsed strings borrow input bytes; callers own allocated save_rules.
+
 const std = @import("std");
 
 const Config = @This();
@@ -31,8 +33,8 @@ active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
-/// No `save` line means no automatic BGSAVE triggering at all (matches
-/// Redis's `save ""` meaning "disable automatic saving").
+/// Empty rules `""` disable automatic saving. Parsing appends rules in file order;
+/// the caller owns the allocated slice after successful construction.
 save_rules: []const SaveRule = &.{},
 append_only: bool = false,
 /// A *base* name, not a real file: the files on disk derive from it

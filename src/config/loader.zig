@@ -2,6 +2,10 @@ const std = @import("std");
 const Config = @import("../config.zig");
 const ConfigParser = @import("../config_parser.zig");
 
+/// Null path returns defaults without allocation; otherwise, read and parse the file.
+/// Use an arena that outlives Config: on success, the file buffer is retained for
+/// borrowed strings and is not returned separately. The arena also owns save_rules.
+/// On failure, the parser frees builder data and this function frees the file buffer.
 pub fn loadFromPath(
     io: std.Io,
     allocator: std.mem.Allocator,

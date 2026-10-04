@@ -1,3 +1,5 @@
+//! Prepare values from static definitions; the builder applies them and owns state.
+
 const std = @import("std");
 const Config = @import("../config.zig");
 const directive_definition = @import("definition.zig");
@@ -9,6 +11,7 @@ const ParseError = directive_definition.ParseError;
 const StringValidator = *const fn (value: []const u8) error{InvalidValue}!void;
 const boolean_choices = [_][]const u8{ "yes", "no" };
 
+/// Owns growing and finalized rules until the whole build succeeds.
 const SaveState = struct {
     rules: std.ArrayList(Config.SaveRule) = .empty,
     finalized_rules: ?[]Config.SaveRule = null,

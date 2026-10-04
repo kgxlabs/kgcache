@@ -15,6 +15,10 @@
 # Use the supported directive names shown here. Old names such as
 # num-databases, append-dirname, append-filename, and snapshot-path are
 # rejected. Values must be written without surrounding quotes.
+# Names and yes/no or enum values are case-sensitive. Whitespace at the
+# ends is trimmed; string values can contain spaces. Inline comments are
+# not supported. Repeated directives replace their value, except save,
+# which collects every rule in file order.
 # See docs/CONFIGURATION.md for the supported Redis config subset.
 
 # Address the TCP server binds to.
@@ -85,6 +89,7 @@
 # default), automatic saving is disabled -- SAVE/BGSAVE still work
 # on demand.
 # Ranges: seconds 1 to 9223372036854775807; changes 1 to 4294967295.
+# Exactly two values, separated by spaces or tabs. save "" is not supported.
 # save 3600 1
 # save 300 100
 # save 60 10000
