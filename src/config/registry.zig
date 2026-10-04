@@ -58,13 +58,22 @@ pub fn prepare(
     values: []const []const u8,
 ) directive_definition.ParseError!directive_definition.PreparedDirective {
     if (!definition.arity.accepts(values.len)) return error.InvalidArity;
+
     if (definition.choices) |choices| {
         std.debug.assert(values.len == 1);
-        const matches_choice = for (choices) |choice| {
-            if (std.mem.eql(u8, values[0], choice)) break true;
-        } else false;
+
+        var matches_choice = false;
+
+        for (choices) |choice| {
+            if (std.mem.eql(u8, values[0], choice)) {
+                matches_choice = true;
+                break;
+            }
+        }
+
         if (!matches_choice) return error.InvalidValue;
     }
+
     return .{
         .definition = definition,
         .value = try definition.parse(values),
@@ -377,7 +386,7 @@ test "find excludes process options, CLI prefixes, and unsupported names" {
     }
 }
 
-test "single-value preparation and application match the existing file parser for every setting" {
+test "single-value preparation and application agree with file parsing for every setting" {
     const testing = std.testing;
     const ConfigParser = @import("../config_parser.zig");
     const cases = [_]struct { line: []const u8, value: Value }{
