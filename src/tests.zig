@@ -21,6 +21,9 @@ test {
     _ = @import("logger/test_logger.zig");
     _ = @import("config.zig");
     _ = @import("config/definition.zig");
+    _ = @import("config/registry.zig");
+    _ = @import("config/builder.zig");
+    _ = @import("config/loader.zig");
     _ = @import("cli.zig");
     _ = @import("readiness.zig");
     _ = @import("config_parser.zig");
