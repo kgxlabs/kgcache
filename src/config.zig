@@ -1,5 +1,4 @@
 const std = @import("std");
-const ConfigParser = @import("config_parser.zig");
 
 const Config = @This();
 
@@ -92,13 +91,4 @@ pub fn resolveSnapshotPath(self: Config, allocator: std.mem.Allocator) ![]u8 {
 pub fn resolveAofDirectory(self: Config, allocator: std.mem.Allocator) ![]u8 {
     try self.validatePersistence();
     return std.fs.path.join(allocator, &.{ self.dir, self.append_dirname });
-}
-
-/// With no path, returns `Config.default()`.
-/// A path that can't be read or doesn't parse returns the source error rather
-/// than silently falling back to defaults. The application boundary reports it.
-pub fn loadFromPath(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config {
-    const conf_path = path orelse return Config.default();
-    const contents = try std.Io.Dir.cwd().readFileAlloc(io, conf_path, allocator, .unlimited);
-    return ConfigParser.parse(allocator, contents);
 }
