@@ -9,6 +9,11 @@ const ParseError = directive_definition.ParseError;
 const StringValidator = *const fn (value: []const u8) error{InvalidValue}!void;
 const boolean_choices = [_][]const u8{ "yes", "no" };
 
+const SaveState = struct {
+    rules: std.ArrayList(Config.SaveRule) = .empty,
+    finalized_rules: ?[]Config.SaveRule = null,
+};
+
 const definitions = [_]DirectiveDefinition{
     stringDirective("bind", "bind_address", null),
     integerDirective("port", "port", u16, 0, std.math.maxInt(u16)),
@@ -22,20 +27,7 @@ const definitions = [_]DirectiveDefinition{
     integerDirective("active-expire-batch-size", "active_expire_batch_size", i8, 1, std.math.maxInt(i8)),
     integerDirective("active-expire-threshold-percent", "active_expire_threshold_percent", i8, 1, 100),
     booleanDirective("exclusive-bg-persistence", "exclusive_bg_persistence"),
-    .{
-        .name = "save",
-        .arity = Arity.exact(2),
-        .input = .{ .file_values = .tokens },
-        .repeat = .append,
-        .parse = parseStub,
-        .apply = applyStub,
-        .reset = resetStub,
-        .state_lifecycle = .{
-            .init = initStateStub,
-            .finalize = finalizeStateStub,
-            .deinit = deinitStateStub,
-        },
-    },
+    saveDirective(),
     booleanDirective("appendonly", "append_only"),
     enumDirective("appendfsync", "append_fsync", Config.AppendFsync),
     stringDirective("appenddirname", "append_dirname", Config.validateAppendDirname),
@@ -78,12 +70,16 @@ fn integerDirective(
 
     const Parser = struct {
         fn parse(value: []const u8) ParseError!T {
-            const parsed = std.fmt.parseInt(T, value, 10) catch return error.InvalidValue;
-            if (parsed < minimum or parsed > maximum) return error.InvalidValue;
-            return parsed;
+            return parseIntegerInRange(T, value, minimum, maximum);
         }
     };
     return singleValueDirective(name, field, valueTagFor(T), Parser.parse);
+}
+
+fn parseIntegerInRange(comptime T: type, value: []const u8, minimum: T, maximum: T) ParseError!T {
+    const parsed = std.fmt.parseInt(T, value, 10) catch return error.InvalidValue;
+    if (parsed < minimum or parsed > maximum) return error.InvalidValue;
+    return parsed;
 }
 
 fn booleanDirective(comptime name: []const u8, comptime field: []const u8) DirectiveDefinition {
@@ -174,36 +170,71 @@ fn valueTagFor(comptime T: type) ValueTag {
     @compileError("unsupported config value type `" ++ @typeName(T) ++ "`");
 }
 
-fn parseStub(values: []const []const u8) directive_definition.ParseError!directive_definition.Value {
-    _ = values;
-    @panic("config directive parsing is not implemented");
-}
+fn saveDirective() DirectiveDefinition {
+    const Callbacks = struct {
+        fn stateFrom(context: *directive_definition.ApplyContext) *SaveState {
+            return @ptrCast(@alignCast(context.state.?));
+        }
 
-fn applyStub(context: *directive_definition.ApplyContext, value: directive_definition.Value) directive_definition.ApplyError!void {
-    _ = context;
-    _ = value;
-    @panic("config directive application is not implemented");
-}
+        fn parse(values: []const []const u8) ParseError!Value {
+            if (values.len != 2) return error.InvalidArity;
+            return .{ .save = .{ .rule = .{
+                .seconds = try parseIntegerInRange(i64, values[0], 1, std.math.maxInt(i64)),
+                .changes = try parseIntegerInRange(u32, values[1], 1, std.math.maxInt(u32)),
+            } } };
+        }
 
-fn resetStub(context: *directive_definition.ApplyContext) void {
-    _ = context;
-    @panic("config directive reset is not implemented");
-}
+        fn apply(context: *directive_definition.ApplyContext, value: Value) directive_definition.ApplyError!void {
+            const state = stateFrom(context);
+            std.debug.assert(state.finalized_rules == null);
+            try state.rules.append(context.allocator, value.save.rule);
+        }
 
-fn initStateStub(allocator: std.mem.Allocator) directive_definition.ApplyError!*anyopaque {
-    _ = allocator;
-    @panic("config directive state initialization is not implemented");
-}
+        fn reset(context: *directive_definition.ApplyContext) void {
+            const state = stateFrom(context);
+            std.debug.assert(state.finalized_rules == null);
+            state.rules.clearRetainingCapacity();
+        }
 
-fn finalizeStateStub(context: *directive_definition.ApplyContext) directive_definition.BuildError!void {
-    _ = context;
-    @panic("config directive state finalization is not implemented");
-}
+        fn init(allocator: std.mem.Allocator) directive_definition.ApplyError!*anyopaque {
+            const state = try allocator.create(SaveState);
+            state.* = .{};
+            return state;
+        }
 
-fn deinitStateStub(context: *directive_definition.ApplyContext, mode: directive_definition.CleanupMode) void {
-    _ = context;
-    _ = mode;
-    @panic("config directive state cleanup is not implemented");
+        fn finalize(context: *directive_definition.ApplyContext) directive_definition.BuildError!void {
+            const state = stateFrom(context);
+            std.debug.assert(state.finalized_rules == null);
+            const rules = try state.rules.toOwnedSlice(context.allocator);
+            state.finalized_rules = rules;
+            context.config.save_rules = rules;
+        }
+
+        fn deinit(context: *directive_definition.ApplyContext, mode: directive_definition.CleanupMode) void {
+            const state = stateFrom(context);
+            state.rules.deinit(context.allocator);
+            if (mode == .discard) {
+                if (state.finalized_rules) |rules| context.allocator.free(rules);
+            }
+            context.allocator.destroy(state);
+            context.state = null;
+        }
+    };
+
+    return .{
+        .name = "save",
+        .arity = Arity.exact(2),
+        .input = .{ .file_values = .tokens },
+        .repeat = .append,
+        .parse = Callbacks.parse,
+        .apply = Callbacks.apply,
+        .reset = Callbacks.reset,
+        .state_lifecycle = .{
+            .init = Callbacks.init,
+            .finalize = Callbacks.finalize,
+            .deinit = Callbacks.deinit,
+        },
+    };
 }
 
 test {
@@ -412,5 +443,274 @@ test "single-value callbacks reject missing and extra values" {
         if (definition.repeat == .append) continue;
         try std.testing.expectError(error.InvalidArity, definition.parse(&.{}));
         try std.testing.expectError(error.InvalidArity, definition.parse(&.{ "1", "2" }));
+    }
+}
+
+test "save parser accepts exactly two positive numbers without enabling clearing" {
+    const testing = std.testing;
+    const definition = find("save").?;
+    try testing.expectEqualDeep(Arity.exact(2), definition.arity);
+    try testing.expectEqual(.tokens, definition.input.file_values);
+    try testing.expectEqual(.append, definition.repeat);
+    try testing.expect(definition.choices == null);
+    try testing.expect(definition.input.cli_value_count == null);
+    try testing.expect(!definition.input.normalize_empty_file_value);
+
+    try testing.expectEqualDeep(
+        Value{ .save = .{ .rule = .{ .seconds = 1, .changes = 1 } } },
+        try definition.parse(&.{ "1", "1" }),
+    );
+    try testing.expectEqualDeep(
+        Value{ .save = .{ .rule = .{ .seconds = std.math.maxInt(i64), .changes = std.math.maxInt(u32) } } },
+        try definition.parse(&.{ "9223372036854775807", "4294967295" }),
+    );
+    for ([_][]const []const u8{ &.{}, &.{"60"}, &.{""}, &.{"\"\""}, &.{ "60", "1", "2" } }) |values| {
+        try testing.expectError(error.InvalidArity, definition.parse(values));
+    }
+    for ([_][2][]const u8{
+        .{ "0", "1" },
+        .{ "-1", "1" },
+        .{ "9223372036854775808", "1" },
+        .{ "1", "0" },
+        .{ "1", "-1" },
+        .{ "1", "4294967296" },
+        .{ "invalid", "1" },
+        .{ "1", "invalid" },
+        .{ "", "1" },
+        .{ "1", "" },
+        .{ "1.5", "1" },
+        .{ "1", "\"1\"" },
+        .{ "60 1", "1" },
+    }) |values| {
+        try testing.expectError(error.InvalidValue, definition.parse(&values));
+    }
+}
+
+test "save callbacks collect rules in order and retain finalized output for Config" {
+    const testing = std.testing;
+    const definition = find("save").?;
+    const lifecycle = definition.state_lifecycle.?;
+    var config = Config.default();
+    config.port = 7000;
+    var context: directive_definition.ApplyContext = .{
+        .allocator = testing.allocator,
+        .config = &config,
+        .state = try lifecycle.init(testing.allocator),
+    };
+    defer if (context.state != null) lifecycle.deinit(&context, .discard);
+
+    const expected_rules = [_]Config.SaveRule{
+        .{ .seconds = 900, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+        .{ .seconds = 60, .changes = 10000 },
+    };
+    for ([_][2][]const u8{ .{ "900", "1" }, .{ "300", "10" }, .{ "60", "10000" } }) |values| {
+        try definition.apply(&context, try definition.parse(&values));
+        try testing.expectEqual(0, config.save_rules.len);
+    }
+    try lifecycle.finalize(&context);
+    const state: *SaveState = @ptrCast(@alignCast(context.state.?));
+    try testing.expect(state.finalized_rules.?.ptr == config.save_rules.ptr);
+    try testing.expectEqual(0, state.rules.items.len);
+
+    lifecycle.deinit(&context, .retain_config);
+    defer testing.allocator.free(config.save_rules);
+    var expected = Config.default();
+    expected.port = 7000;
+    expected.save_rules = &expected_rules;
+    try testing.expectEqualDeep(expected, config);
+}
+
+test "save reset clears only its collection and reuses its allocation" {
+    const testing = std.testing;
+    const definition = find("save").?;
+    const lifecycle = definition.state_lifecycle.?;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const allocator = failing.allocator();
+    var config = Config.default();
+    config.port = 7000;
+    config.append_only = true;
+    var context: directive_definition.ApplyContext = .{
+        .allocator = allocator,
+        .config = &config,
+        .state = try lifecycle.init(allocator),
+    };
+    defer if (context.state != null) lifecycle.deinit(&context, .discard);
+
+    try definition.apply(&context, try definition.parse(&.{ "60", "1" }));
+    try definition.apply(&context, try definition.parse(&.{ "300", "10" }));
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = 0;
+    definition.reset.?(&context);
+    try definition.apply(&context, try definition.parse(&.{ "900", "100" }));
+    try testing.expect(!failing.has_induced_failure);
+    try testing.expectEqual(0, config.save_rules.len);
+
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try lifecycle.finalize(&context);
+    lifecycle.deinit(&context, .retain_config);
+    defer allocator.free(config.save_rules);
+    var expected = Config.default();
+    expected.port = 7000;
+    expected.append_only = true;
+    expected.save_rules = &.{.{ .seconds = 900, .changes = 100 }};
+    try testing.expectEqualDeep(expected, config);
+}
+
+test "save state is separate for each initialization" {
+    const testing = std.testing;
+    const definition = find("save").?;
+    const lifecycle = definition.state_lifecycle.?;
+    var first_config = Config.default();
+    var first: directive_definition.ApplyContext = .{
+        .allocator = testing.allocator,
+        .config = &first_config,
+        .state = try lifecycle.init(testing.allocator),
+    };
+    defer if (first.state != null) lifecycle.deinit(&first, .discard);
+    var second_config = Config.default();
+    var second: directive_definition.ApplyContext = .{
+        .allocator = testing.allocator,
+        .config = &second_config,
+        .state = try lifecycle.init(testing.allocator),
+    };
+    defer if (second.state != null) lifecycle.deinit(&second, .discard);
+
+    try testing.expect(first.state.? != second.state.?);
+    try definition.apply(&first, try definition.parse(&.{ "60", "1" }));
+    try definition.apply(&second, try definition.parse(&.{ "300", "10" }));
+    definition.reset.?(&first);
+    try lifecycle.finalize(&first);
+    try testing.expectEqual(0, first_config.save_rules.len);
+    lifecycle.deinit(&first, .discard);
+
+    try lifecycle.finalize(&second);
+    lifecycle.deinit(&second, .retain_config);
+    defer testing.allocator.free(second_config.save_rules);
+    try testing.expectEqualDeep(
+        &[_]Config.SaveRule{.{ .seconds = 300, .changes = 10 }},
+        second_config.save_rules,
+    );
+}
+
+test "save discard releases unfinished rules and already finalized output" {
+    const testing = std.testing;
+    const definition = find("save").?;
+    const lifecycle = definition.state_lifecycle.?;
+    for ([_]bool{ false, true }) |finalize| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        const allocator = failing.allocator();
+        var config = Config.default();
+        var context: directive_definition.ApplyContext = .{
+            .allocator = allocator,
+            .config = &config,
+            .state = try lifecycle.init(allocator),
+        };
+        defer if (context.state != null) lifecycle.deinit(&context, .discard);
+        try definition.apply(&context, try definition.parse(&.{ "60", "1" }));
+        if (finalize) {
+            try lifecycle.finalize(&context);
+            try testing.expectEqual(1, config.save_rules.len);
+        }
+        lifecycle.deinit(&context, .discard);
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "save can finalize an empty or reset collection without allocating" {
+    const testing = std.testing;
+    const definition = find("save").?;
+    const lifecycle = definition.state_lifecycle.?;
+    for ([_]bool{ false, true }) |append_then_reset| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        const allocator = failing.allocator();
+        var config = Config.default();
+        var context: directive_definition.ApplyContext = .{
+            .allocator = allocator,
+            .config = &config,
+            .state = try lifecycle.init(allocator),
+        };
+        defer if (context.state != null) lifecycle.deinit(&context, .discard);
+        if (append_then_reset) {
+            try definition.apply(&context, try definition.parse(&.{ "60", "1" }));
+            definition.reset.?(&context);
+        }
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = 0;
+        try lifecycle.finalize(&context);
+        try testing.expectEqual(0, config.save_rules.len);
+        try testing.expect(!failing.has_induced_failure);
+        lifecycle.deinit(&context, .retain_config);
+        allocator.free(config.save_rules);
+        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "save finalization failure leaves the collected rules owned for discard" {
+    const testing = std.testing;
+    const definition = find("save").?;
+    const lifecycle = definition.state_lifecycle.?;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+    const allocator = failing.allocator();
+    var config = Config.default();
+    var context: directive_definition.ApplyContext = .{
+        .allocator = allocator,
+        .config = &config,
+        .state = try lifecycle.init(allocator),
+    };
+    defer if (context.state != null) lifecycle.deinit(&context, .discard);
+    try definition.apply(&context, try definition.parse(&.{ "60", "1" }));
+    const state: *SaveState = @ptrCast(@alignCast(context.state.?));
+    try state.rules.ensureUnusedCapacity(allocator, 1);
+    failing.fail_index = failing.alloc_index;
+
+    try testing.expectError(error.OutOfMemory, lifecycle.finalize(&context));
+    try testing.expectEqual(0, config.save_rules.len);
+    try testing.expect(state.finalized_rules == null);
+    try testing.expectEqualDeep(
+        &[_]Config.SaveRule{.{ .seconds = 60, .changes = 1 }},
+        state.rules.items,
+    );
+    lifecycle.deinit(&context, .discard);
+    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+}
+
+test "save lifecycle cleans up every allocation failure during init, growth, and finalization" {
+    const Run = struct {
+        fn run(backing_allocator: std.mem.Allocator, mode: directive_definition.CleanupMode) !void {
+            var failing_resize = std.testing.FailingAllocator.init(backing_allocator, .{ .resize_fail_index = 0 });
+            const allocator = failing_resize.allocator();
+            const definition = find("save").?;
+            const lifecycle = definition.state_lifecycle.?;
+            var config = Config.default();
+            var context: directive_definition.ApplyContext = .{
+                .allocator = allocator,
+                .config = &config,
+                .state = try lifecycle.init(allocator),
+            };
+            defer if (context.state != null) lifecycle.deinit(&context, .discard);
+            for (0..64) |index| {
+                try definition.apply(&context, .{ .save = .{ .rule = .{
+                    .seconds = @intCast(index + 1),
+                    .changes = @intCast(index + 1),
+                } } });
+            }
+            const state: *SaveState = @ptrCast(@alignCast(context.state.?));
+            try state.rules.ensureUnusedCapacity(allocator, 1);
+            try lifecycle.finalize(&context);
+            try std.testing.expectEqual(64, config.save_rules.len);
+            lifecycle.deinit(&context, mode);
+            if (mode == .retain_config) {
+                defer allocator.free(config.save_rules);
+                for (config.save_rules, 0..) |rule, index| {
+                    try std.testing.expectEqual(@as(i64, @intCast(index + 1)), rule.seconds);
+                    try std.testing.expectEqual(@as(u32, @intCast(index + 1)), rule.changes);
+                }
+            }
+        }
+    };
+    for ([_]directive_definition.CleanupMode{ .discard, .retain_config }) |mode| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Run.run, .{mode});
     }
 }
