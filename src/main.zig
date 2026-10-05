@@ -156,29 +156,48 @@ fn shutdownHandler(signal: std.posix.SIG) callconv(.c) void {
     shutdown_event.set(shutdown_io);
 }
 
-test "application reports a configuration read source once" {
+test "application reports loader failures once with the source error" {
     const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const args = [_][*:0]const u8{ "kgcache", "scratch-missing-config-for-error-test.conf" };
-    const init: std.process.Init = .{
-        .minimal = .{
-            .args = .{ .vector = &args },
-            .environ = std.process.Environ.empty,
-        },
-        .arena = &arena,
-        .gpa = testing.allocator,
-        .io = testing.io,
-        .environ_map = undefined,
-        .preopens = undefined,
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "kgcache.conf" });
+    defer testing.allocator.free(path);
+    const path_arg = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_arg);
+    const cases = [_]struct { contents: ?[]const u8, err: anyerror, fail_allocation: bool = false }{
+        .{ .contents = null, .err = error.FileNotFound },
+        .{ .contents = "port invalid", .err = error.InvalidValue },
+        .{ .contents = "save 60 1\nsave 300 invalid", .err = error.InvalidValue },
+        .{ .contents = "unknown value", .err = error.UnknownDirective },
+        .{ .contents = "port", .err = error.MalformedLine },
+        .{ .contents = "port 7000\nsave 60 1", .err = error.OutOfMemory, .fail_allocation = true },
     };
-    var test_logger = logging.TestLogger.init();
-
-    try testing.expectError(error.FileNotFound, runApplication(init, test_logger.logger()));
-
-    const events = test_logger.recordedEvents();
-    try testing.expectEqual(1, events.len);
-    try testing.expectEqual(error.FileNotFound, events[0].source.?);
+    for (cases) |case| {
+        if (case.contents) |contents| {
+            try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = contents });
+        }
+        var arena = std.heap.ArenaAllocator.init(if (case.fail_allocation) testing.failing_allocator else testing.allocator);
+        defer arena.deinit();
+        const args = [_][*:0]const u8{ "kgcache", path_arg.ptr, "--port", "8000" };
+        const init: std.process.Init = .{
+            .minimal = .{
+                .args = .{ .vector = &args },
+                .environ = std.process.Environ.empty,
+            },
+            .arena = &arena,
+            .gpa = testing.allocator,
+            .io = testing.io,
+            .environ_map = undefined,
+            .preopens = undefined,
+        };
+        var test_logger = logging.TestLogger.init();
+        try testing.expectError(case.err, runApplication(init, test_logger.logger()));
+        const events = test_logger.recordedEvents();
+        try testing.expectEqual(1, events.len);
+        try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+        try testing.expectEqualStrings("app: failed to load configuration", events[0].message());
+        try testing.expectEqual(case.err, events[0].source.?);
+    }
 }
 
 test "application reports a CLI error once" {
@@ -214,6 +233,9 @@ test "application reports override errors before reading the config file" {
         .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--port" }, .err = error.MissingValue },
         .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--save", "0", "1", "--save", "60", "1" }, .err = error.InvalidValue },
         .{ .argv = &.{ "kgcache", "--port", "7000", "--port", "invalid", "scratch-missing-config-for-cli-order-test.conf" }, .err = error.InvalidValue },
+        .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--unknown" }, .err = error.UnknownFlag },
+        .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--appendonly", "YES" }, .err = error.InvalidValue },
+        .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--appendfsync", "invalid" }, .err = error.InvalidValue },
     };
     for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);

@@ -3,6 +3,8 @@ const Config = @import("../config.zig");
 const ConfigLoader = @import("loader.zig");
 const registry = @import("registry.zig");
 const directive_definition = @import("definition.zig");
+const Cli = @import("../cli.zig");
+const Manifest = @import("../persistence/manifest.zig");
 
 test "load applies ordered scalar overrides without a file or allocation" {
     const testing = std.testing;
@@ -60,6 +62,106 @@ test "load keeps untouched file values and replaces save rules on the first CLI 
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = "save 60 1\nport invalid" });
     try testing.expectError(error.InvalidValue, ConfigLoader.load(testing.io, testing.allocator, path, &overrides));
     try testing.expectError(error.FileNotFound, ConfigLoader.load(testing.io, testing.allocator, "scratch-missing-cli-config.conf", &clear));
+}
+
+test "persistence paths use the final file and CLI configuration" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "kgcache.conf" });
+    defer testing.allocator.free(path);
+
+    const path_arg = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_arg);
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "dir file data\ndbfilename file.kgc\nappenddirname file-aof\nappendfilename file.aof",
+    });
+
+    const cases = [_]struct {
+        args: []const [*:0]const u8,
+        snapshot: []const u8,
+        aof_directory: []const u8,
+        aof_manifest: []const u8,
+        aof_incremental: []const u8,
+    }{
+        .{
+            .args = &.{},
+            .snapshot = "file data/file.kgc",
+            .aof_directory = "file data/file-aof",
+            .aof_manifest = "file data/file-aof/file.aof.manifest",
+            .aof_incremental = "file data/file-aof/file.aof.1.incr",
+        },
+        .{
+            .args = &.{ "--dir", "cli data" },
+            .snapshot = "cli data/file.kgc",
+            .aof_directory = "cli data/file-aof",
+            .aof_manifest = "cli data/file-aof/file.aof.manifest",
+            .aof_incremental = "cli data/file-aof/file.aof.1.incr",
+        },
+        .{
+            .args = &.{ "--dbfilename", "state.kgc" },
+            .snapshot = "file data/state.kgc",
+            .aof_directory = "file data/file-aof",
+            .aof_manifest = "file data/file-aof/file.aof.manifest",
+            .aof_incremental = "file data/file-aof/file.aof.1.incr",
+        },
+        .{
+            .args = &.{ "--appenddirname", "history", "--appendfilename", "journal.aof" },
+            .snapshot = "file data/file.kgc",
+            .aof_directory = "file data/history",
+            .aof_manifest = "file data/history/journal.aof.manifest",
+            .aof_incremental = "file data/history/journal.aof.1.incr",
+        },
+        .{
+            .args = &.{
+                "--dir", "first data", "--dbfilename", "first.kgc", "--appenddirname", "first-aof", "--appendfilename", "first.aof",
+                "--dir", "final data", "--dbfilename", "state.kgc", "--appenddirname", "history",   "--appendfilename", "journal.aof",
+            },
+            .snapshot = "final data/state.kgc",
+            .aof_directory = "final data/history",
+            .aof_manifest = "final data/history/journal.aof.manifest",
+            .aof_incremental = "final data/history/journal.aof.1.incr",
+        },
+    };
+
+    for (cases) |case| {
+        var argv: [18][*:0]const u8 = undefined;
+        argv[0] = "kgcache";
+        argv[1] = path_arg.ptr;
+        @memcpy(argv[2..][0..case.args.len], case.args);
+        var cli = try Cli.parse(testing.allocator, .{ .vector = argv[0 .. 2 + case.args.len] });
+        defer cli.deinit();
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        const config = try ConfigLoader.load(testing.io, arena.allocator(), cli.config_path, cli.overrides.items);
+        const snapshot = try config.resolveSnapshotPath(testing.allocator);
+        defer testing.allocator.free(snapshot);
+
+        try testing.expectEqualStrings(case.snapshot, snapshot);
+        const aof_directory = try config.resolveAofDirectory(testing.allocator);
+        defer testing.allocator.free(aof_directory);
+
+        try testing.expectEqualStrings(case.aof_directory, aof_directory);
+        const manifest_name = try Manifest.manifestName(testing.allocator, config.append_filename);
+        defer testing.allocator.free(manifest_name);
+
+        const manifest_path = try std.fs.path.join(testing.allocator, &.{ aof_directory, manifest_name });
+        defer testing.allocator.free(manifest_path);
+
+        try testing.expectEqualStrings(case.aof_manifest, manifest_path);
+        const incremental_name = try Manifest.incrName(testing.allocator, config.append_filename, 1);
+        defer testing.allocator.free(incremental_name);
+
+        const incremental_path = try std.fs.path.join(testing.allocator, &.{ aof_directory, incremental_name });
+        defer testing.allocator.free(incremental_path);
+
+        try testing.expectEqualStrings(case.aof_incremental, incremental_path);
+    }
 }
 
 test "load frees the file buffer and builder output after CLI apply or finalizer failure" {
