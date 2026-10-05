@@ -130,6 +130,11 @@ fn validateArityAndInput(comptime definition: DirectiveDefinition) void {
     if (definition.input.file_values == .unsplit_value and !hasExactSingleValue(definition.arity)) {
         invalidDefinition(definition.name, "unsplit file input requires exact arity one");
     }
+
+    const variable_arity = definition.arity.maximum == null or definition.arity.minimum != definition.arity.maximum.?;
+    if (variable_arity and definition.input.cli_value_count == null) {
+        invalidDefinition(definition.name, "variable arity requires a CLI value count callback");
+    }
 }
 
 fn validateRepeat(comptime definition: DirectiveDefinition) void {
@@ -664,6 +669,10 @@ test "prepare borrows string storage and copies save numbers independently of to
 
 test "prepare supports exact, bounded, and unbounded token counts above two" {
     const Parser = struct {
+        fn cliValueCount(remaining_values: []const []const u8) usize {
+            return remaining_values.len;
+        }
+
         fn parse(values: []const []const u8) ParseError!Value {
             return .{ .usize_value = values.len };
         }
@@ -672,12 +681,19 @@ test "prepare supports exact, bounded, and unbounded token counts above two" {
             @panic("preparation must not apply a directive");
         }
     };
+
     const testing = std.testing;
-    inline for (comptime .{ Arity.exact(3), Arity.range(3, 5), Arity.atLeast(3) }) |arity| {
+    inline for (comptime .{
+        .{ Arity.exact(3), null },
+        .{ Arity.range(3, 3), null },
+        .{ Arity.range(3, 5), Parser.cliValueCount },
+        .{ Arity.atLeast(3), Parser.cliValueCount },
+    }) |case| {
+        const arity = case[0];
         const definition = comptime DirectiveDefinition{
             .name = "count-probe",
             .arity = arity,
-            .input = .{ .file_values = .tokens },
+            .input = .{ .file_values = .tokens, .cli_value_count = case[1] },
             .parse = Parser.parse,
             .apply = Parser.apply,
         };

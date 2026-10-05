@@ -6,6 +6,7 @@ const PreparedDirective = directive_definition.PreparedDirective;
 const Cli = @This();
 
 pub const Error = std.mem.Allocator.Error || directive_definition.ParseError || error{
+    MissingValue,
     DuplicateReadyFd,
     MissingReadyFd,
     InvalidReadyFd,
@@ -19,9 +20,6 @@ config_path: ?[]const u8 = null,
 ready_fd: ?std.posix.fd_t = null,
 overrides: std.ArrayList(PreparedDirective) = .empty,
 
-/// Owns the ordered override list on success. Strings borrow argv bytes, which
-/// must outlive both Cli and any Config built from its overrides.
-/// On failure, frees all list storage without freeing borrowed argv bytes.
 pub fn parse(allocator: std.mem.Allocator, process_args: std.process.Args) Error!Cli {
     var args = process_args.iterate();
     _ = args.skip();
@@ -35,17 +33,19 @@ pub fn parse(allocator: std.mem.Allocator, process_args: std.process.Args) Error
     var index: usize = 0;
     while (index < values.items.len) {
         const arg = values.items[index];
-        // count directive name
         index += 1;
 
         if (std.mem.eql(u8, arg, "--ready-fd")) {
             if (cli.ready_fd != null) return error.DuplicateReadyFd;
-
             if (index == values.items.len) return error.MissingReadyFd;
 
             cli.ready_fd = try parseReadyFd(values.items[index]);
             index += 1;
-        } else if (std.mem.startsWith(u8, arg, "--")) {
+
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, arg, "--")) {
             const definition = registry.find(arg[2..]) orelse return error.UnknownFlag;
             const remaining = values.items[index..];
 
@@ -54,28 +54,21 @@ pub fn parse(allocator: std.mem.Allocator, process_args: std.process.Args) Error
             else
                 definition.arity.minimum;
 
-            if (count > remaining.len) return error.InvalidArity;
+            if (count > remaining.len) return error.MissingValue;
 
-            const directive_values = remaining[0..count];
-            // reject directive with no respective values
-            for (directive_values) |value| {
-                if (std.mem.startsWith(u8, value, "--")) return error.InvalidArity;
-            }
+            const prepared = try registry.prepare(definition, remaining[0..count]);
 
-            const prepared = try registry.prepare(definition, directive_values);
             try cli.overrides.append(allocator, prepared);
-
-            // count directive values
             index += count;
-        } else if (std.mem.startsWith(u8, arg, "-")) {
-            return error.UnknownFlag;
-        } else if (std.mem.eql(u8, arg, "healthcheck")) {
-            return error.HealthcheckNotImplemented;
-        } else if (cli.config_path != null) {
-            return error.DuplicateConfigPath;
-        } else {
-            cli.config_path = arg;
+
+            continue;
         }
+
+        if (std.mem.startsWith(u8, arg, "-")) return error.UnknownFlag;
+        if (std.mem.eql(u8, arg, "healthcheck")) return error.HealthcheckNotImplemented;
+
+        if (cli.config_path != null) return error.DuplicateConfigPath;
+        cli.config_path = arg;
     }
 
     return cli;
@@ -109,10 +102,12 @@ test "CLI accepts default and config-path invocations" {
     try testing.expect(defaults.config_path == null);
     try testing.expect(defaults.ready_fd == null);
 
-    var with_config = try parseTestArgs(&.{ "kgcache", "cache.conf" });
-    defer with_config.deinit();
-    try testing.expectEqualStrings("cache.conf", with_config.config_path.?);
-    try testing.expect(with_config.ready_fd == null);
+    for ([_][*:0]const u8{ "cache.conf", "./-cache.conf" }) |path| {
+        var with_config = try parseTestArgs(&.{ "kgcache", path });
+        defer with_config.deinit();
+        try testing.expectEqualStrings(std.mem.span(path), with_config.config_path.?);
+        try testing.expect(with_config.ready_fd == null);
+    }
 }
 
 test "CLI accepts a decimal readiness descriptor and optional config path" {
@@ -152,12 +147,12 @@ test "CLI rejects invalid argument shapes" {
         .{ error.DuplicateConfigPath, &.{ "kgcache", "--ready-fd", "3", "one.conf", "two.conf" } },
         .{ error.DuplicateReadyFd, &.{ "kgcache", "one.conf", "--ready-fd", "3", "--ready-fd", "4" } },
         .{ error.HealthcheckNotImplemented, &.{ "kgcache", "healthcheck" } },
-        .{ error.InvalidArity, &.{ "kgcache", "--port" } },
-        .{ error.InvalidArity, &.{ "kgcache", "--port", "--ready-fd", "3" } },
-        .{ error.InvalidArity, &.{ "kgcache", "--save" } },
-        .{ error.InvalidArity, &.{ "kgcache", "--save", "60" } },
-        .{ error.InvalidArity, &.{ "kgcache", "--save", "60 1" } },
-        .{ error.InvalidArity, &.{ "kgcache", "--save", "60", "--port", "7000" } },
+        .{ error.MissingValue, &.{ "kgcache", "--port" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--port", "--ready-fd", "3" } },
+        .{ error.MissingValue, &.{ "kgcache", "--save" } },
+        .{ error.MissingValue, &.{ "kgcache", "--save", "60" } },
+        .{ error.MissingValue, &.{ "kgcache", "--save", "60 1" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--save", "60", "--port", "7000" } },
         .{ error.InvalidValue, &.{ "kgcache", "--port", "-1" } },
         .{ error.InvalidValue, &.{ "kgcache", "--appendonly", "YES" } },
         .{ error.InvalidValue, &.{ "kgcache", "--dir", "" } },
@@ -168,6 +163,20 @@ test "CLI rejects invalid argument shapes" {
         .{ error.InvalidValue, &.{ "kgcache", "--port", "7000", "--port", "invalid" } },
         .{ error.InvalidReadyFd, &.{ "kgcache", "--save", "60", "1", "--ready-fd", "2" } },
         .{ error.DuplicateConfigPath, &.{ "kgcache", "one.conf", "--port", "7000", "two.conf" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--port", "--appendonly" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--port", "--", "cache.conf" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--save", "60", "cache.conf" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--port", "invalid", "--port", "7000" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--save", "0", "1", "--save", "60", "1" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--save", "60", "1", "--save", "", "--save", "0", "1" } },
+        .{ error.InvalidValue, &.{ "kgcache", "--save", "\"\"", "--port", "7000" } },
+        .{ error.UnknownFlag, &.{ "kgcache", "--num-databases", "4" } },
+        .{ error.UnknownFlag, &.{ "kgcache", "--append-dirname", "history" } },
+        .{ error.UnknownFlag, &.{ "kgcache", "--append-filename", "journal.aof" } },
+        .{ error.UnknownFlag, &.{ "kgcache", "--snapshot-path", "state.kgc" } },
+        .{ error.InvalidReadyFd, &.{ "kgcache", "--ready-fd", "--" } },
+        .{ error.DuplicateConfigPath, &.{ "kgcache", "cache.conf", "--save", "60", "1", "2" } },
+        .{ error.DuplicateConfigPath, &.{ "kgcache", "--save", "60", "1", "2", "three.conf" } },
     };
 
     inline for (cases) |case| {

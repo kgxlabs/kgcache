@@ -4,6 +4,78 @@ const Config = @import("config.zig");
 const ConfigLoader = @import("config/loader.zig");
 const registry = @import("config/registry.zig");
 
+test "CLI consumes required values by position without changing option parsing" {
+    const testing = std.testing;
+    for ([_][*:0]const u8{ "-data", "--", "--ready-fd", "healthcheck", "--dir=value" }) |value| {
+        var cli = try Cli.parse(testing.allocator, .{ .vector = &.{ "kgcache", "--dir", value, "--port", "7000" } });
+        defer cli.deinit();
+        try testing.expect(cli.config_path == null);
+        try testing.expect(cli.ready_fd == null);
+        const config = try ConfigLoader.load(testing.io, testing.failing_allocator, null, cli.overrides.items);
+        try testing.expectEqualStrings(std.mem.span(value), config.dir);
+        try testing.expectEqual(7000, config.port);
+    }
+}
+
+test "CLI rejects a bare double hyphen at an argument boundary" {
+    const testing = std.testing;
+    const invocations = [_][]const [*:0]const u8{
+        &.{ "kgcache", "--" },
+        &.{ "kgcache", "--", "-cache.conf" },
+        &.{ "kgcache", "cache.conf", "--", "other.conf" },
+        &.{ "kgcache", "--port", "7000", "--", "cache.conf" },
+        &.{ "kgcache", "--dir", "--", "--", "cache.conf" },
+        &.{ "kgcache", "--ready-fd", "3", "--", "--ready-fd" },
+        &.{ "kgcache", "--", "healthcheck" },
+    };
+    for (invocations) |argv| {
+        try testing.expectError(error.UnknownFlag, Cli.parse(testing.allocator, .{ .vector = argv }));
+    }
+}
+
+test "config path placement preserves file before CLI precedence" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "-cache.conf" });
+    defer testing.allocator.free(path);
+    const path_arg = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_arg);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "-cache.conf",
+        .data = "port 7000\nbind 0.0.0.0\ndatabases 4\nsave 900 1",
+    });
+    const invocations = [_][]const [*:0]const u8{
+        &.{ "kgcache", path_arg.ptr, "--port", "8000", "--bind", "127.0.0.1" },
+        &.{ "kgcache", "--port", "8000", path_arg.ptr, "--bind", "127.0.0.1" },
+        &.{ "kgcache", "--port", "8000", "--bind", "127.0.0.1", path_arg.ptr },
+    };
+    for (invocations) |argv| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var cli = try Cli.parse(testing.allocator, .{ .vector = argv });
+        defer cli.deinit();
+        try testing.expectEqualStrings(path, cli.config_path.?);
+        const config = try ConfigLoader.load(testing.io, arena.allocator(), cli.config_path, cli.overrides.items);
+        var expected = Config.default();
+        expected.port = 8000;
+        expected.num_databases = 4;
+        expected.save_rules = &.{.{ .seconds = 900, .changes = 1 }};
+        try testing.expectEqualDeep(expected, config);
+    }
+}
+
+test "CLI leaves a trailing positional token after a complete save option" {
+    const testing = std.testing;
+    for ([_][*:0]const u8{ "cache.conf", "2" }) |path| {
+        var cli = try Cli.parse(testing.allocator, .{ .vector = &.{ "kgcache", "--save", "60", "1", path } });
+        defer cli.deinit();
+        try testing.expectEqualStrings(std.mem.span(path), cli.config_path.?);
+        try testing.expectEqual(1, cli.overrides.items.len);
+        try testing.expectEqualDeep(Config.SaveRule{ .seconds = 60, .changes = 1 }, cli.overrides.items[0].value.save.rule);
+    }
+}
+
 test "CLI prepares every directive in argv order beside process arguments" {
     const testing = std.testing;
     var cli = try Cli.parse(testing.allocator, .{ .vector = &.{

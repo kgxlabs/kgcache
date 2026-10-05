@@ -12,17 +12,32 @@ Use `--<directive> <value>` to override any supported setting:
 
 ```bash
 ./zig-out/bin/kgcache path/to/kgcache.conf --port 7000 --databases 4
+./zig-out/bin/kgcache --port 7000 path/to/kgcache.conf --databases 4
+./zig-out/bin/kgcache --port 7000 --databases 4 path/to/kgcache.conf
 ./zig-out/bin/kgcache --dir 'data files' --save 60 1 --save 300 10
 ./zig-out/bin/kgcache path/to/kgcache.conf --save ''
+./zig-out/bin/kgcache --port 7000 ./-cache.conf
 ```
 
 The shell supplies each value as one argument. Single-value directives consume
-one argument, and `--save` consumes two numbers or one empty argument. A value
-starting with `--` is treated as a missing value before the next option. Use
-separate arguments, such as `--port 7000`; `--port=7000` is not supported.
-The optional config path and the process option `--ready-fd <fd>` may appear
-beside directive overrides. `--ready-fd` requires a decimal descriptor of at
-least 3 and may appear only once.
+one argument, and `--save` consumes two numbers or one empty argument. Required
+values are consumed by position, even when they start with a hyphen. For example,
+`--dir --` supplies the literal directory value `--`, and `--port --appendonly`
+fails port validation. An override requesting more values than remain fails with
+`MissingValue`. `--save 60 cache.conf` fails changes validation because its second
+argument is a required value. Use separate arguments, such as `--port 7000`;
+`--port=7000` is not supported.
+
+The optional config path may appear before, between, or after options. Its position
+does not change the defaults, file, then CLI application order. After a complete
+option, an extra positional token is the path: `--save 60 1 cache.conf` is valid,
+and `--save 60 1 2` treats `2` as a path. A second path is rejected.
+
+At an argument boundary, a bare `--` fails with `UnknownFlag`. For a config
+filename that starts with a hyphen, use a path such as `./-cache.conf`.
+
+The process option `--ready-fd <fd>` requires a decimal descriptor of at least 3
+and may appear only once.
 
 For single-value settings, the last CLI occurrence wins. Every CLI and file
 occurrence is validated, even if a later value replaces it. The first `--save`

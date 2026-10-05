@@ -75,7 +75,12 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     defer ready_pipe.close();
 
     // Config strings borrow argv or the file buffer kept in the application arena.
-    const config = ConfigLoader.load(init.io, init.arena.allocator(), cli.config_path, cli.overrides.items) catch |err| {
+    const config = ConfigLoader.load(
+        init.io,
+        init.arena.allocator(),
+        cli.config_path,
+        cli.overrides.items,
+    ) catch |err| {
         logger.err("app: failed to load configuration", err, @errorReturnTrace());
         return err;
     };
@@ -200,6 +205,37 @@ test "application reports a CLI error once" {
     try testing.expectEqual(1, events.len);
     try testing.expectEqualStrings("app: invalid command line", events[0].message());
     try testing.expectEqual(error.InvalidReadyFd, events[0].source.?);
+}
+
+test "application reports override errors before reading the config file" {
+    const testing = std.testing;
+    const cases = [_]struct { argv: []const [*:0]const u8, err: Cli.Error }{
+        .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--port", "invalid", "--port", "7000" }, .err = error.InvalidValue },
+        .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--port" }, .err = error.MissingValue },
+        .{ .argv = &.{ "kgcache", "scratch-missing-config-for-cli-order-test.conf", "--save", "0", "1", "--save", "60", "1" }, .err = error.InvalidValue },
+        .{ .argv = &.{ "kgcache", "--port", "7000", "--port", "invalid", "scratch-missing-config-for-cli-order-test.conf" }, .err = error.InvalidValue },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const init: std.process.Init = .{
+            .minimal = .{
+                .args = .{ .vector = case.argv },
+                .environ = std.process.Environ.empty,
+            },
+            .arena = &arena,
+            .gpa = testing.allocator,
+            .io = testing.io,
+            .environ_map = undefined,
+            .preopens = undefined,
+        };
+        var test_logger = logging.TestLogger.init();
+        try testing.expectError(case.err, runApplication(init, test_logger.logger()));
+        const events = test_logger.recordedEvents();
+        try testing.expectEqual(1, events.len);
+        try testing.expectEqualStrings("app: invalid command line", events[0].message());
+        try testing.expectEqual(case.err, events[0].source.?);
+    }
 }
 
 test "shutdown handler wakes the signal waiter with the received signal" {
