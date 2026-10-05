@@ -6,9 +6,15 @@ pub const Options = struct {
     startup_timeout_ms: i64 = 5_000,
     read_timeout_ms: i64 = 3_000,
     stop_timeout_ms: i64 = 5_000,
-    /// Config path relative to the fixture's working directory.
-    config_subpath: []const u8 = "kgcache.conf",
+    /// Config path relative to the fixture's working directory, or null for CLI-only startup.
+    config_subpath: ?[]const u8 = "kgcache.conf",
+    /// Number of extra_args before the config path. Use extra_args.len to place it last.
+    config_arg_index: usize = 0,
     extra_config: []const u8 = "",
+    /// Borrowed CLI arguments. Keep their storage alive through the fixture's lifetime.
+    extra_args: []const []const u8 = &.{},
+    /// Disable when extra_args supplies readiness arguments for a rejected startup.
+    auto_ready_fd: bool = true,
     artifact_dir: ?[]const u8 = null,
     report_failures: bool = true,
 };
@@ -19,7 +25,7 @@ pub const ServerProcess = struct {
     executable_path: []const u8,
     options: Options,
     data_dir: []const u8,
-    config_path: []const u8,
+    config_path: ?[]const u8,
     config: ?[]const u8 = null,
     address: ?std.Io.net.IpAddress = null,
     pid: ?std.posix.pid_t = null,
@@ -40,6 +46,7 @@ pub const ServerProcess = struct {
     }
 
     pub fn createStopped(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, options: Options) !*ServerProcess {
+        if (options.config_subpath != null and options.config_arg_index > options.extra_args.len) return error.InvalidConfigArgumentIndex;
         var random_bytes: [12]u8 = undefined;
         std.Io.random(io, &random_bytes);
         const suffix = std.fmt.bytesToHex(random_bytes, .lower);
@@ -47,14 +54,21 @@ pub const ServerProcess = struct {
         var paths_owned_by_self = false;
         errdefer if (!paths_owned_by_self) allocator.free(data_dir);
 
-        const config_path = try std.fs.path.join(allocator, &.{ data_dir, options.config_subpath });
-        errdefer if (!paths_owned_by_self) allocator.free(config_path);
+        const config_path: ?[]const u8 = if (options.config_subpath) |subpath|
+            try std.fs.path.join(allocator, &.{ data_dir, subpath })
+        else
+            null;
+        errdefer if (!paths_owned_by_self) {
+            if (config_path) |path| allocator.free(path);
+        };
 
         const cwd = std.Io.Dir.cwd();
         try cwd.createDir(io, data_dir, .default_dir);
+
         var directory_owned = true;
         errdefer if (directory_owned) cwd.deleteTree(io, data_dir) catch {};
-        try cwd.createDirPath(io, std.fs.path.dirname(config_path).?);
+
+        if (config_path) |path| try cwd.createDirPath(io, std.fs.path.dirname(path).?);
 
         const self = try allocator.create(ServerProcess);
         self.* = .{
@@ -72,21 +86,24 @@ pub const ServerProcess = struct {
 
     pub fn start(self: *ServerProcess) !void {
         if (self.pid != null) return error.AlreadyRunning;
+        if (self.options.config_subpath != null and self.options.config_arg_index > self.options.extra_args.len) return error.InvalidConfigArgumentIndex;
         self.failure_reported = false;
         self.last_exit_status = null;
         self.ready_bytes_read = 0;
 
         const port: u16 = if (self.address) |address| address.getPort() else 0;
-        const config = try std.fmt.allocPrint(
-            self.allocator,
-            "bind 127.0.0.1\nport {d}\nreuse-address yes\ncron-interval-ms 20\nappenddirname aof\nappendfilename appendonly.aof\n{s}",
-            .{ port, self.options.extra_config },
-        );
+        if (self.config_path) |path| {
+            const config = try std.fmt.allocPrint(
+                self.allocator,
+                "bind 127.0.0.1\nport {d}\nreuse-address yes\ncron-interval-ms 20\nappenddirname aof\nappendfilename appendonly.aof\n{s}",
+                .{ port, self.options.extra_config },
+            );
 
-        if (self.config) |old| self.allocator.free(old);
-        self.config = config;
+            if (self.config) |old| self.allocator.free(old);
+            self.config = config;
 
-        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = self.config_path, .data = config });
+            try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = config });
+        }
 
         var ready_fds: [2]std.posix.fd_t = undefined;
         if (std.c.pipe(&ready_fds) != 0) return error.PipeFailed;
@@ -99,8 +116,21 @@ pub const ServerProcess = struct {
 
         var fd_buffer: [16]u8 = undefined;
         const ready_fd_arg = try std.fmt.bufPrint(&fd_buffer, "{d}", .{ready_fds[1]});
+        var argv: std.ArrayList([]const u8) = .empty;
+        defer argv.deinit(self.allocator);
+        try argv.append(self.allocator, self.executable_path);
+        const config_arg_index = if (self.options.config_subpath != null) self.options.config_arg_index else 0;
+        try argv.appendSlice(self.allocator, self.options.extra_args[0..config_arg_index]);
+        if (self.options.config_subpath) |subpath| try argv.append(self.allocator, subpath);
+        if (self.options.auto_ready_fd) try argv.appendSlice(self.allocator, &.{ "--ready-fd", ready_fd_arg });
+        try argv.appendSlice(self.allocator, self.options.extra_args[config_arg_index..]);
+        var port_buffer: [5]u8 = undefined;
+        if (port != 0) {
+            const port_arg = try std.fmt.bufPrint(&port_buffer, "{d}", .{port});
+            try argv.appendSlice(self.allocator, &.{ "--port", port_arg });
+        }
         var child = try std.process.spawn(self.io, .{
-            .argv = &.{ self.executable_path, self.options.config_subpath, "--ready-fd", ready_fd_arg },
+            .argv = argv.items,
             .cwd = .{ .path = self.data_dir },
             .stdin = .ignore,
             .stdout = .pipe,
@@ -253,7 +283,7 @@ pub const ServerProcess = struct {
             std.log.err("integration: cannot remove fixture {s}: {s}", .{ self.data_dir, @errorName(err) });
         };
         if (self.config) |config| self.allocator.free(config);
-        self.allocator.free(self.config_path);
+        if (self.config_path) |path| self.allocator.free(path);
         self.allocator.free(self.data_dir);
         self.allocator.destroy(self);
     }

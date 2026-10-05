@@ -24,9 +24,12 @@ test {
     _ = @import("config/registry.zig");
     _ = @import("config/builder.zig");
     _ = @import("config/loader.zig");
+    _ = @import("config/loader_tests.zig");
+    _ = @import("config/input_tests.zig");
     _ = @import("cli.zig");
+    _ = @import("cli_tests.zig");
     _ = @import("readiness.zig");
-    _ = @import("config_parser.zig");
+    _ = @import("config_parser_tests.zig");
     _ = @import("persistence/manifest.zig");
     _ = @import("persistence_state_tests.zig");
     _ = @import("persistence/kgc_tests.zig");

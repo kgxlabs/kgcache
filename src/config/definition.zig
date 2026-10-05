@@ -5,7 +5,8 @@ const Config = @import("../config.zig");
 
 pub const Arity = @import("../arity.zig");
 
-/// Reserved for future CLI value counting; current definitions leave it null.
+/// Count argv values consumed by this occurrence. The CLI checks availability
+/// and prepares those values before applying them to a builder.
 pub const CliValueCountFn = *const fn (remaining_values: []const []const u8) usize;
 
 pub const InputRules = struct {
@@ -16,8 +17,9 @@ pub const InputRules = struct {
     };
 
     file_values: FileValues = .unsplit_value,
+    /// Null consumes the minimum arity; variable counts supply a callback.
     cli_value_count: ?CliValueCountFn = null,
-    /// Reserved for future file `""` normalization; disabled in current definitions.
+    /// Normalize an entire file value of `""` to one empty value before splitting.
     normalize_empty_file_value: bool = false,
 };
 
@@ -28,7 +30,7 @@ pub const RepeatPolicy = enum {
 
 pub const SaveOperation = union(enum) {
     rule: Config.SaveRule,
-    /// Reserved; the current save parser accepts only rules.
+    /// Clear all rules collected so far in this layer.
     clear,
 };
 
@@ -70,7 +72,8 @@ pub const ParseFn = *const fn (values: []const []const u8) ParseError!Value;
 pub const ApplyFn = *const fn (context: *ApplyContext, value: Value) ApplyError!void;
 
 /// Clear only this definition's collection before finalization, without allocating.
-/// This does not restore Config defaults. Current file loading never invokes reset.
+/// This does not restore Config defaults. The first CLI occurrence of an append
+/// definition resets its collection so CLI values replace the file's collection.
 pub const ResetFn = *const fn (context: *ApplyContext) void;
 
 pub const CleanupMode = enum {

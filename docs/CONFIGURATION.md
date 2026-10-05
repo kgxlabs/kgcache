@@ -1,12 +1,49 @@
 # Configuration
 
-kgcache starts with built-in defaults. To use a config file, pass its path as the first argument:
+kgcache starts with built-in defaults. To use a config file, pass its path as a positional argument:
 
 ```bash
 ./zig-out/bin/kgcache path/to/kgcache.conf
 ```
 
-Omit the argument and it starts from `Config.default()` (`src/config.zig`): `127.0.0.1:6379`, 16 databases, a `dump.kgc` snapshot in the current directory, and so on.
+Without a config file, kgcache uses its built-in defaults: `127.0.0.1:6379`, 16 databases, and `dump.kgc` in the current directory for snapshots. Command-line overrides apply after the optional file.
+
+Use `--<directive> <value>` to override any supported setting:
+
+```bash
+./zig-out/bin/kgcache path/to/kgcache.conf --port 7000 --databases 4
+./zig-out/bin/kgcache --port 7000 path/to/kgcache.conf --databases 4
+./zig-out/bin/kgcache --port 7000 --databases 4 path/to/kgcache.conf
+./zig-out/bin/kgcache --dir 'data files' --save 60 1 --save 300 10
+./zig-out/bin/kgcache path/to/kgcache.conf --save ''
+./zig-out/bin/kgcache --port 7000 ./-cache.conf
+```
+
+The shell supplies each value as one argument. Single-value directives consume
+one argument, and `--save` consumes two numbers or one empty argument. Required
+values are consumed by position, even when they start with a hyphen. For example,
+`--dir --` supplies the literal directory value `--`, and `--port --appendonly`
+fails port validation. An override requesting more values than remain fails with
+`MissingValue`. `--save 60 cache.conf` fails changes validation because its second
+argument is a required value. Use separate arguments, such as `--port 7000`;
+`--port=7000` is not supported.
+
+The optional config path may appear before, between, or after options. Its position
+does not change the defaults, file, then CLI application order. After a complete
+option, an extra positional token is the path: `--save 60 1 cache.conf` is valid,
+and `--save 60 1 2` treats `2` as a path. A second path is rejected.
+
+At an argument boundary, a bare `--` fails with `UnknownFlag`. For a config
+filename that starts with a hyphen, use a path such as `./-cache.conf`.
+
+The process option `--ready-fd <fd>` requires a decimal descriptor of at least 3
+and at most 2147483647, and may appear only once. The descriptor must be open
+and inherited by the child process. It is separate from config directives.
+
+For single-value settings, the last CLI occurrence wins. Every CLI and file
+occurrence is validated, even if a later value replaces it. The first `--save`
+replaces all file save rules; further CLI rules append in order. `--save ''`
+clears rules collected so far, and later rules can enable automatic saving again.
 
 A config file has one directive per line, in the form `directive value`:
 
@@ -17,35 +54,37 @@ databases 4
 
 Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
 
-Names and `yes`/`no` or enum spellings are case-sensitive. Leading and trailing whitespace is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` requires exactly two values separated by spaces or tabs. Inline comments are not supported; a `#` after a directive is part of its value.
+Names and `yes`/`no` or enum spellings are case-sensitive. Leading and trailing whitespace is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` accepts two values separated by spaces or tabs, or `save ""` to clear prior rules. Inline comments are not supported; a `#` after a directive is part of its value.
 
-For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect all rules in file order.
+For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect rules in file order, with `save ""` clearing earlier rules.
 
 ## Directives
 
-| Directive | Default | Meaning |
-| --- | --- | --- |
-| `bind` | `127.0.0.1` | Address the TCP server binds to |
-| `port` | `6379` | TCP port; `0` asks the OS to select an available port |
-| `reuse-address` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
-| `connection-buffer-size` | `1024` | Per-connection read buffer size, in bytes |
-| `databases` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
-| `dir` | `.` | Shared directory for snapshots and the AOF directory |
-| `dbfilename` | `dump.kgc` | Snapshot filename within `dir`, loaded on startup and written by `SAVE`/`BGSAVE` |
-| `cron-interval-ms` | `100` | How often background work runs, including expiration, AOF flushing, save checks, and child cleanup |
-| `active-expire-budget-ms` | `10` | Time budget per expiration sweep before the worker yields |
-| `active-expire-batch-size` | `20` | Keys sampled per expiration batch, per database |
-| `active-expire-threshold-percent` | `25` | Batch expiry rate that triggers an immediate next batch on the same database |
-| `exclusive-bg-persistence` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
-| `save` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
-| `appendonly` | `no` | Turn the append-only file on (`yes`/`no`) |
-| `appendfsync` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
-| `appenddirname` | `appendonlydir` | Directory name within `dir` that holds AOF data and its manifest |
-| `appendfilename` | `appendonly.aof` | Base name used to build AOF file names |
-| `auto-aof-rewrite-percentage` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
-| `auto-aof-rewrite-min-size` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
-| `aof-load-truncated` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
-| `bgsave-retry-delay-ms` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
+Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config path.
+
+| Directive | CLI example | Default | Meaning |
+| --- | --- | --- | --- |
+| `bind` | `--bind 127.0.0.1` | `127.0.0.1` | IPv4 address the TCP server binds to |
+| `port` | `--port 7000` | `6379` | TCP port; `0` asks the OS to select an available port |
+| `reuse-address` | `--reuse-address yes` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
+| `connection-buffer-size` | `--connection-buffer-size 2048` | `1024` | Per-connection read buffer size, in bytes |
+| `databases` | `--databases 4` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
+| `dir` | `--dir 'data files'` | `.` | Shared directory for snapshots and the AOF directory |
+| `dbfilename` | `--dbfilename state.kgc` | `dump.kgc` | Snapshot filename within `dir`, loaded on startup and written by `SAVE`/`BGSAVE` |
+| `cron-interval-ms` | `--cron-interval-ms 100` | `100` | How often background work runs, including expiration, AOF flushing, save checks, and child cleanup |
+| `active-expire-budget-ms` | `--active-expire-budget-ms 10` | `10` | Time budget per expiration sweep before the worker yields |
+| `active-expire-batch-size` | `--active-expire-batch-size 20` | `20` | Keys sampled per expiration batch, per database |
+| `active-expire-threshold-percent` | `--active-expire-threshold-percent 25` | `25` | Batch expiry rate that triggers an immediate next batch on the same database |
+| `exclusive-bg-persistence` | `--exclusive-bg-persistence yes` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
+| `save` | `--save 60 1` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
+| `appendonly` | `--appendonly yes` | `no` | Turn the append-only file on (`yes`/`no`) |
+| `appendfsync` | `--appendfsync always` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
+| `appenddirname` | `--appenddirname history` | `appendonlydir` | Directory name within `dir` that holds AOF data and its manifest |
+| `appendfilename` | `--appendfilename journal.aof` | `appendonly.aof` | Base name used to build AOF file names |
+| `auto-aof-rewrite-percentage` | `--auto-aof-rewrite-percentage 100` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
+| `auto-aof-rewrite-min-size` | `--auto-aof-rewrite-min-size 67108864` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
+| `aof-load-truncated` | `--aof-load-truncated yes` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
+| `bgsave-retry-delay-ms` | `--bgsave-retry-delay-ms 5000` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
 
 See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every directive documented inline.
 
@@ -78,7 +117,8 @@ appendfilename appendonly.aof
 ```
 
 This config uses `./data/dump.kgc` for snapshots and
-`./data/appendonlydir` for AOF files.
+`./data/appendonlydir` for AOF files. These paths use the final settings after
+CLI overrides are applied.
 
 - A relative `dir` resolves from the process working directory, not the config file's location. The process working directory is not changed.
 - `dir` must already exist. Give the user running kgcache read and write access for persistence operations. kgcache creates the AOF subdirectory when AOF is enabled.
@@ -116,11 +156,11 @@ kgcache supports the directives listed in this page. Redis names are used
 for the supported database and persistence settings. A complete Redis
 config file may contain unsupported directives, which stop startup.
 
-Write values without surrounding quotes. Quote characters are treated as
-part of the value.
+Write file values without surrounding quotes. Quote characters are treated as
+part of the value, except for `save ""`, which clears prior save rules.
 Numeric sizes use decimal bytes, such as `67108864`; size suffixes such as
-`64mb` are not supported. Config directive overrides on the command line
-are not available yet.
+`64mb` are not supported. CLI values may use shell quotes to keep spaces within
+one argument; the shell removes those quotes before kgcache parses the value.
 
 | Setting or format | kgcache | Redis |
 | --- | --- | --- |
@@ -156,9 +196,16 @@ have been reached. A save starts when any rule matches. Both fields must be
 positive: `seconds` is at most 9223372036854775807 and `changes` is at most
 4294967295.
 
-With no `save` line, automatic saving is off. Manual `SAVE` and `BGSAVE`
-still work. `save ""` is not supported yet. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
+With no `save` line, automatic saving is off. `save ""` clears earlier file rules,
+and `--save ''` clears file rules and earlier CLI rules. Manual `SAVE` and `BGSAVE`
+still work. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
 for the write counter and rule checks.
+
+To replace file rules with one CLI rule after a clear:
+
+```bash
+./zig-out/bin/kgcache cache.conf --save '' --save 60 1
+```
 
 ## AOF settings
 
