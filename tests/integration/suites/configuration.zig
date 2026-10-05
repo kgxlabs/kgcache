@@ -8,6 +8,7 @@ const Directory = enum { relative, absolute };
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: config names and persistence paths started", .{});
 
+    try checkListenerOverrides(io, allocator, executable_path, artifact_dir);
     for ([_]Directory{ .relative, .absolute }) |directory| {
         for ([_]Persistence{ .snapshot, .aof }) |persistence| {
             try checkPersistence(io, allocator, executable_path, artifact_dir, directory, persistence);
@@ -16,6 +17,51 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
     try checkCliOverrides(io, allocator, executable_path, artifact_dir);
 
     std.log.info("integration: config names and persistence paths passed", .{});
+}
+
+fn checkListenerOverrides(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
+    const control = try support.ServerProcess.create(io, allocator, executable_path, .{ .artifact_dir = artifact_dir });
+    defer control.destroy();
+    errdefer control.failed = true;
+
+    try expectPing(io, control);
+    const occupied_port = control.address.?.getPort();
+    const extra_config = try std.fmt.allocPrint(allocator, "bind 0.0.0.0\nport {d}\n", .{occupied_port});
+    defer allocator.free(extra_config);
+
+    const overrides = &[_][]const u8{ "--bind", "127.0.0.1", "--port", "0" };
+    const cases = [_]struct { config_subpath: ?[]const u8, config_arg_index: usize }{
+        .{ .config_subpath = "kgcache.conf", .config_arg_index = 0 },
+        .{ .config_subpath = "kgcache.conf", .config_arg_index = 2 },
+        .{ .config_subpath = "kgcache.conf", .config_arg_index = overrides.len },
+        .{ .config_subpath = "./-cache.conf", .config_arg_index = 0 },
+        .{ .config_subpath = null, .config_arg_index = 0 },
+    };
+
+    for (cases) |case| {
+        const target = try support.ServerProcess.create(io, allocator, executable_path, .{
+            .config_subpath = case.config_subpath,
+            .config_arg_index = case.config_arg_index,
+            .extra_config = extra_config,
+            .extra_args = overrides,
+            .artifact_dir = artifact_dir,
+        });
+        defer target.destroy();
+        errdefer target.failed = true;
+
+        if (target.address.?.getPort() == occupied_port) return error.SharedPort;
+
+        try expectPing(io, target);
+        try expectPing(io, control);
+        try target.stop();
+    }
+    try control.stop();
+}
+
+fn expectPing(io: std.Io, server: *support.ServerProcess) !void {
+    const client = try server.address.?.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try resp_client.sendAndExpect(io, server, client.socket.handle, "*1\r\n$4\r\nPING\r\n", "+PONG\r\n");
 }
 
 fn checkCliOverrides(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {

@@ -25,9 +25,19 @@ absolute persistence directories and check the expected files. The config
 file sits in another subdirectory, and the cases require no persistence files
 in the working directory or under the config file's directory.
 
-The invalid config cases require exit status 1 and no READY notification for
-an unknown directive and the removed `num-databases`, `append-dirname`,
-`append-filename`, and `snapshot-path` names.
+Listener precedence cases keep a control server running on an OS-selected
+loopback port and put that occupied port and `bind 0.0.0.0` in the target's
+file. CLI overrides select `127.0.0.1` and port 0. READY must report loopback
+with a different selected port, and both servers must answer PING. These
+cases cover config paths before, between, and after overrides, startup
+without a config file, and `./-cache.conf`.
+
+Startup rejection cases cover unknown and removed file and CLI names,
+invalid overrides, missing values, duplicate paths, invalid readiness
+arguments, and bare `--`. Invalid file values must still fail when the CLI
+supplies valid replacements. Every rejection requires exit status 1, no
+READY notification, one error event carrying the expected source error,
+and a reaped child. A multiline return trace belongs to that single event.
 
 See [Configuration](../../docs/CONFIGURATION.md#redis-config-compatibility)
 for the supported config subset and the `.kgc` and port 0 differences.
