@@ -1,6 +1,7 @@
 const std = @import("std");
 const harness = @import("server_process");
 const ServerProcess = harness.ServerProcess;
+const resp_client = @import("../harness/resp_client.zig");
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, fake_executable_path: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: process harness checks started", .{});
@@ -13,6 +14,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
     defer std.Io.Dir.cwd().deleteTree(io, artifact_root) catch {};
 
     try checkStartupFailures(io, allocator, executable_path, fake_executable_path, artifact_root);
+    try checkStartupArguments(io, allocator, executable_path, artifact_dir);
+    try checkReadinessArguments(io, allocator, executable_path, artifact_dir);
     try checkPortsAndRestarts(io, allocator, executable_path, artifact_dir);
     try checkLogCaptureLimit(io, allocator, fake_executable_path);
     try checkHungProcess(io, allocator, fake_executable_path, artifact_root);
@@ -57,6 +60,78 @@ fn checkStartupFailures(io: std.Io, allocator: std.mem.Allocator, executable_pat
         .report_failures = false,
     }, error.StartupExited);
     if (!try bundleHasText(io, allocator, artifact_root, "fake assertion")) return error.MissingAssertionArtifact;
+}
+
+fn checkStartupArguments(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
+    const overrides = &[_][]const u8{ "--bind", "127.0.0.1", "--port", "0" };
+    const cases = [_]struct { config_subpath: ?[]const u8, config_arg_index: usize }{
+        .{ .config_subpath = "kgcache.conf", .config_arg_index = 0 },
+        .{ .config_subpath = "kgcache.conf", .config_arg_index = 2 },
+        .{ .config_subpath = "kgcache.conf", .config_arg_index = overrides.len },
+        .{ .config_subpath = null, .config_arg_index = 0 },
+    };
+    for (cases) |case| {
+        const server = try ServerProcess.create(io, allocator, executable_path, .{
+            .config_subpath = case.config_subpath,
+            .config_arg_index = case.config_arg_index,
+            .extra_config = "bind 0.0.0.0\n",
+            .extra_args = overrides,
+            .artifact_dir = artifact_dir,
+        });
+        defer server.destroy();
+        errdefer server.failed = true;
+        const selected_port = server.address.?.getPort();
+        try expectPing(io, server);
+        for (0..2) |_| {
+            try server.restart();
+            if (server.address.?.getPort() != selected_port) return error.RestartChangedPort;
+            try expectPing(io, server);
+        }
+        try server.stop();
+        if (case.config_subpath == null) {
+            const working_dir = try std.Io.Dir.cwd().openDir(io, server.data_dir, .{});
+            defer working_dir.close(io);
+            try std.testing.expectError(error.FileNotFound, working_dir.access(io, "kgcache.conf", .{}));
+        }
+    }
+}
+
+fn checkReadinessArguments(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
+    const cases = [_]struct { args: []const []const u8, source: anyerror }{
+        .{ .args = &.{"--ready-fd"}, .source = error.MissingReadyFd },
+        .{ .args = &.{ "--ready-fd", "abc" }, .source = error.InvalidReadyFd },
+        .{ .args = &.{ "--ready-fd", "2" }, .source = error.InvalidReadyFd },
+        .{ .args = &.{ "--ready-fd", "3", "--ready-fd", "4" }, .source = error.DuplicateReadyFd },
+    };
+    for ([_]bool{ true, false }) |with_file| {
+        for (cases) |case| {
+            const server = try ServerProcess.createStopped(io, allocator, executable_path, .{
+                .config_subpath = if (with_file) "kgcache.conf" else null,
+                .extra_args = case.args,
+                .auto_ready_fd = false,
+                .artifact_dir = artifact_dir,
+                .report_failures = false,
+            });
+            defer server.destroy();
+            errdefer server.failed = true;
+            try std.testing.expectError(error.StartupExited, server.start());
+            if (server.ready_bytes_read != 0) return error.UnexpectedReadyOutput;
+            const status = server.last_exit_status orelse return error.MissingExitStatus;
+            if (!std.c.W.IFEXITED(status) or std.c.W.EXITSTATUS(status) != 1) return error.WrongExitStatus;
+            if (server.pid != null) return error.UnreapedChild;
+            const expected = try std.fmt.allocPrint(allocator, "[error] app: invalid command line: {s}\n", .{@errorName(case.source)});
+            defer allocator.free(expected);
+            if (std.mem.indexOf(u8, server.stderr.bytes(), expected) == null) return error.WrongReadinessError;
+            if (std.mem.count(u8, server.stderr.bytes(), "[error] ") != 1) return error.UnexpectedErrorEventCount;
+            server.failed = false;
+        }
+    }
+}
+
+fn expectPing(io: std.Io, server: *ServerProcess) !void {
+    const client = try server.address.?.connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try resp_client.sendAndExpect(io, server, client.socket.handle, "*1\r\n$4\r\nPING\r\n", "+PONG\r\n");
 }
 
 fn checkPortsAndRestarts(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
