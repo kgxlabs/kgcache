@@ -44,11 +44,13 @@ OK
 (integer) 1
 ```
 
-The default build installs the executable at `zig-out/bin/kgcache`. To run
-with a config file:
+The default build installs the executable at `zig-out/bin/kgcache`. Use a
+config file, CLI overrides, or both:
 
 ```bash
 ./zig-out/bin/kgcache path/to/kgcache.conf
+./zig-out/bin/kgcache path/to/kgcache.conf --port 7000
+./zig-out/bin/kgcache --port 7000
 ```
 
 See [Configuration](docs/CONFIGURATION.md) for all settings.

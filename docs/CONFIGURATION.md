@@ -6,7 +6,7 @@ kgcache starts with built-in defaults. To use a config file, pass its path as a 
 ./zig-out/bin/kgcache path/to/kgcache.conf
 ```
 
-Omit the path and it starts from `Config.default()` (`src/config.zig`): `127.0.0.1:6379`, 16 databases, a `dump.kgc` snapshot in the current directory, and so on. Command-line overrides apply after the optional file.
+Without a config file, kgcache uses its built-in defaults: `127.0.0.1:6379`, 16 databases, and `dump.kgc` in the current directory for snapshots. Command-line overrides apply after the optional file.
 
 Use `--<directive> <value>` to override any supported setting:
 
@@ -37,7 +37,8 @@ At an argument boundary, a bare `--` fails with `UnknownFlag`. For a config
 filename that starts with a hyphen, use a path such as `./-cache.conf`.
 
 The process option `--ready-fd <fd>` requires a decimal descriptor of at least 3
-and may appear only once.
+and at most 2147483647, and may appear only once. The descriptor must be open
+and inherited by the child process. It is separate from config directives.
 
 For single-value settings, the last CLI occurrence wins. Every CLI and file
 occurrence is validated, even if a later value replaces it. The first `--save`
@@ -59,29 +60,31 @@ For every directive except `save`, the last occurrence supplies the value. Every
 
 ## Directives
 
-| Directive | Default | Meaning |
-| --- | --- | --- |
-| `bind` | `127.0.0.1` | Address the TCP server binds to |
-| `port` | `6379` | TCP port; `0` asks the OS to select an available port |
-| `reuse-address` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
-| `connection-buffer-size` | `1024` | Per-connection read buffer size, in bytes |
-| `databases` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
-| `dir` | `.` | Shared directory for snapshots and the AOF directory |
-| `dbfilename` | `dump.kgc` | Snapshot filename within `dir`, loaded on startup and written by `SAVE`/`BGSAVE` |
-| `cron-interval-ms` | `100` | How often background work runs, including expiration, AOF flushing, save checks, and child cleanup |
-| `active-expire-budget-ms` | `10` | Time budget per expiration sweep before the worker yields |
-| `active-expire-batch-size` | `20` | Keys sampled per expiration batch, per database |
-| `active-expire-threshold-percent` | `25` | Batch expiry rate that triggers an immediate next batch on the same database |
-| `exclusive-bg-persistence` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
-| `save` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
-| `appendonly` | `no` | Turn the append-only file on (`yes`/`no`) |
-| `appendfsync` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
-| `appenddirname` | `appendonlydir` | Directory name within `dir` that holds AOF data and its manifest |
-| `appendfilename` | `appendonly.aof` | Base name used to build AOF file names |
-| `auto-aof-rewrite-percentage` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
-| `auto-aof-rewrite-min-size` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
-| `aof-load-truncated` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
-| `bgsave-retry-delay-ms` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
+Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config path.
+
+| Directive | CLI example | Default | Meaning |
+| --- | --- | --- | --- |
+| `bind` | `--bind 127.0.0.1` | `127.0.0.1` | IPv4 address the TCP server binds to |
+| `port` | `--port 7000` | `6379` | TCP port; `0` asks the OS to select an available port |
+| `reuse-address` | `--reuse-address yes` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
+| `connection-buffer-size` | `--connection-buffer-size 2048` | `1024` | Per-connection read buffer size, in bytes |
+| `databases` | `--databases 4` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
+| `dir` | `--dir 'data files'` | `.` | Shared directory for snapshots and the AOF directory |
+| `dbfilename` | `--dbfilename state.kgc` | `dump.kgc` | Snapshot filename within `dir`, loaded on startup and written by `SAVE`/`BGSAVE` |
+| `cron-interval-ms` | `--cron-interval-ms 100` | `100` | How often background work runs, including expiration, AOF flushing, save checks, and child cleanup |
+| `active-expire-budget-ms` | `--active-expire-budget-ms 10` | `10` | Time budget per expiration sweep before the worker yields |
+| `active-expire-batch-size` | `--active-expire-batch-size 20` | `20` | Keys sampled per expiration batch, per database |
+| `active-expire-threshold-percent` | `--active-expire-threshold-percent 25` | `25` | Batch expiry rate that triggers an immediate next batch on the same database |
+| `exclusive-bg-persistence` | `--exclusive-bg-persistence yes` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
+| `save` | `--save 60 1` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
+| `appendonly` | `--appendonly yes` | `no` | Turn the append-only file on (`yes`/`no`) |
+| `appendfsync` | `--appendfsync always` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
+| `appenddirname` | `--appenddirname history` | `appendonlydir` | Directory name within `dir` that holds AOF data and its manifest |
+| `appendfilename` | `--appendfilename journal.aof` | `appendonly.aof` | Base name used to build AOF file names |
+| `auto-aof-rewrite-percentage` | `--auto-aof-rewrite-percentage 100` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
+| `auto-aof-rewrite-min-size` | `--auto-aof-rewrite-min-size 67108864` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
+| `aof-load-truncated` | `--aof-load-truncated yes` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
+| `bgsave-retry-delay-ms` | `--bgsave-retry-delay-ms 5000` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
 
 See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every directive documented inline.
 
@@ -114,7 +117,8 @@ appendfilename appendonly.aof
 ```
 
 This config uses `./data/dump.kgc` for snapshots and
-`./data/appendonlydir` for AOF files.
+`./data/appendonlydir` for AOF files. These paths use the final settings after
+CLI overrides are applied.
 
 - A relative `dir` resolves from the process working directory, not the config file's location. The process working directory is not changed.
 - `dir` must already exist. Give the user running kgcache read and write access for persistence operations. kgcache creates the AOF subdirectory when AOF is enabled.
@@ -196,6 +200,12 @@ With no `save` line, automatic saving is off. `save ""` clears earlier file rule
 and `--save ''` clears file rules and earlier CLI rules. Manual `SAVE` and `BGSAVE`
 still work. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
 for the write counter and rule checks.
+
+To replace file rules with one CLI rule after a clear:
+
+```bash
+./zig-out/bin/kgcache cache.conf --save '' --save 60 1
+```
 
 ## AOF settings
 

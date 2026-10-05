@@ -20,7 +20,8 @@
 # not supported. Repeated directives replace their value, except save,
 # which collects rules in file order until save "" clears them.
 # CLI overrides apply after this file: --port 7000 or --save '' to clear rules.
-# See docs/CONFIGURATION.md for the supported Redis config subset.
+# The first CLI save replaces file rules; later CLI saves append or clear.
+# See docs/CONFIGURATION.md for every CLI form and the supported Redis subset.
 
 # Address the TCP server binds to.
 # bind 127.0.0.1
