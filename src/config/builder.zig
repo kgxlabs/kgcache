@@ -267,6 +267,111 @@ test "apply keeps states separate by definition and builder" {
     );
 }
 
+test "CLI resets each append collection once and keeps builders independent" {
+    const Probe = struct {
+        fn stateFrom(context: *directive_definition.ApplyContext) *u16 {
+            return @ptrCast(@alignCast(context.state.?));
+        }
+
+        fn initState(allocator: std.mem.Allocator) directive_definition.ApplyError!*anyopaque {
+            const state = try allocator.create(u16);
+            state.* = 0;
+            return state;
+        }
+
+        fn append(context: *directive_definition.ApplyContext, value: directive_definition.Value) directive_definition.ApplyError!void {
+            stateFrom(context).* += value.u16_value;
+        }
+
+        fn replace(context: *directive_definition.ApplyContext, value: directive_definition.Value) directive_definition.ApplyError!void {
+            stateFrom(context).* = value.u16_value;
+        }
+
+        fn reset(context: *directive_definition.ApplyContext) void {
+            stateFrom(context).* = 0;
+        }
+
+        fn finalizeBuffer(context: *directive_definition.ApplyContext) directive_definition.BuildError!void {
+            context.config.connection_buffer_size = stateFrom(context).*;
+        }
+
+        fn finalizePort(context: *directive_definition.ApplyContext) directive_definition.BuildError!void {
+            context.config.port = stateFrom(context).*;
+        }
+
+        fn deinitState(context: *directive_definition.ApplyContext, _: directive_definition.CleanupMode) void {
+            context.allocator.destroy(stateFrom(context));
+        }
+    };
+    const testing = std.testing;
+    const registry = @import("registry.zig");
+    const save = registry.find("save").?;
+    var buffer = registry.find("port").?.*;
+    buffer.name = "append-buffer";
+    buffer.repeat = .append;
+    buffer.apply = Probe.append;
+    buffer.reset = Probe.reset;
+    buffer.state_lifecycle = .{
+        .init = Probe.initState,
+        .finalize = Probe.finalizeBuffer,
+        .deinit = Probe.deinitState,
+    };
+
+    var port = registry.find("port").?.*;
+    port.name = "stateful-port";
+    port.apply = Probe.replace;
+    port.state_lifecycle = .{
+        .init = Probe.initState,
+        .finalize = Probe.finalizePort,
+        .deinit = Probe.deinitState,
+    };
+    var first = init(testing.allocator);
+    defer first.deinit();
+    var second = init(testing.allocator);
+    defer second.deinit();
+
+    try first.apply(try registry.prepare(save, &.{ "900", "1" }), .file);
+    try first.apply(try registry.prepare(save, &.{ "300", "10" }), .file);
+    try first.apply(try registry.prepare(&buffer, &.{"1024"}), .file);
+    try first.apply(try registry.prepare(&buffer, &.{"2048"}), .file);
+    try first.apply(try registry.prepare(&port, &.{"7000"}), .file);
+    try second.apply(try registry.prepare(save, &.{ "600", "100" }), .file);
+    try second.apply(try registry.prepare(&buffer, &.{"4096"}), .file);
+    try second.apply(try registry.prepare(&port, &.{"8000"}), .file);
+
+    try first.apply(try registry.prepare(save, &.{ "60", "1" }), .cli);
+    try first.apply(try registry.prepare(&buffer, &.{"10"}), .cli);
+    try second.apply(try registry.prepare(&buffer, &.{"100"}), .cli);
+    try first.apply(try registry.prepare(&port, &.{"7001"}), .cli);
+    try first.apply(try registry.prepare(save, &.{ "300", "10" }), .cli);
+    try second.apply(try registry.prepare(save, &.{ "1200", "20" }), .cli);
+    try first.apply(try registry.prepare(&buffer, &.{"20"}), .cli);
+    try second.apply(try registry.prepare(&buffer, &.{"200"}), .cli);
+    try first.apply(try registry.prepare(&port, &.{"7002"}), .cli);
+    try second.apply(try registry.prepare(save, &.{ "1500", "30" }), .cli);
+    try second.apply(try registry.prepare(&port, &.{"8001"}), .cli);
+
+    const first_config = try first.finish();
+    defer testing.allocator.free(first_config.save_rules);
+    const second_config = try second.finish();
+    defer testing.allocator.free(second_config.save_rules);
+    var expected = Config.default();
+    expected.port = 7002;
+    expected.connection_buffer_size = 30;
+    expected.save_rules = &.{
+        .{ .seconds = 60, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+    };
+    try testing.expectEqualDeep(expected, first_config);
+    expected.port = 8001;
+    expected.connection_buffer_size = 300;
+    expected.save_rules = &.{
+        .{ .seconds = 1200, .changes = 20 },
+        .{ .seconds = 1500, .changes = 30 },
+    };
+    try testing.expectEqualDeep(expected, second_config);
+}
+
 test "apply cleans up failed initialization, registration, and first save application" {
     const testing = std.testing;
     const registry = @import("registry.zig");

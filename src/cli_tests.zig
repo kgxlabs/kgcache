@@ -76,6 +76,95 @@ test "CLI leaves a trailing positional token after a complete save option" {
     }
 }
 
+test "CLI save rules replace file rules and apply clears in input order" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "kgcache.conf" });
+    defer testing.allocator.free(path);
+    const path_arg = try testing.allocator.dupeZ(u8, path);
+    defer testing.allocator.free(path_arg);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "port 7000\ndir file data\nappendonly yes\nsave 900 1\nsave 300 10",
+    });
+    const file_rules = &[_]Config.SaveRule{
+        .{ .seconds = 900, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+    };
+    const first_rule = &[_]Config.SaveRule{.{ .seconds = 60, .changes = 1 }};
+    const two_rules = &[_]Config.SaveRule{
+        .{ .seconds = 60, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+    };
+    const cases = [_]struct { args: []const [*:0]const u8, rules: []const Config.SaveRule }{
+        .{ .args = &.{}, .rules = &.{} },
+        .{ .args = &.{ "--save", "60", "1" }, .rules = first_rule },
+        .{ .args = &.{ "--save", "" }, .rules = &.{} },
+        .{ .args = &.{ "--save", "", "--save", "60", "1" }, .rules = first_rule },
+        .{ .args = &.{ "--save", "60", "1", "--save", "" }, .rules = &.{} },
+        .{ .args = &.{ "--save", "60", "1", "--save", "300", "10" }, .rules = two_rules },
+        .{ .args = &.{ "--save", "", "--save", "" }, .rules = &.{} },
+        .{ .args = &.{ "--save", "60", "1", "--save", "", "--save", "" }, .rules = &.{} },
+        .{ .args = &.{ "--save", "", "--save", "60", "1", "--save", "" }, .rules = &.{} },
+        .{ .args = &.{ "--save", "", "--save", "", "--save", "60", "1", "--save", "300", "10" }, .rules = two_rules },
+        .{ .args = &.{ "--save", "900", "100", "--save", "", "--save", "", "--save", "60", "1", "--save", "300", "10" }, .rules = two_rules },
+    };
+    for ([_]bool{ false, true }) |with_file| {
+        for (cases) |case| {
+            var argv: [17][*:0]const u8 = undefined;
+            argv[0] = "kgcache";
+            const start: usize = if (with_file) 2 else 1;
+            if (with_file) argv[1] = path_arg.ptr;
+            @memcpy(argv[start..][0..case.args.len], case.args);
+            var cli = try Cli.parse(testing.allocator, .{ .vector = argv[0 .. start + case.args.len] });
+            defer cli.deinit();
+            var arena = std.heap.ArenaAllocator.init(testing.allocator);
+            defer arena.deinit();
+            const allocator = if (with_file) arena.allocator() else testing.allocator;
+            const config = try ConfigLoader.load(testing.io, allocator, cli.config_path, cli.overrides.items);
+            defer if (!with_file) allocator.free(config.save_rules);
+            var expected = Config.default();
+            if (with_file) {
+                expected.port = 7000;
+                expected.dir = "file data";
+                expected.append_only = true;
+            }
+            expected.save_rules = if (with_file and case.args.len == 0) file_rules else case.rules;
+            try testing.expectEqualDeep(expected, config);
+        }
+    }
+}
+
+test "CLI rejects invalid save rules after valid rules and clears" {
+    const testing = std.testing;
+    const prefixes = [_][]const [*:0]const u8{
+        &.{},
+        &.{ "--save", "60", "1" },
+        &.{ "--save", "" },
+        &.{ "--save", "60", "1", "--save", "" },
+    };
+    const invalid_rules = [_]struct { args: []const [*:0]const u8, err: Cli.Error }{
+        .{ .args = &.{ "--save", "0", "1" }, .err = error.InvalidValue },
+        .{ .args = &.{ "--save", "60", "0" }, .err = error.InvalidValue },
+        .{ .args = &.{ "--save", "invalid", "1" }, .err = error.InvalidValue },
+        .{ .args = &.{ "--save", "60", "invalid" }, .err = error.InvalidValue },
+        .{ .args = &.{ "--save", "\"\"", "1" }, .err = error.InvalidValue },
+        .{ .args = &.{"--save"}, .err = error.MissingValue },
+        .{ .args = &.{ "--save", "60" }, .err = error.MissingValue },
+    };
+    for (prefixes) |prefix| {
+        for (invalid_rules) |case| {
+            var argv: [10][*:0]const u8 = undefined;
+            argv[0] = "kgcache";
+            argv[1] = "scratch-missing-cli-config.conf";
+            @memcpy(argv[2..][0..prefix.len], prefix);
+            @memcpy(argv[2 + prefix.len ..][0..case.args.len], case.args);
+            try testing.expectError(case.err, Cli.parse(testing.allocator, .{ .vector = argv[0 .. 2 + prefix.len + case.args.len] }));
+        }
+    }
+}
+
 test "CLI prepares every directive in argv order beside process arguments" {
     const testing = std.testing;
     var cli = try Cli.parse(testing.allocator, .{ .vector = &.{
