@@ -66,7 +66,7 @@ test "file and CLI numeric settings accept the same boundaries and reject invali
                 try expectEquivalentInput(case.name, text, &.{value}, expected);
             }
         }
-        for ([_][:0]const u8{ "invalid", "1.5", "\"1\"", "1kb", "0x10", "--1" }) |value| {
+        for ([_][:0]const u8{ "invalid", "1.5", "1kb", "0x10", "--1" }) |value| {
             try expectEquivalentInput(case.name, value, &.{value}, error.InvalidValue);
         }
     }
@@ -106,7 +106,7 @@ test "file and CLI boolean and enum settings accept the same choices" {
             @field(expected, case.field) = std.mem.eql(u8, value, "yes");
             try expectEquivalentInput(case.name, value, &.{value}, expected);
         }
-        for ([_][:0]const u8{ "YES", "No", "true", "false", "1", "0", "\"yes\"", "yes no" }) |value| {
+        for ([_][:0]const u8{ "YES", "No", "true", "false", "1", "0", "yes no" }) |value| {
             try expectEquivalentInput(case.name, value, &.{value}, error.InvalidValue);
         }
     }
@@ -116,7 +116,7 @@ test "file and CLI boolean and enum settings accept the same choices" {
         expected.append_fsync = choice;
         try expectEquivalentInput("appendfsync", value, &.{value}, expected);
     }
-    for ([_][:0]const u8{ "Always", "EVERYSEC", "yes", "invalid", "\"no\"", "no always" }) |value| {
+    for ([_][:0]const u8{ "Always", "EVERYSEC", "yes", "invalid", "no always" }) |value| {
         try expectEquivalentInput("appendfsync", value, &.{value}, error.InvalidValue);
     }
 }
@@ -142,12 +142,11 @@ test "file and CLI persistence settings enforce the same path rules" {
     }
 }
 
-test "file quotes remain literal while CLI receives shell grouped values" {
+test "file decodes scalar quotes while CLI preserves semantic argument bytes" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const file_config = try ConfigParser.parse(&arena, "dir \"data files\"");
-    try testing.expectEqualStrings("\"data files\"", file_config.dir);
+    const file_config = try ConfigParser.parse(&arena, "dir \"data files\"\nport \"7000\"\nappendonly \"yes\"\nappendfsync \"always\"");
     var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--dir", "data files", "--port", "7000", "--appendonly", "yes", "--appendfsync", "always" } });
     defer cli.deinit();
     const cli_config = try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);
@@ -156,9 +155,18 @@ test "file quotes remain literal while CLI receives shell grouped values" {
     expected.port = 7000;
     expected.append_only = true;
     expected.append_fsync = .always;
+    try testing.expectEqualDeep(expected, file_config);
     try testing.expectEqualDeep(expected, cli_config);
-    for ([_][]const u8{ "port \"7000\"", "appendonly \"yes\"", "appendfsync \"always\"" }) |contents| {
-        try testing.expectError(error.InvalidValue, ConfigParser.parse(&arena, contents));
+    var literal_cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--dir", "\"data files\"" } });
+    defer literal_cli.deinit();
+    const literal_config = try ConfigLoader.load(testing.io, &arena, null, literal_cli.overrides.items);
+    try testing.expectEqualStrings("\"data files\"", literal_config.dir);
+    for ([_]struct { flag: [*:0]const u8, value: [*:0]const u8 }{
+        .{ .flag = "--port", .value = "\"7000\"" },
+        .{ .flag = "--appendonly", .value = "\"yes\"" },
+        .{ .flag = "--appendfsync", .value = "\"always\"" },
+    }) |case| {
+        try testing.expectError(error.InvalidValue, Cli.parse(&arena, .{ .vector = &.{ "kgcache", case.flag, case.value } }));
     }
     for ([_][*:0]const u8{ "dir", "dbfilename", "appenddirname", "appendfilename" }) |name| {
         const contents = try std.fmt.allocPrint(testing.allocator, "{s} \t\r\n", .{name});

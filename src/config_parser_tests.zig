@@ -609,7 +609,7 @@ test "parse builds all 21 directive fields through the registry" {
     try testing.expectEqualDeep(expected, config);
 }
 
-test "parse preserves file whitespace and literal quotes" {
+test "parse preserves file whitespace and quoted scalar contents" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -618,15 +618,40 @@ test "parse preserves file whitespace and literal quotes" {
         "save\t60\t1\r\nsave  300\t10").*;
     const config = try parse(&arena, &contents);
     try testing.expectEqual(7000, config.port);
-    try testing.expectEqualStrings("\"data\tfiles\"", config.dir);
+    try testing.expectEqualStrings("data\tfiles", config.dir);
     try testing.expectEqualStrings("example host # literal", config.bind_address);
     try testing.expectEqualDeep(&[_]Config.SaveRule{
         .{ .seconds = 60, .changes = 1 },
         .{ .seconds = 300, .changes = 10 },
     }, config.save_rules);
 
-    const quoted_empty = try parse(&arena, "dir \"\"");
-    try testing.expectEqualStrings("\"\"", quoted_empty.dir);
+    try testing.expectError(Error.InvalidValue, parse(&arena, "dir \"\""));
+}
+
+test "parse decodes quoted scalars and preserves scalar syntax errors" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const config = try parse(&arena, "port \"7000\"\nappendonly \"yes\"\nappendfsync \"always\"\ndir \"a\\\"b\\\\c\"");
+    try testing.expectEqual(7000, config.port);
+    try testing.expect(config.append_only);
+    try testing.expectEqual(Config.AppendFsync.always, config.append_fsync);
+    try testing.expectEqualStrings("a\"b\\c", config.dir);
+
+    for ([_][]const u8{
+        "dir \"",
+        "dir \"unterminated",
+        "dir \"data\" extra",
+        "dir \"data\"\"files\"",
+        "dir \"data\\q\"",
+        "dir \"data\nfiles\"",
+        "port \"invalid\" extra",
+    }) |contents| {
+        try testing.expectError(Error.MalformedLine, parse(&arena, contents));
+    }
+    for ([_][]const u8{ "port \"\"", "port \" 7000 \"", "dir \"\"", "port \"invalid\"\nport \"7000\"" }) |contents| {
+        try testing.expectError(Error.InvalidValue, parse(&arena, contents));
+    }
 }
 
 test "parse preserves arity, value, and name errors for every occurrence" {
@@ -640,9 +665,9 @@ test "parse preserves arity, value, and name errors for every occurrence" {
         .{ .contents = "save 60 1 " ++ ("extra " ** 24), .err = Error.MalformedLine },
         .{ .contents = "port 7000 extra", .err = Error.InvalidValue },
         .{ .contents = "port 7000 # inline", .err = Error.InvalidValue },
-        .{ .contents = "port \"7000\"", .err = Error.InvalidValue },
-        .{ .contents = "appendonly \"yes\"", .err = Error.InvalidValue },
-        .{ .contents = "appendfsync \"always\"", .err = Error.InvalidValue },
+        .{ .contents = "port \" 7000 \"", .err = Error.InvalidValue },
+        .{ .contents = "appendonly \"YES\"", .err = Error.InvalidValue },
+        .{ .contents = "appendfsync \"Always\"", .err = Error.InvalidValue },
         .{ .contents = "port invalid\nport 7000", .err = Error.InvalidValue },
         .{ .contents = "appendonly YES\nappendonly yes", .err = Error.InvalidValue },
         .{ .contents = "save 0 1\nsave 60 1", .err = Error.InvalidValue },
@@ -685,6 +710,31 @@ test "file save clearing removes prior rules and preserves later rules" {
     }
 }
 
+test "parse collects mixed quoted save tokens around clears" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const config = try parse(&arena, "dir \"data files\"\nappendonly \"yes\"\nsave \"60\" \"1\"\nsave \"\"\nsave \"300\" 10\nsave 900 \"100\"");
+    try testing.expectEqualStrings("data files", config.dir);
+    try testing.expect(config.append_only);
+    try testing.expectEqualDeep(&[_]Config.SaveRule{
+        .{ .seconds = 300, .changes = 10 },
+        .{ .seconds = 900, .changes = 100 },
+    }, config.save_rules);
+
+    for ([_][]const u8{
+        "save \"60\"1",
+        "save \"60\"\"1\"",
+        "save \"60\\q\" 1",
+        "save \"60 1\"",
+    }) |contents| {
+        try testing.expectError(Error.MalformedLine, parse(&arena, contents));
+    }
+    for ([_][]const u8{ "save \"0\" \"1\"\nsave \"\"", "save \"60\" \"0\"\nsave \"\"", "save \"60\" \"1\"\nsave \"\"\nsave \"300\" invalid" }) |contents| {
+        try testing.expectError(Error.InvalidValue, parse(&arena, contents));
+    }
+}
+
 test "file save rejects missing values and alternatives to exact empty quotes" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -699,15 +749,15 @@ test "file save rejects missing values and alternatives to exact empty quotes" {
         .{ .contents = "save", .err = error.MalformedLine },
         .{ .contents = "save \t\r", .err = error.MalformedLine },
         .{ .contents = "save ''", .err = error.MalformedLine },
-        .{ .contents = "save \" \"", .err = error.InvalidValue },
-        .{ .contents = "save \"\t\"", .err = error.InvalidValue },
+        .{ .contents = "save \" \"", .err = error.MalformedLine },
+        .{ .contents = "save \"\t\"", .err = error.MalformedLine },
         .{ .contents = "save \\\"\\\"", .err = error.MalformedLine },
         .{ .contents = "save \"\"1", .err = error.MalformedLine },
         .{ .contents = "save \"\" 1", .err = error.InvalidValue },
         .{ .contents = "save \"\" \"\"", .err = error.InvalidValue },
         .{ .contents = "save \"\" 60 1", .err = error.MalformedLine },
         .{ .contents = "save \"\" #comment", .err = error.InvalidValue },
-        .{ .contents = "save \"60 1\"", .err = error.InvalidValue },
+        .{ .contents = "save \"60 1\"", .err = error.MalformedLine },
         .{ .contents = "save 0 1", .err = error.InvalidValue },
         .{ .contents = "save 60 0", .err = error.InvalidValue },
         .{ .contents = "save 60 invalid", .err = error.InvalidValue },

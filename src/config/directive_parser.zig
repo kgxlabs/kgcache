@@ -47,16 +47,70 @@ pub fn prepareArgs(
 }
 
 fn decodeUnsplit(arena: *std.heap.ArenaAllocator, text: []const u8) SyntaxError![]const u8 {
-    _ = arena;
-    if (text.len > 0 and text[0] == '"') @panic("quoted file values are not implemented");
+    if (text.len == 0 or text[0] != '"') return text;
 
-    return text;
+    const quoted = try scanQuoted(text);
+    if (std.mem.trim(u8, text[quoted.end..], " \t").len != 0) return error.MalformedLine;
+
+    return decodeQuoted(arena, text, quoted);
+}
+
+const QuotedSpan = struct {
+    end: usize,
+    decoded_len: usize,
+};
+
+fn scanQuoted(text: []const u8) error{MalformedLine}!QuotedSpan {
+    std.debug.assert(text.len > 0 and text[0] == '"');
+
+    var index: usize = 1;
+    var decoded_len: usize = 0;
+    while (index < text.len) : (index += 1) {
+        switch (text[index]) {
+            '"' => return .{ .end = index + 1, .decoded_len = decoded_len },
+            '\\' => {
+                index += 1;
+                if (index == text.len or (text[index] != '"' and text[index] != '\\')) return error.MalformedLine;
+            },
+            '\n', '\r' => return error.MalformedLine,
+            else => {},
+        }
+        decoded_len += 1;
+    }
+    return error.MalformedLine;
+}
+
+fn decodeQuoted(arena: *std.heap.ArenaAllocator, text: []const u8, quoted: QuotedSpan) std.mem.Allocator.Error![]const u8 {
+    const contents = text[1 .. quoted.end - 1];
+    if (contents.len == quoted.decoded_len) return contents;
+
+    const decoded = try arena.allocator().alloc(u8, quoted.decoded_len);
+    var index: usize = 0;
+    for (decoded) |*byte| {
+        if (contents[index] == '\\') index += 1;
+        byte.* = contents[index];
+        index += 1;
+    }
+    return decoded;
 }
 
 fn appendTokens(arena: *std.heap.ArenaAllocator, text: []const u8, values: *std.ArrayList([]const u8)) SyntaxError!void {
-    var tokens = std.mem.tokenizeAny(u8, text, " \t");
-    while (tokens.next()) |token| {
-        if (token[0] == '"') @panic("quoted file values are not implemented");
+    var index: usize = 0;
+    while (index < text.len) {
+        while (index < text.len and (text[index] == ' ' or text[index] == '\t')) : (index += 1) {}
+        if (index == text.len) break;
+
+        const start = index;
+        const token = if (text[start] == '"') blk: {
+            const remaining = text[start..];
+            const quoted = try scanQuoted(remaining);
+            index += quoted.end;
+            if (index < text.len and text[index] != ' ' and text[index] != '\t') return error.MalformedLine;
+            break :blk try decodeQuoted(arena, remaining, quoted);
+        } else blk: {
+            while (index < text.len and text[index] != ' ' and text[index] != '\t') : (index += 1) {}
+            break :blk text[start..index];
+        };
         try values.append(arena.allocator(), token);
     }
 }
@@ -79,6 +133,49 @@ test "decodeUnsplit preserves unquoted bytes" {
     }
 }
 
+test "decodeUnsplit removes boundary quotes and preserves inner bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const cases = [_]struct { text: []const u8, expected: []const u8 }{
+        .{ .text = "\"\"", .expected = "" },
+        .{ .text = "\"data files\"", .expected = "data files" },
+        .{ .text = "\" data\tfiles \" \t", .expected = " data\tfiles " },
+        .{ .text = "\"'single' #literal\"", .expected = "'single' #literal" },
+        .{ .text = "\"a\\\"b\\\\c\"", .expected = "a\"b\\c" },
+        .{ .text = "\"\\\"data files\\\"\"", .expected = "\"data files\"" },
+        .{ .text = "\"\\\\\\\"\"", .expected = "\\\"" },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqualStrings(case.expected, try decodeUnsplit(&arena, case.text));
+    }
+}
+
+test "decodeUnsplit rejects incomplete quotes, invalid escapes, and trailing text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for ([_][]const u8{
+        "\"",
+        "\"unterminated",
+        "\"escaped close\\\"",
+        "\"trailing\\",
+        "\"bad\\q\"",
+        "\"bad\\n\"",
+        "\"bad\\t\"",
+        "\"data\"extra",
+        "\"data\" extra",
+        "\"data\"\"files\"",
+        "\"data\" \t#comment",
+        "\"data\nfiles\"",
+        "\"data\rfiles\"",
+        "\"data\" \n",
+        "\"data\" \r",
+    }) |text| {
+        try std.testing.expectError(error.MalformedLine, decodeUnsplit(&arena, text));
+    }
+}
+
 test "appendTokens produces no values for empty input" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -88,6 +185,54 @@ test "appendTokens produces no values for empty input" {
     for ([_][]const u8{ "", " \t\t " }) |text| {
         try appendTokens(&arena, text, &values);
         try std.testing.expectEqual(0, values.items.len);
+    }
+}
+
+test "appendTokens preserves mixed token bytes and quoted whitespace" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cases = [_]struct { text: []const u8, expected: []const []const u8 }{
+        .{
+            .text = " \t\"alpha beta\"\tplain \" a\tb \" \"\" a\"b c\\d 'single' #literal ",
+            .expected = &.{ "alpha beta", "plain", " a\tb ", "", "a\"b", "c\\d", "'single'", "#literal" },
+        },
+        .{ .text = "\"a\\\"b\\\\c\"", .expected = &.{"a\"b\\c"} },
+        .{ .text = "\"\" \"one two\" \"\"", .expected = &.{ "", "one two", "" } },
+        .{ .text = "'two words'", .expected = &.{ "'two", "words'" } },
+        .{ .text = "last \"final\"", .expected = &.{ "last", "final" } },
+    };
+    for (cases) |case| {
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(arena.allocator());
+        try appendTokens(&arena, case.text, &values);
+        try std.testing.expectEqual(case.expected.len, values.items.len);
+        for (case.expected, values.items) |expected, actual| {
+            try std.testing.expectEqualStrings(expected, actual);
+        }
+    }
+}
+
+test "appendTokens rejects malformed quotes and missing token separators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "\"",
+        "plain \"unterminated",
+        "\"escaped close\\\"",
+        "\"trailing\\",
+        "\"bad\\q\"",
+        "\"bad\\n\"",
+        "\"data\"extra",
+        "\"data\"\"files\"",
+        "\"data\"\\next",
+        "\"data\nfiles\"",
+        "\"data\rfiles\"",
+        "\"data\"\n",
+        "\"data\"\r",
+    }) |text| {
+        var values: std.ArrayList([]const u8) = .empty;
+        defer values.deinit(arena.allocator());
+        try std.testing.expectError(error.MalformedLine, appendTokens(&arena, text, &values));
     }
 }
 
