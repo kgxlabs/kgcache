@@ -1,7 +1,3 @@
-//! Apply file syntax through registry preparation and builder application.
-//! Blank lines and full-line comments are skipped. Quotes and inline # stay literal
-//! except for empty values explicitly normalized by a definition's InputRules.
-
 const std = @import("std");
 const Config = @import("config.zig");
 const ConfigBuilder = @import("config/builder.zig");
@@ -9,20 +5,12 @@ const registry = @import("config/registry.zig");
 const directive_definition = @import("config/definition.zig");
 
 pub const Error = error{
-    /// A line is missing a directive or value, or has an invalid value count.
     MalformedLine,
-    /// The first token on a line isn't a supported directive name.
     UnknownDirective,
-    /// The value couldn't be parsed or is outside the directive's valid range.
     InvalidValue,
-    /// Allocating parsing or builder storage failed.
     OutOfMemory,
 };
 
-/// Start a builder, apply this file, finish once, and always clean up temporary state.
-/// Returned strings borrow contents, which must remain alive while Config is used.
-/// The caller owns allocated save_rules: free with allocator or release its arena.
-/// On failure, builder-owned output and temporary token storage are freed.
 pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
     var builder = ConfigBuilder.init(allocator);
     defer builder.deinit();
@@ -31,15 +19,10 @@ pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
     return builder.finish();
 }
 
-/// Apply to an existing builder; the caller finishes once and always calls deinit.
-/// Keep contents alive for borrowed Config strings; temporary tokens are freed on exit.
-/// Invalid arity maps to MalformedLine. Any file error ends the build.
 pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
     std.debug.assert(builder.status == .building);
     errdefer builder.status = .failed;
 
-    // Reuse the slice array across token-based lines. Values borrow contents,
-    // not this array; preparation copies save numbers before the array is cleared.
     var token_values: std.ArrayList([]const u8) = .empty;
     defer token_values.deinit(builder.allocator);
 
@@ -54,7 +37,6 @@ pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
         if (value.len == 0) return Error.MalformedLine;
 
         const definition = registry.find(directive_name) orelse return Error.UnknownDirective;
-        // accept "" as empty value
         const normalize_empty = definition.input.normalize_empty_file_value and std.mem.eql(u8, value, "\"\"");
         var normalized_value = value;
         if (normalize_empty) {
@@ -86,4 +68,8 @@ fn mapParseError(err: directive_definition.ParseError) Error {
         error.InvalidArity => Error.MalformedLine,
         error.InvalidValue => Error.InvalidValue,
     };
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

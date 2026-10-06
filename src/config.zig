@@ -1,22 +1,14 @@
-//! Parsed strings borrow input bytes; callers own allocated save_rules.
+//! Callers keep string and save-rule storage alive until the final Config user.
 
 const std = @import("std");
 
 const Config = @This();
 
-/// One `save <seconds> <changes>` rule. The directive may repeat; ANY rule
-/// whose condition is met (>= `changes` writes in the last `seconds`
-/// seconds since the last save) triggers an automatic BGSAVE -- rules are
-/// OR'd together, same as Redis.
 pub const SaveRule = struct {
     seconds: i64,
     changes: u32,
 };
 
-/// How often the AOF is fsync'd to disk.
-/// `always`: before every +OK, safest  and slowest.
-/// `everysec`: (default): fsync at most once a second.
-/// `no`: never fsync explicitly, let the OS decide -- fastest, weakest.
 pub const AppendFsync = enum { always, everysec, no };
 
 bind_address: []const u8 = "127.0.0.1",
@@ -26,29 +18,21 @@ connection_buffer_size: usize = 1024,
 num_databases: usize = 16,
 /// Shared persistence directory, resolved from the process working directory.
 dir: []const u8 = ".",
-/// Snapshot filename within `dir`. Must end in `.kgc`.
 dbfilename: []const u8 = "dump.kgc",
 cron_interval_ms: i64 = 100,
 active_expire_budget_ms: i8 = 10,
 active_expire_batch_size: i8 = 20,
 active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
-/// Empty rules disable automatic saving. File rules are collected in order;
-/// CLI save rules replace that collection. A clear operation removes prior rules.
-/// The caller owns the allocated slice after successful construction.
+/// Empty rules disable automatic saving; CLI rules replace file rules.
 save_rules: []const SaveRule = &.{},
 append_only: bool = false,
-/// A *base* name, not a real file: the files on disk derive from it
-/// (e.g. `appendonly.aof.1.base`, `appendonly.aof.2.incr`,
-/// `appendonly.aof.manifest`).
+/// Base name for AOF parts and their manifest.
 append_filename: []const u8 = "appendonly.aof",
-/// Name of the directory holding all AOF files within `dir`.
-/// kgcache owns this directory entirely: an interrupted rewrite can leave
-/// orphan files behind, and cleaning those up is only safe if nothing else
-/// shares the directory.
+/// kgcache owns and cleans this directory within dir.
 append_dirname: []const u8 = "appendonlydir",
 append_fsync: AppendFsync = .everysec,
-/// `auto-aof-rewrite-percentage 0` means never rewrite automatically; but BGREWRITEAOF by hand still works.
+/// Zero disables automatic rewrites; BGREWRITEAOF still works.
 auto_aof_rewrite_percentage: u32 = 100,
 auto_aof_rewrite_min_size: usize = 67108864,
 aof_load_truncated: bool = true,
@@ -83,14 +67,13 @@ fn validatePersistence(self: Config) error{InvalidValue}!void {
     try validateAppendDirname(self.append_dirname);
 }
 
-/// Resolve the effective settings without changing them or the working directory.
-/// The caller owns the returned path and must keep it alive while in use.
+/// Caller owns the returned path.
 pub fn resolveSnapshotPath(self: Config, allocator: std.mem.Allocator) ![]u8 {
     try self.validatePersistence();
     return std.fs.path.join(allocator, &.{ self.dir, self.dbfilename });
 }
 
-/// The caller owns the returned path. Reuse it for the AOF backend lifetime.
+/// Caller owns the returned path.
 pub fn resolveAofDirectory(self: Config, allocator: std.mem.Allocator) ![]u8 {
     try self.validatePersistence();
     return std.fs.path.join(allocator, &.{ self.dir, self.append_dirname });

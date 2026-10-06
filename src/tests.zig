@@ -22,6 +22,7 @@ test {
     _ = @import("config.zig");
     _ = @import("config/definition.zig");
     _ = @import("config/registry.zig");
+    _ = @import("config/directive_parser.zig");
     _ = @import("config/builder.zig");
     _ = @import("config/loader.zig");
     _ = @import("config/loader_tests.zig");
