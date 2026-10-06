@@ -16,8 +16,6 @@ pub const InputRules = struct {
     file_values: FileValues = .unsplit_value,
     /// Null consumes the minimum arity; variable counts supply a callback.
     cli_value_count: ?CliValueCountFn = null,
-    /// Normalize an entire file value of `""` to one empty value before splitting.
-    normalize_empty_file_value: bool = false,
 };
 
 pub const RepeatPolicy = enum {

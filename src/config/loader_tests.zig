@@ -66,6 +66,58 @@ test "load keeps untouched file values and replaces save rules on the first CLI 
     try testing.expectError(error.FileNotFound, ConfigLoader.load(testing.io, &arena, "scratch-missing-cli-config.conf", &clear));
 }
 
+test "load retains file and CLI values after cleanup and later loads" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "kgcache.conf" });
+    defer testing.allocator.free(path);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "port 7000\ndir file data\ndbfilename file.kgc\nsave 60 1\nsave 300 10",
+    });
+
+    const config = blk: {
+        const path_arg = try testing.allocator.dupeZ(u8, path);
+        defer testing.allocator.free(path_arg);
+        const directory = try testing.allocator.dupeZ(u8, "cli data");
+        defer testing.allocator.free(directory);
+        var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", path_arg.ptr, "--dir", directory.ptr, "--port", "8000" } });
+        defer cli.deinit();
+        @memset(path_arg, 'x');
+        @memset(directory, 'y');
+        break :blk try ConfigLoader.load(testing.io, &arena, cli.config_path, cli.overrides.items);
+    };
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "port 9000\ndir later data\ndbfilename later.kgc\nsave 900 100",
+    });
+    const later = try ConfigLoader.loadFromPath(testing.io, &arena, path);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "save 600 20\nport invalid",
+    });
+    try testing.expectError(error.InvalidValue, ConfigLoader.loadFromPath(testing.io, &arena, path));
+
+    var expected = Config.default();
+    expected.port = 8000;
+    expected.dir = "cli data";
+    expected.dbfilename = "file.kgc";
+    expected.save_rules = &.{
+        .{ .seconds = 60, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+    };
+    try testing.expectEqualDeep(expected, config);
+    expected.port = 9000;
+    expected.dir = "later data";
+    expected.dbfilename = "later.kgc";
+    expected.save_rules = &.{.{ .seconds = 900, .changes = 100 }};
+    try testing.expectEqualDeep(expected, later);
+}
+
 test "persistence paths use the final file and CLI configuration" {
     const testing = std.testing;
     var tmp = testing.tmpDir(.{});

@@ -74,7 +74,7 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
     defer ready_pipe.close();
 
-    // Config strings borrow argv or the file buffer kept in the application arena.
+    // Zig releases init.arena after main returns so we dont have to do it manually
     const config = ConfigLoader.load(
         init.io,
         init.arena,

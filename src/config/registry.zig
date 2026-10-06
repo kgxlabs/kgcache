@@ -356,7 +356,6 @@ fn saveDirective() DirectiveDefinition {
         .input = .{
             .file_values = .tokens,
             .cli_value_count = Callbacks.cliValueCount,
-            .normalize_empty_file_value = true,
         },
         .repeat = .append,
         .parse = Callbacks.parse,
@@ -724,7 +723,6 @@ test "save parser accepts two positive numbers or one empty value for clearing" 
     try testing.expectEqual(.tokens, definition.input.file_values);
     try testing.expectEqual(.append, definition.repeat);
     try testing.expect(definition.choices == null);
-    try testing.expect(definition.input.normalize_empty_file_value);
     const value_count = definition.input.cli_value_count.?;
     try testing.expectEqual(1, value_count(&.{ "", "--port", "7000" }));
     try testing.expectEqual(2, value_count(&.{ "60", "1", "--port", "7000" }));
