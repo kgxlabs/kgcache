@@ -60,9 +60,19 @@ test "load keeps untouched file values and replaces save rules on the first CLI 
     const cleared = try ConfigLoader.load(testing.io, &arena, path, &clear);
     try testing.expectEqual(0, cleared.save_rules.len);
 
-    // Even overridden file values must pass validation.
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = "save 60 1\nport invalid" });
-    try testing.expectError(error.InvalidValue, ConfigLoader.load(testing.io, &arena, path, &overrides));
+    for ([_]struct { contents: []const u8, err: anyerror }{
+        .{ .contents = "save 60 1\nport invalid", .err = error.InvalidValue },
+        .{ .contents = "port \"invalid\"\nport \"7000\"", .err = error.InvalidValue },
+        .{ .contents = "port \"65536\"\nport \"7000\"", .err = error.InvalidValue },
+        .{ .contents = "appendonly \"YES\"\nappendonly \"yes\"", .err = error.InvalidValue },
+        .{ .contents = "appendfsync \"Always\"\nappendfsync \"always\"", .err = error.InvalidValue },
+        .{ .contents = "dbfilename \"data/state.kgc\"\ndbfilename \"state.kgc\"", .err = error.InvalidValue },
+        .{ .contents = "save \"0\" \"1\"\nsave \"\"", .err = error.InvalidValue },
+        .{ .contents = "port \"7000\" extra\nport \"7000\"", .err = error.MalformedLine },
+    }) |case| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = case.contents });
+        try testing.expectError(case.err, ConfigLoader.load(testing.io, &arena, path, &overrides));
+    }
     try testing.expectError(error.FileNotFound, ConfigLoader.load(testing.io, &arena, "scratch-missing-cli-config.conf", &clear));
 }
 

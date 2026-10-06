@@ -7,6 +7,7 @@ pub const FileError = PrepareError || error{MalformedLine};
 
 const SyntaxError = std.mem.Allocator.Error || error{MalformedLine};
 
+// Returned strings may borrow text. Keep text and the caller's arena alive through their last use.
 pub fn prepareFile(
     arena: *std.heap.ArenaAllocator,
     directive: *const definition.Definition,
@@ -30,6 +31,7 @@ pub fn prepareFile(
     return registry.prepare(directive, values);
 }
 
+// Retains validated string bytes unchanged in the caller's arena.
 pub fn prepareArgs(
     arena: *std.heap.ArenaAllocator,
     directive: *const definition.Definition,

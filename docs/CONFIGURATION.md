@@ -54,7 +54,7 @@ databases 4
 
 Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
 
-Names and `yes`/`no` or enum spellings are case-sensitive. Leading and trailing whitespace is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` accepts two values separated by spaces or tabs, or `save ""` to clear prior rules. Inline comments are not supported; a `#` after a directive is part of its value.
+Names and `yes`/`no` or enum spellings are case-sensitive. Whitespace outside double quotes is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` accepts two values separated by spaces or tabs outside quotes, or `save ""` to clear prior rules. Inline comments are not supported; a `#` after a directive is part of its value.
 
 For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect rules in file order, with `save ""` clearing earlier rules.
 
@@ -156,8 +156,9 @@ kgcache supports the directives listed in this page. Redis names are used
 for the supported database and persistence settings. A complete Redis
 config file may contain unsupported directives, which stop startup.
 
-Write file values without surrounding quotes. Quote characters are treated as
-part of the value, except for `save ""`, which clears prior save rules.
+Double quotes group file values and preserve inner whitespace. Inside quotes,
+only `\"` and `\\` are decoded. Unquoted embedded quotes and backslashes stay
+literal. `save ""` clears prior save rules.
 Numeric sizes use decimal bytes, such as `67108864`; size suffixes such as
 `64mb` are not supported. CLI values may use shell quotes to keep spaces within
 one argument; the shell removes those quotes before kgcache parses the value.

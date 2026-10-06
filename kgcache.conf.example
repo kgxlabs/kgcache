@@ -14,9 +14,9 @@
 # Run with: ./zig-out/bin/kgcache path/to/kgcache.conf
 # Use the supported directive names shown here. Old names such as
 # num-databases, append-dirname, append-filename, and snapshot-path are
-# rejected. File values use no surrounding quotes, except save "" to clear rules.
-# Names and yes/no or enum values are case-sensitive. Whitespace at the
-# ends is trimmed; string values can contain spaces. Inline comments are
+# rejected. Double quotes group file values; save "" clears rules.
+# Names and yes/no or enum values are case-sensitive. Whitespace outside
+# quotes is trimmed; string values can contain spaces. Inline comments are
 # not supported. Repeated directives replace their value, except save,
 # which collects rules in file order until save "" clears them.
 # CLI overrides apply after this file: --port 7000 or --save '' to clear rules.

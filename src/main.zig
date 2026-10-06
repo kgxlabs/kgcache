@@ -168,6 +168,11 @@ test "application reports loader failures once with the source error" {
         .{ .contents = null, .err = error.FileNotFound },
         .{ .contents = "port invalid", .err = error.InvalidValue },
         .{ .contents = "save 60 1\nsave 300 invalid", .err = error.InvalidValue },
+        .{ .contents = "port \"invalid\"\nport \"7000\"", .err = error.InvalidValue },
+        .{ .contents = "port \"7000\" trailing", .err = error.MalformedLine },
+        .{ .contents = "dir \"bad\\q\"", .err = error.MalformedLine },
+        .{ .contents = "dir \"\"", .err = error.InvalidValue },
+        .{ .contents = "save \"60\" \"1\"\nsave \"0\" \"1\"\nsave \"\"", .err = error.InvalidValue },
         .{ .contents = "unknown value", .err = error.UnknownDirective },
         .{ .contents = "port", .err = error.MalformedLine },
     };
