@@ -1,9 +1,7 @@
 # kgcache.conf.example
 #
-# Every directive below is commented out and set to its built-in default
-# (see Config.default() in src/config.zig). Uncomment a line and change its
-# value to override that default; anything left commented out (or left out
-# of your own config file entirely) keeps the default.
+# Settings below show built-in defaults. Uncomment a setting to change it.
+# Omitted settings keep their defaults. Extra examples are marked separately.
 #
 # Format: one directive per line, `directive value`. Blank lines and lines
 # starting with `#` are ignored. Anything else must be a recognized
@@ -128,3 +126,15 @@
 # Delay, in milliseconds, before retrying a failed automatic BGSAVE.
 # Set 0 for no retry delay. Range: 0 to 9223372036854775807.
 # bgsave-retry-delay-ms 5000
+
+# Quoted alternatives (uncomment only the lines you need).
+# The selected directory must already exist.
+# port "7000"
+# dir "data files"
+# dbfilename "state file.kgc"
+# dir "a\"b\\c"
+# dir "\"data files\""
+# save "60" "1"
+# save ""
+# Inside quotes, only \" and \\ are decoded. Inner spaces/tabs are kept.
+# File single quotes are literal; shell quotes around CLI values are removed by the shell.

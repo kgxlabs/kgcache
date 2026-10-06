@@ -74,7 +74,8 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
     defer ready_pipe.close();
 
-    // Zig releases init.arena after main returns so we dont have to do it manually
+    // CLI and file loading share this borrowed arena.
+    // Zig releases it after the application returns.
     const config = ConfigLoader.load(
         init.io,
         init.arena,

@@ -73,6 +73,30 @@ not produce an error event. The child wait has no deadline; see
 [Snapshots](SNAPSHOTS.md#reaping-why-it-cant-happen-inside-bgsave) and
 [AOF](AOF.md#shutdown).
 
+### Startup configuration
+
+Every supplied value is validated, including values replaced later. CLI values
+are prepared before the optional file is read; they are applied after the file.
+
+```mermaid
+flowchart LR
+    A[Prepare CLI values] --> B[Defaults, file, then CLI]
+    B --> C[Final settings]
+    C --> D[Server use and teardown]
+    D --> E[Zig releases startup arena]
+```
+
+CLI and file loading share one arena supplied by Zig. It holds the file
+buffer, decoded strings, copied CLI strings, and save rules. Temporary parsing
+and builder cleanup keep those retained bytes alive. Server teardown does not
+release the arena; Zig releases it after the application returns. A caller that
+creates its own arena releases it after the last settings user.
+
+Startup storage stops growing once construction ends. Planned
+[live CONFIG updates (#171)](https://github.com/kgxlabs/kgcache/issues/171)
+will use temporary request storage and separate, reclaimable runtime copies.
+An arena controls lifetime, not memory limits.
+
 ## Storage and concurrency trade-offs
 
 The default backend is intentionally straightforward today: a `StringHashMap` stores values, an `ArrayList` holds TTL bookkeeping, and each expiring entry keeps an index into that list for O(1) updates. Full layout, memory cost, and the planned redesign toward larger keyspaces are in [Expiration bookkeeping](EXPIRATION.md).
@@ -105,7 +129,7 @@ and trace availability.
 ```text
 .
 ├── build.zig
-├── kgcache.conf.example         # Every config directive, documented, at its default
+├── kgcache.conf.example         # Config defaults and optional examples
 ├── src/
 │   ├── main.zig                 # Entry point: load config, create/destroy Server
 │   ├── server.zig               # Owns the object graph; create/destroy/run
@@ -116,7 +140,7 @@ and trace availability.
 │   ├── cli.zig                  # Process options and owned prepared config overrides
 │   ├── config.zig               # Config struct, defaults, and path helpers
 │   ├── config_parser.zig        # kgcache.conf parser
-│   ├── config/                  # Definitions, registry, builder, and layered loader
+│   ├── config/                  # Definitions, preparation, registry, builder, loader
 │   ├── resp.zig                 # RESP2 parser and serializer
 │   ├── commander.zig            # Command parsing and dispatch
 │   ├── commander/               # Individual commands, schemas, requests

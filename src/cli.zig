@@ -77,7 +77,7 @@ pub fn parse(arena: *std.heap.ArenaAllocator, process_args: std.process.Args) Er
     return cli;
 }
 
-/// Retained values and config path stay in the caller's arena.
+// Frees the override list; retained bytes stay in the caller's arena.
 pub fn deinit(self: *Cli) void {
     self.overrides.deinit(self.allocator);
     self.* = undefined;

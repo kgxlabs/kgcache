@@ -4,7 +4,7 @@ const ConfigBuilder = @import("builder.zig");
 const ConfigParser = @import("../config_parser.zig");
 const PreparedDirective = @import("definition.zig").PreparedDirective;
 
-/// Caller keeps the arena and borrowed override bytes alive through Config use.
+// File bytes stay in the caller's arena. Retain it and override bytes through Config use.
 pub fn load(
     io: std.Io,
     arena: *std.heap.ArenaAllocator,

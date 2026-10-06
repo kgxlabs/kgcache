@@ -5,7 +5,7 @@ const DirectiveDefinition = directive_definition.Definition;
 
 const ConfigBuilder = @This();
 
-/// Apply file directives first, then CLI overrides, before finishing the build.
+// Apply file directives first, then CLI overrides, before finishing the build.
 pub const Layer = enum {
     file,
     cli,
@@ -28,6 +28,7 @@ config: Config,
 states: std.ArrayList(StateEntry) = .empty,
 status: Status = .building,
 
+// Borrows the construction allocator; the caller owns its lifetime.
 pub fn init(allocator: std.mem.Allocator) ConfigBuilder {
     return .{
         .allocator = allocator,
@@ -35,7 +36,7 @@ pub fn init(allocator: std.mem.Allocator) ConfigBuilder {
     };
 }
 
-/// Failure ends the build; call deinit to discard unfinished output.
+// Failure ends construction; cleanup discards unfinished output.
 pub fn apply(
     self: *ConfigBuilder,
     directive: directive_definition.PreparedDirective,
@@ -82,8 +83,8 @@ pub fn apply(
     try definition.apply(&context, directive.value);
 }
 
-/// State owns output until all finalizers succeed; the caller owns it afterward.
-/// Strings stay borrowed. Call deinit after either result.
+// State owns output until all finalizers succeed; the caller owns it afterward.
+// Strings stay borrowed. Clean up the builder after either result.
 pub fn finish(self: *ConfigBuilder) directive_definition.BuildError!Config {
     std.debug.assert(self.status == .building);
     errdefer self.status = .failed;
