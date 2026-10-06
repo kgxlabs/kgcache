@@ -12,10 +12,22 @@ pub fn prepareFile(
     directive: *const definition.Definition,
     text: []const u8,
 ) FileError!definition.PreparedDirective {
-    _ = arena;
-    _ = directive;
-    _ = text;
-    @panic("prepareFile is not implemented");
+    var unsplit_value: [1][]const u8 = undefined;
+    var token_values: std.ArrayList([]const u8) = .empty;
+    defer token_values.deinit(arena.allocator());
+
+    const values: []const []const u8 = switch (directive.input.file_values) {
+        .unsplit_value => blk: {
+            unsplit_value[0] = try decodeUnsplit(arena, text);
+            break :blk &unsplit_value;
+        },
+        .tokens => blk: {
+            try appendTokens(arena, text, &token_values);
+            break :blk token_values.items;
+        },
+    };
+
+    return registry.prepare(directive, values);
 }
 
 pub fn prepareArgs(
@@ -36,15 +48,17 @@ pub fn prepareArgs(
 
 fn decodeUnsplit(arena: *std.heap.ArenaAllocator, text: []const u8) SyntaxError![]const u8 {
     _ = arena;
-    _ = text;
-    @panic("decodeUnsplit is not implemented");
+    if (text.len > 0 and text[0] == '"') @panic("quoted file values are not implemented");
+
+    return text;
 }
 
 fn appendTokens(arena: *std.heap.ArenaAllocator, text: []const u8, values: *std.ArrayList([]const u8)) SyntaxError!void {
-    _ = arena;
-    _ = text;
-    _ = values;
-    @panic("appendTokens is not implemented");
+    var tokens = std.mem.tokenizeAny(u8, text, " \t");
+    while (tokens.next()) |token| {
+        if (token[0] == '"') @panic("quoted file values are not implemented");
+        try values.append(arena.allocator(), token);
+    }
 }
 
 test {
@@ -57,4 +71,32 @@ test {
     _ = args;
     _ = decode;
     _ = append;
+}
+
+test "appendTokens preserves unquoted bytes and releases storage on allocation failures" {
+    const Run = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var failing_resize = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+            var arena = std.heap.ArenaAllocator.init(failing_resize.allocator());
+            defer arena.deinit();
+            var values: std.ArrayList([]const u8) = .empty;
+            defer values.deinit(arena.allocator());
+
+            const expected = [_][]const u8{
+                "alpha", "beta\"gamma", "path\\name", "'single'", "#literal",
+                "one",   "two",         "three",      "four",     "five",
+                "six",   "seven",       "eight",      "nine",     "ten",
+                "last",
+            };
+            try appendTokens(
+                &arena,
+                "alpha \t beta\"gamma path\\name 'single' #literal one two three four five six seven eight nine ten last",
+                &values,
+            );
+            try std.testing.expectEqual(expected.len, values.items.len);
+
+            for (expected, values.items) |wanted, actual| try std.testing.expectEqualStrings(wanted, actual);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Run.run, .{});
 }

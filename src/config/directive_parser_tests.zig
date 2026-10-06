@@ -4,6 +4,59 @@ const parser = @import("directive_parser.zig");
 const registry = @import("registry.zig");
 const definition = @import("definition.zig");
 
+test "prepareFile borrows the unquoted remainder without allocation" {
+    var arena = std.heap.ArenaAllocator.init(testing.failing_allocator);
+    defer arena.deinit();
+    var source = "data \tfiles a\"b\\c '#literal'".*;
+    const prepared = try parser.prepareFile(&arena, registry.find("dir").?, &source);
+
+    try testing.expectEqualStrings(&source, prepared.value.string);
+    try testing.expect(prepared.value.string.ptr == source[0..].ptr);
+    source[0] = 'D';
+    try testing.expectEqualStrings("Data \tfiles a\"b\\c '#literal'", prepared.value.string);
+}
+
+test "prepareFile validates unquoted scalar values through the registry" {
+    var arena = std.heap.ArenaAllocator.init(testing.failing_allocator);
+    defer arena.deinit();
+
+    try testing.expectEqualDeep(definition.Value{ .u16_value = 7000 }, (try parser.prepareFile(&arena, registry.find("port").?, "7000")).value);
+    try testing.expectEqualDeep(definition.Value{ .boolean = true }, (try parser.prepareFile(&arena, registry.find("appendonly").?, "yes")).value);
+    try testing.expectEqualDeep(definition.Value{ .append_fsync = .everysec }, (try parser.prepareFile(&arena, registry.find("appendfsync").?, "everysec")).value);
+    try testing.expectError(error.InvalidValue, parser.prepareFile(&arena, registry.find("port").?, "invalid"));
+    try testing.expectError(error.InvalidValue, parser.prepareFile(&arena, registry.find("dir").?, ""));
+}
+
+test "prepareFile splits unquoted save values on spaces and tabs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const directive = registry.find("save").?;
+
+    for ([_][]const u8{ "60 1", "60 \t\t 1", " \t60\t1\t " }) |text| {
+        const prepared = try parser.prepareFile(&arena, directive, text);
+        try testing.expect(prepared.definition == directive);
+        try testing.expectEqualDeep(definition.Value{ .save = .{ .rule = .{ .seconds = 60, .changes = 1 } } }, prepared.value);
+    }
+    for ([_][]const u8{ "", "60", "60 1 2" }) |text| {
+        try testing.expectError(error.InvalidArity, parser.prepareFile(&arena, directive, text));
+    }
+    for ([_][]const u8{ "invalid 1", "60 0", "'60' 1" }) |text| {
+        try testing.expectError(error.InvalidValue, parser.prepareFile(&arena, directive, text));
+    }
+}
+
+test "prepareFile token allocation failures clean up through the caller arena" {
+    const Run = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const prepared = try parser.prepareFile(&arena, registry.find("save").?, "60\t1");
+            try testing.expectEqualDeep(definition.Value{ .save = .{ .rule = .{ .seconds = 60, .changes = 1 } } }, prepared.value);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Run.run, .{});
+}
+
 test "prepareArgs retains literal string bytes after input changes" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
