@@ -1,5 +1,6 @@
 const std = @import("std");
 const definition = @import("definition.zig");
+const registry = @import("registry.zig");
 
 pub const PrepareError = definition.ParseError || std.mem.Allocator.Error;
 pub const FileError = PrepareError || error{MalformedLine};
@@ -22,10 +23,15 @@ pub fn prepareArgs(
     directive: *const definition.Definition,
     args: []const []const u8,
 ) PrepareError!definition.PreparedDirective {
-    _ = arena;
-    _ = directive;
-    _ = args;
-    @panic("prepareArgs is not implemented");
+    var prepared = try registry.prepare(directive, args);
+
+    // only string needs copy since it's size is variable. every thing else has fixed size
+    switch (prepared.value) {
+        .string => |bytes| prepared.value.string = try arena.allocator().dupe(u8, bytes),
+        else => {},
+    }
+
+    return prepared;
 }
 
 fn decodeUnsplit(arena: *std.heap.ArenaAllocator, text: []const u8) SyntaxError![]const u8 {
