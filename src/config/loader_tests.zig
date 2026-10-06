@@ -86,7 +86,7 @@ test "load retains file and CLI values after cleanup and later loads" {
     defer testing.allocator.free(path);
     try tmp.dir.writeFile(testing.io, .{
         .sub_path = "kgcache.conf",
-        .data = "port 7000\ndir file data\ndbfilename file.kgc\nsave 60 1\nsave 300 10",
+        .data = "port \"7000\"\ndir \"file data\"\ndbfilename \"file.kgc\"\nsave \"60\" \"1\"\nsave \"300\" \"10\"",
     });
 
     const config = blk: {
@@ -103,7 +103,7 @@ test "load retains file and CLI values after cleanup and later loads" {
 
     try tmp.dir.writeFile(testing.io, .{
         .sub_path = "kgcache.conf",
-        .data = "port 9000\ndir later data\ndbfilename later.kgc\nsave 900 100",
+        .data = "port \"9000\"\ndir \"later\\\"data\\\\files\"\ndbfilename \"later.kgc\"\nsave \"900\" \"100\"",
     });
     const later = try ConfigLoader.loadFromPath(testing.io, &arena, path);
     try tmp.dir.writeFile(testing.io, .{
@@ -122,7 +122,7 @@ test "load retains file and CLI values after cleanup and later loads" {
     };
     try testing.expectEqualDeep(expected, config);
     expected.port = 9000;
-    expected.dir = "later data";
+    expected.dir = "later\"data\\files";
     expected.dbfilename = "later.kgc";
     expected.save_rules = &.{.{ .seconds = 900, .changes = 100 }};
     try testing.expectEqualDeep(expected, later);
@@ -281,4 +281,39 @@ test "load cleans up every allocation failure in CLI application and finalizatio
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Run.run, .{});
+}
+
+test "CLI and file construction clean up every allocation failure" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = ("save \"60\" \"1\"\n" ** 64) ++ "dir \"file data\"\ndbfilename \"state\\\" file.kgc\"",
+    });
+    const path = try std.fmt.allocPrintSentinel(testing.allocator, ".zig-cache/tmp/{s}/kgcache.conf", .{tmp.sub_path}, 0);
+    defer testing.allocator.free(path);
+
+    const Run = struct {
+        fn run(allocator: std.mem.Allocator, config_path: [*:0]const u8) !void {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const config = blk: {
+                var cli = try Cli.parse(&arena, .{ .vector = &.{
+                    "kgcache", config_path, "--dir",  "first data", "--dir",  "cli \"data\\files",
+                    "--port",  "7000",      "--save", "",           "--save", "300",
+                    "10",
+                } });
+                defer cli.deinit();
+                break :blk try ConfigLoader.load(testing.io, &arena, cli.config_path, cli.overrides.items);
+            };
+            var expected = Config.default();
+            expected.dir = "cli \"data\\files";
+            expected.port = 7000;
+            expected.dbfilename = "state\" file.kgc";
+            expected.save_rules = &.{.{ .seconds = 300, .changes = 10 }};
+            try testing.expectEqualDeep(expected, config);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Run.run, .{path.ptr});
 }

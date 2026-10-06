@@ -203,17 +203,21 @@ test "prepareArgs retains literal strings after input changes and later preparat
     defer arena.deinit();
 
     const original = " \"data\\files\" \t";
-    var source = original.*;
-    var args = [_][]const u8{&source};
     const directive = registry.find("dir").?;
-    const prepared = try parser.prepareArgs(&arena, directive, &args);
-
-    @memset(&source, 'x');
-    args[0] = "replacement";
+    const prepared = blk: {
+        const source = try testing.allocator.dupe(u8, original);
+        defer testing.allocator.free(source);
+        var args = [_][]const u8{source};
+        const result = try parser.prepareArgs(&arena, directive, &args);
+        @memset(source, 'x');
+        args[0] = "replacement";
+        break :blk result;
+    };
 
     const save = registry.find("save").?;
     _ = try parser.prepareFile(&arena, save, "60\t1");
     try testing.expectError(error.InvalidValue, parser.prepareFile(&arena, save, "60 0"));
+    try testing.expectError(error.InvalidValue, parser.prepareArgs(&arena, directive, &.{"bad\x00value"}));
     const later = try parser.prepareArgs(&arena, directive, &.{"later files"});
 
     try testing.expect(prepared.definition == directive);

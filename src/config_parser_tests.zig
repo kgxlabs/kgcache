@@ -509,14 +509,14 @@ test "apply adds file contents to an existing builder without finishing it" {
         try builder.apply(try registry.prepare(registry.find("appendonly").?, &.{"yes"}), .file);
         try builder.apply(try registry.prepare(registry.find("save").?, &.{ "900", "1" }), .file);
 
-        try apply(&builder, &arena, "port 7000\ndir data files\nsave 60 1");
+        try apply(&builder, &arena, "port \"7000\"\ndir \"data\\\"files\\\\archive\"\nsave \"60\" \"1\"");
         try apply(&builder, &arena, " \t# nothing to apply\r\n\r\n");
         try apply(&builder, &arena, "save 300 10\nappendfsync always");
         break :blk try builder.finish();
     };
     var expected = Config.default();
     expected.port = 7000;
-    expected.dir = "data files";
+    expected.dir = "data\"files\\archive";
     expected.append_only = true;
     expected.append_fsync = .always;
     expected.save_rules = &.{
@@ -614,12 +614,12 @@ test "parse preserves file whitespace and quoted scalar contents" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const contents = (" \t# full-line comment\r\n \t\r\n\tport\t7000 \r\n" ++
-        " dir\t \"data\tfiles\" \r\n bind example host # literal\r\n" ++
+        " dir\t \"data\tfiles\" \r\n bind example \"host\\name # literal\r\n" ++
         "save\t60\t1\r\nsave  300\t10").*;
     const config = try parse(&arena, &contents);
     try testing.expectEqual(7000, config.port);
     try testing.expectEqualStrings("data\tfiles", config.dir);
-    try testing.expectEqualStrings("example host # literal", config.bind_address);
+    try testing.expectEqualStrings("example \"host\\name # literal", config.bind_address);
     try testing.expectEqualDeep(&[_]Config.SaveRule{
         .{ .seconds = 60, .changes = 1 },
         .{ .seconds = 300, .changes = 10 },
@@ -781,6 +781,7 @@ test "parse preserves file errors with caller cleanup" {
         .{ .contents = "save 60 1\nsave 300 10 extra", .err = Error.MalformedLine },
         .{ .contents = "save 60 1\nport invalid", .err = Error.InvalidValue },
         .{ .contents = "save 60 1\nsave 0 1", .err = Error.InvalidValue },
+        .{ .contents = "dir \"a\\\"b\"\nsave \"60\" \"1\"\ndir \"bad\\q\"", .err = Error.MalformedLine },
     }) |case| {
         try testing.expectError(case.err, parse(&arena, case.contents));
     }
