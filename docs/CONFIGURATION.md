@@ -20,7 +20,9 @@ Use `--<directive> <value>` to override any supported setting:
 ```
 
 The shell supplies each value as one argument. Single-value directives consume
-one argument, and `--save` consumes two numbers or one empty argument. Required
+one argument, and `--save` consumes two numbers or one empty argument. kgcache
+keeps argument bytes unchanged: shell grouping quotes are removed by the shell,
+while literal quotes and backslashes remain part of a string value. Required
 values are consumed by position, even when they start with a hyphen. For example,
 `--dir --` supplies the literal directory value `--`, and `--port --appendonly`
 fails port validation. An override requesting more values than remain fails with
@@ -54,9 +56,55 @@ databases 4
 
 Blank lines and lines starting with `#` are ignored. Anything else is validated strictly at startup. An unrecognized directive, a missing value, or a value outside its accepted range stops startup before server creation. The application logger reports the source error, and the process exits with status 1. The default logger writes error events to stderr.
 
-Names and `yes`/`no` or enum spellings are case-sensitive. Leading and trailing whitespace is trimmed. Except for `save`, the trimmed text after the name is one value, so string values may contain spaces or tabs. `save` accepts two values separated by spaces or tabs, or `save ""` to clear prior rules. Inline comments are not supported; a `#` after a directive is part of its value.
+Names and `yes`/`no` or enum spellings are case-sensitive. Whitespace around a
+line is trimmed. Except for `save`, the trimmed text after the name is one value, so
+unquoted strings may contain spaces or tabs. `save` separates values on spaces
+or tabs outside quotes. Inline comments are not supported; a `#` after a
+directive is part of its value.
 
 For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect rules in file order, with `save ""` clearing earlier rules.
+
+## Quotes and empty values
+
+A double quote at the start of a value groups that value. For `save`, quote
+each number separately; quoted and unquoted numbers can be mixed:
+
+```conf
+dir "data files"
+port "7000"
+save "60" 1
+```
+
+Outer quotes are removed. Inner spaces and tabs are kept, so `dir " data files "`
+keeps both surrounding spaces. This line contains an actual tab between `data`
+and `files`, which is kept in the directory name:
+
+```conf
+dir "data	files"
+```
+
+Inside quotes, only `\"` (a literal quote) and `\\` (a literal backslash) are
+escapes. `\n`, `\t`, and other escapes are rejected. Unquoted backslashes and
+embedded quotes stay literal. Single quotes have no special meaning in a file.
+
+File quotes now group values instead of becoming part of the path. If an older
+config expected literal surrounding quotes, escape them:
+
+| File line | Directory name |
+| --- | --- |
+| `dir "data files"` | `data files` |
+| `dir "\"data files\""` | `"data files"` |
+| `dir "a\"b\\c"` | `a"b\c` |
+
+A closing quote must be followed by spaces, tabs, or the end of the line.
+For settings other than `save`, no further value is allowed. Unclosed quotes,
+unsupported escapes, line breaks inside quotes, adjacent fragments such as
+`save "60"1`, and trailing text such as `dir "data" extra` fail with
+`MalformedLine`.
+
+Values are decoded before validation. `save ""` clears only save rules; it
+does not reset other settings. `port ""`, `dir ""`, and `port " 7000 "` fail
+with `InvalidValue`. A missing value fails with `MalformedLine`.
 
 ## Directives
 
@@ -156,11 +204,9 @@ kgcache supports the directives listed in this page. Redis names are used
 for the supported database and persistence settings. A complete Redis
 config file may contain unsupported directives, which stop startup.
 
-Write file values without surrounding quotes. Quote characters are treated as
-part of the value, except for `save ""`, which clears prior save rules.
-Numeric sizes use decimal bytes, such as `67108864`; size suffixes such as
-`64mb` are not supported. CLI values may use shell quotes to keep spaces within
-one argument; the shell removes those quotes before kgcache parses the value.
+File quotes follow the [rules above](#quotes-and-empty-values). Numeric sizes
+use decimal bytes, such as `67108864`; size suffixes such as `64mb` are not
+supported.
 
 | Setting or format | kgcache | Redis |
 | --- | --- | --- |
@@ -244,3 +290,4 @@ flow, and failure behavior.
 ## Not yet configurable
 
 - Memory/eviction limits: no `maxmemory` support yet.
+- Live settings through RESP `CONFIG`: tracked in [#171](https://github.com/kgxlabs/kgcache/issues/171).

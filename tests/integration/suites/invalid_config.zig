@@ -92,6 +92,12 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         .{ .config = "save 60 1\nsave 0 1\n", .args = &.{ "--save", "" }, .source = error.InvalidValue },
         .{ .config = "dbfilename ../state.kgc\n", .args = &.{ "--dbfilename", "state.kgc" }, .source = error.InvalidValue },
         .{ .config = "port\n", .args = &.{ "--port", "0" }, .source = error.MalformedLine },
+        .{ .config = "dir \"unterminated\n", .args = &.{ "--dir", "." }, .source = error.MalformedLine },
+        .{ .config = "dir \"bad\\q\"\n", .args = &.{ "--dir", "." }, .source = error.MalformedLine },
+        .{ .config = "save \"60\"\"1\"\n", .args = &.{ "--save", "" }, .source = error.MalformedLine },
+        .{ .config = "port \"\"\nport \"7000\"\n", .args = &.{ "--port", "0" }, .source = error.InvalidValue },
+        .{ .config = "dir \"\"\n", .args = &.{ "--dir", "." }, .source = error.InvalidValue },
+        .{ .config = "save \"60\" \"1\"\nsave \"\"\nsave \"0\" \"1\"\n", .args = &.{ "--save", "" }, .source = error.InvalidValue },
     };
 
     for (file_cases) |case| {

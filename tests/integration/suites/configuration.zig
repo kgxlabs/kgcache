@@ -4,6 +4,8 @@ const resp_client = @import("../harness/resp_client.zig");
 
 const Persistence = enum { snapshot, aof };
 const Directory = enum { relative, absolute };
+const persistence_dir = "persistence \"files\"";
+const file_persistence_dir = "persistence \\\"files\\\"";
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: config names and persistence paths started", .{});
@@ -26,7 +28,7 @@ fn checkListenerOverrides(io: std.Io, allocator: std.mem.Allocator, executable_p
 
     try expectPing(io, control);
     const occupied_port = control.address.?.getPort();
-    const extra_config = try std.fmt.allocPrint(allocator, "bind 0.0.0.0\nport {d}\n", .{occupied_port});
+    const extra_config = try std.fmt.allocPrint(allocator, "bind \"0.0.0.0\"\nport \"{d}\"\n", .{occupied_port});
     defer allocator.free(extra_config);
 
     const overrides = &[_][]const u8{ "--bind", "127.0.0.1", "--port", "0" };
@@ -66,9 +68,9 @@ fn expectPing(io: std.Io, server: *support.ServerProcess) !void {
 
 fn checkCliOverrides(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
     const server = try support.ServerProcess.createStopped(io, allocator, executable_path, .{
-        .extra_config = "databases 1\ndir .\ndbfilename file.kgc\nappendonly yes\nsave 60 1\n",
+        .extra_config = "databases \"1\"\ndir \".\"\ndbfilename \"file.kgc\"\nappendonly \"yes\"\nsave \"60\" \"1\"\n",
         .extra_args = &.{
-            "--databases",  "2",  "--dir",  "data files", "--dbfilename", "override.kgc",
+            "--databases",  "2",  "--dir",  "data \"files\\archive", "--dbfilename", "override.kgc",
             "--appendonly", "no", "--save", "",
         },
         .artifact_dir = artifact_dir,
@@ -77,7 +79,7 @@ fn checkCliOverrides(io: std.Io, allocator: std.mem.Allocator, executable_path: 
     errdefer server.failed = true;
     var working_dir = try std.Io.Dir.cwd().openDir(io, server.data_dir, .{});
     defer working_dir.close(io);
-    try working_dir.createDir(io, "data files", .default_dir);
+    try working_dir.createDir(io, "data \"files\\archive", .default_dir);
     try server.start();
     {
         const client = try server.address.?.connect(io, .{ .mode = .stream });
@@ -89,10 +91,10 @@ fn checkCliOverrides(io: std.Io, allocator: std.mem.Allocator, executable_path: 
         try resp_client.sendAndExpect(io, server, fd, "*1\r\n$4\r\nSAVE\r\n", "+OK\r\n");
     }
     try server.stop();
-    try working_dir.access(io, "data files/override.kgc", .{});
+    try working_dir.access(io, "data \"files\\archive/override.kgc", .{});
     try expectMissing(io, working_dir, "file.kgc");
     try expectMissing(io, working_dir, "aof");
-    try expectMissing(io, working_dir, "data files/aof");
+    try expectMissing(io, working_dir, "data \"files\\archive/aof");
 }
 
 fn checkPersistence(
@@ -121,16 +123,16 @@ fn checkPersistence(
     var working_dir = try cwd.openDir(io, server.data_dir, .{});
     defer working_dir.close(io);
 
-    try working_dir.createDir(io, "persistence", .default_dir);
-    try working_dir.createDirPath(io, "config/persistence");
+    try working_dir.createDir(io, persistence_dir, .default_dir);
+    try working_dir.createDirPath(io, "config/" ++ persistence_dir);
 
-    const absolute_dir = try std.fs.path.join(allocator, &.{ server.data_dir, "persistence" });
-    defer allocator.free(absolute_dir);
+    const absolute_file_dir = try std.fs.path.join(allocator, &.{ server.data_dir, file_persistence_dir });
+    defer allocator.free(absolute_file_dir);
 
     extra_config = try std.fmt.allocPrint(
         allocator,
-        "databases 4\ndir {s}\ndbfilename state.kgc\nappenddirname history\nappendfilename journal.aof\nappendonly {s}\nappendfsync always\n",
-        .{ if (directory == .absolute) absolute_dir else "persistence", if (persistence == .aof) "yes" else "no" },
+        "bind \"127.0.0.1\"\nport \"0\"\ndatabases \"4\"\ndir \"{s}\"\ndbfilename \"state file.kgc\"\nappenddirname \"history\"\nappendfilename \"journal.aof\"\nappendonly \"{s}\"\nappendfsync \"always\"\nsave \"3600\" \"1000000\"\n",
+        .{ if (directory == .absolute) absolute_file_dir else file_persistence_dir, if (persistence == .aof) "yes" else "no" },
     );
     server.options.extra_config = extra_config.?;
 
@@ -141,6 +143,7 @@ fn checkPersistence(
         defer client.close(io);
 
         const fd = client.socket.handle;
+        try resp_client.sendAndExpect(io, server, fd, "*1\r\n$4\r\nPING\r\n", "+PONG\r\n");
         try resp_client.sendAndExpect(io, server, fd, "*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n", "+OK\r\n");
         try resp_client.sendAndExpect(io, server, fd, "*2\r\n$6\r\nSELECT\r\n$1\r\n3\r\n", "+OK\r\n");
         try resp_client.sendAndExpect(io, server, fd, "*2\r\n$6\r\nSELECT\r\n$1\r\n4\r\n", "-ERR DB index is out of range\r\n");
@@ -152,26 +155,26 @@ fn checkPersistence(
     try server.stop();
 
     if (persistence == .snapshot) {
-        try working_dir.access(io, "persistence/state.kgc", .{});
-        try expectMissing(io, working_dir, "persistence/history");
+        try working_dir.access(io, persistence_dir ++ "/state file.kgc", .{});
+        try expectMissing(io, working_dir, persistence_dir ++ "/history");
     }
 
     if (persistence == .aof) {
-        try working_dir.access(io, "persistence/history/journal.aof.manifest", .{});
-        const data_file = try working_dir.openFile(io, "persistence/history/journal.aof.1.incr", .{});
+        try working_dir.access(io, persistence_dir ++ "/history/journal.aof.manifest", .{});
+        const data_file = try working_dir.openFile(io, persistence_dir ++ "/history/journal.aof.1.incr", .{});
         defer data_file.close(io);
         if (try data_file.length(io) == 0) return error.EmptyAofData;
-        try expectMissing(io, working_dir, "persistence/state.kgc");
+        try expectMissing(io, working_dir, persistence_dir ++ "/state file.kgc");
     }
 
     for ([_][]const u8{
-        "state.kgc",
+        "state file.kgc",
         "dump.kgc",
         "history",
         "aof",
         "appendonlydir",
-        "config/persistence/state.kgc",
-        "config/persistence/history",
+        "config/" ++ persistence_dir ++ "/state file.kgc",
+        "config/" ++ persistence_dir ++ "/history",
     }) |path| {
         try expectMissing(io, working_dir, path);
     }

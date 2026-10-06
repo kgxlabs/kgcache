@@ -1,9 +1,7 @@
 # kgcache.conf.example
 #
-# Every directive below is commented out and set to its built-in default
-# (see Config.default() in src/config.zig). Uncomment a line and change its
-# value to override that default; anything left commented out (or left out
-# of your own config file entirely) keeps the default.
+# Settings below show built-in defaults. Uncomment a setting to change it.
+# Omitted settings keep their defaults. Extra examples are marked separately.
 #
 # Format: one directive per line, `directive value`. Blank lines and lines
 # starting with `#` are ignored. Anything else must be a recognized
@@ -14,9 +12,9 @@
 # Run with: ./zig-out/bin/kgcache path/to/kgcache.conf
 # Use the supported directive names shown here. Old names such as
 # num-databases, append-dirname, append-filename, and snapshot-path are
-# rejected. File values use no surrounding quotes, except save "" to clear rules.
-# Names and yes/no or enum values are case-sensitive. Whitespace at the
-# ends is trimmed; string values can contain spaces. Inline comments are
+# rejected. Double quotes group file values; save "" clears rules.
+# Names and yes/no or enum values are case-sensitive. Whitespace outside
+# quotes is trimmed; string values can contain spaces. Inline comments are
 # not supported. Repeated directives replace their value, except save,
 # which collects rules in file order until save "" clears them.
 # CLI overrides apply after this file: --port 7000 or --save '' to clear rules.
@@ -128,3 +126,15 @@
 # Delay, in milliseconds, before retrying a failed automatic BGSAVE.
 # Set 0 for no retry delay. Range: 0 to 9223372036854775807.
 # bgsave-retry-delay-ms 5000
+
+# Quoted alternatives (uncomment only the lines you need).
+# The selected directory must already exist.
+# port "7000"
+# dir "data files"
+# dbfilename "state file.kgc"
+# dir "a\"b\\c"
+# dir "\"data files\""
+# save "60" "1"
+# save ""
+# Inside quotes, only \" and \\ are decoded. Inner spaces/tabs are kept.
+# File single quotes are literal; shell quotes around CLI values are removed by the shell.

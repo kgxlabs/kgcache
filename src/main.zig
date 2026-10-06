@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) u8 {
 }
 
 fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
-    var cli = Cli.parse(init.gpa, init.minimal.args) catch |err| {
+    var cli = Cli.parse(init.arena, init.minimal.args) catch |err| {
         logger.err("app: invalid command line", err, @errorReturnTrace());
         return err;
     };
@@ -74,10 +74,11 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
     defer ready_pipe.close();
 
-    // Config strings borrow argv or the file buffer kept in the application arena.
+    // CLI and file loading share this borrowed arena.
+    // Zig releases it after the application returns.
     const config = ConfigLoader.load(
         init.io,
-        init.arena.allocator(),
+        init.arena,
         cli.config_path,
         cli.overrides.items,
     ) catch |err| {
@@ -164,19 +165,23 @@ test "application reports loader failures once with the source error" {
     defer testing.allocator.free(path);
     const path_arg = try testing.allocator.dupeZ(u8, path);
     defer testing.allocator.free(path_arg);
-    const cases = [_]struct { contents: ?[]const u8, err: anyerror, fail_allocation: bool = false }{
+    const cases = [_]struct { contents: ?[]const u8, err: anyerror }{
         .{ .contents = null, .err = error.FileNotFound },
         .{ .contents = "port invalid", .err = error.InvalidValue },
         .{ .contents = "save 60 1\nsave 300 invalid", .err = error.InvalidValue },
+        .{ .contents = "port \"invalid\"\nport \"7000\"", .err = error.InvalidValue },
+        .{ .contents = "port \"7000\" trailing", .err = error.MalformedLine },
+        .{ .contents = "dir \"bad\\q\"", .err = error.MalformedLine },
+        .{ .contents = "dir \"\"", .err = error.InvalidValue },
+        .{ .contents = "save \"60\" \"1\"\nsave \"0\" \"1\"\nsave \"\"", .err = error.InvalidValue },
         .{ .contents = "unknown value", .err = error.UnknownDirective },
         .{ .contents = "port", .err = error.MalformedLine },
-        .{ .contents = "port 7000\nsave 60 1", .err = error.OutOfMemory, .fail_allocation = true },
     };
     for (cases) |case| {
         if (case.contents) |contents| {
             try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = contents });
         }
-        var arena = std.heap.ArenaAllocator.init(if (case.fail_allocation) testing.failing_allocator else testing.allocator);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         const args = [_][*:0]const u8{ "kgcache", path_arg.ptr, "--port", "8000" };
         const init: std.process.Init = .{
@@ -200,30 +205,34 @@ test "application reports loader failures once with the source error" {
     }
 }
 
-test "application reports a CLI error once" {
+test "application reports CLI errors once" {
     const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const args = [_][*:0]const u8{ "kgcache", "--ready-fd", "2" };
-    const init: std.process.Init = .{
-        .minimal = .{
-            .args = .{ .vector = &args },
-            .environ = std.process.Environ.empty,
-        },
-        .arena = &arena,
-        .gpa = testing.allocator,
-        .io = testing.io,
-        .environ_map = undefined,
-        .preopens = undefined,
+    const cases = [_]struct { argv: []const [*:0]const u8, err: Cli.Error, fail_allocation: bool = false }{
+        .{ .argv = &.{ "kgcache", "--ready-fd", "2" }, .err = error.InvalidReadyFd },
+        .{ .argv = &.{ "kgcache", "--port", "7000" }, .err = error.OutOfMemory, .fail_allocation = true },
     };
-    var test_logger = logging.TestLogger.init();
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(if (case.fail_allocation) testing.failing_allocator else testing.allocator);
+        defer arena.deinit();
+        const init: std.process.Init = .{
+            .minimal = .{
+                .args = .{ .vector = case.argv },
+                .environ = std.process.Environ.empty,
+            },
+            .arena = &arena,
+            .gpa = testing.allocator,
+            .io = testing.io,
+            .environ_map = undefined,
+            .preopens = undefined,
+        };
+        var test_logger = logging.TestLogger.init();
+        try testing.expectError(case.err, runApplication(init, test_logger.logger()));
 
-    try testing.expectError(error.InvalidReadyFd, runApplication(init, test_logger.logger()));
-
-    const events = test_logger.recordedEvents();
-    try testing.expectEqual(1, events.len);
-    try testing.expectEqualStrings("app: invalid command line", events[0].message());
-    try testing.expectEqual(error.InvalidReadyFd, events[0].source.?);
+        const events = test_logger.recordedEvents();
+        try testing.expectEqual(1, events.len);
+        try testing.expectEqualStrings("app: invalid command line", events[0].message());
+        try testing.expectEqual(case.err, events[0].source.?);
+    }
 }
 
 test "application reports override errors before reading the config file" {

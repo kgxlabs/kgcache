@@ -6,14 +6,16 @@ const directive_definition = @import("definition.zig");
 const Cli = @import("../cli.zig");
 const Manifest = @import("../persistence/manifest.zig");
 
-test "load applies ordered scalar overrides without a file or allocation" {
+test "load applies ordered scalar overrides without a file" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const overrides = [_]directive_definition.PreparedDirective{
         try registry.prepare(registry.find("port").?, &.{"7000"}),
         try registry.prepare(registry.find("dir").?, &.{"data files"}),
         try registry.prepare(registry.find("port").?, &.{"7001"}),
     };
-    const config = try ConfigLoader.load(testing.io, testing.failing_allocator, null, &overrides);
+    const config = try ConfigLoader.load(testing.io, &arena, null, &overrides);
     var expected = Config.default();
     expected.port = 7001;
     expected.dir = "data files";
@@ -40,7 +42,7 @@ test "load keeps untouched file values and replaces save rules on the first CLI 
         try registry.prepare(port, &.{"7002"}),
         try registry.prepare(save, &.{ "600", "20" }),
     };
-    const config = try ConfigLoader.load(testing.io, arena.allocator(), path, &overrides);
+    const config = try ConfigLoader.load(testing.io, &arena, path, &overrides);
     try testing.expectEqual(7002, config.port);
     try testing.expectEqualStrings("file data", config.dir);
     try testing.expect(config.append_only);
@@ -49,19 +51,81 @@ test "load keeps untouched file values and replaces save rules on the first CLI 
         .{ .seconds = 600, .changes = 20 },
     }, config.save_rules);
 
-    const scalar_only = try ConfigLoader.load(testing.io, arena.allocator(), path, overrides[0..1]);
+    const scalar_only = try ConfigLoader.load(testing.io, &arena, path, overrides[0..1]);
     try testing.expectEqualDeep(&[_]Config.SaveRule{
         .{ .seconds = 60, .changes = 1 },
         .{ .seconds = 900, .changes = 100 },
     }, scalar_only.save_rules);
     const clear = [_]directive_definition.PreparedDirective{try registry.prepare(save, &.{""})};
-    const cleared = try ConfigLoader.load(testing.io, arena.allocator(), path, &clear);
+    const cleared = try ConfigLoader.load(testing.io, &arena, path, &clear);
     try testing.expectEqual(0, cleared.save_rules.len);
 
-    // Even overridden file values must pass validation.
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = "save 60 1\nport invalid" });
-    try testing.expectError(error.InvalidValue, ConfigLoader.load(testing.io, testing.allocator, path, &overrides));
-    try testing.expectError(error.FileNotFound, ConfigLoader.load(testing.io, testing.allocator, "scratch-missing-cli-config.conf", &clear));
+    for ([_]struct { contents: []const u8, err: anyerror }{
+        .{ .contents = "save 60 1\nport invalid", .err = error.InvalidValue },
+        .{ .contents = "port \"invalid\"\nport \"7000\"", .err = error.InvalidValue },
+        .{ .contents = "port \"65536\"\nport \"7000\"", .err = error.InvalidValue },
+        .{ .contents = "appendonly \"YES\"\nappendonly \"yes\"", .err = error.InvalidValue },
+        .{ .contents = "appendfsync \"Always\"\nappendfsync \"always\"", .err = error.InvalidValue },
+        .{ .contents = "dbfilename \"data/state.kgc\"\ndbfilename \"state.kgc\"", .err = error.InvalidValue },
+        .{ .contents = "save \"0\" \"1\"\nsave \"\"", .err = error.InvalidValue },
+        .{ .contents = "port \"7000\" extra\nport \"7000\"", .err = error.MalformedLine },
+    }) |case| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = case.contents });
+        try testing.expectError(case.err, ConfigLoader.load(testing.io, &arena, path, &overrides));
+    }
+    try testing.expectError(error.FileNotFound, ConfigLoader.load(testing.io, &arena, "scratch-missing-cli-config.conf", &clear));
+}
+
+test "load retains file and CLI values after cleanup and later loads" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "kgcache.conf" });
+    defer testing.allocator.free(path);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "port \"7000\"\ndir \"file data\"\ndbfilename \"file.kgc\"\nsave \"60\" \"1\"\nsave \"300\" \"10\"",
+    });
+
+    const config = blk: {
+        const path_arg = try testing.allocator.dupeZ(u8, path);
+        defer testing.allocator.free(path_arg);
+        const directory = try testing.allocator.dupeZ(u8, "cli data");
+        defer testing.allocator.free(directory);
+        var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", path_arg.ptr, "--dir", directory.ptr, "--port", "8000" } });
+        defer cli.deinit();
+        @memset(path_arg, 'x');
+        @memset(directory, 'y');
+        break :blk try ConfigLoader.load(testing.io, &arena, cli.config_path, cli.overrides.items);
+    };
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "port \"9000\"\ndir \"later\\\"data\\\\files\"\ndbfilename \"later.kgc\"\nsave \"900\" \"100\"",
+    });
+    const later = try ConfigLoader.loadFromPath(testing.io, &arena, path);
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = "save 600 20\nport invalid",
+    });
+    try testing.expectError(error.InvalidValue, ConfigLoader.loadFromPath(testing.io, &arena, path));
+
+    var expected = Config.default();
+    expected.port = 8000;
+    expected.dir = "cli data";
+    expected.dbfilename = "file.kgc";
+    expected.save_rules = &.{
+        .{ .seconds = 60, .changes = 1 },
+        .{ .seconds = 300, .changes = 10 },
+    };
+    try testing.expectEqualDeep(expected, config);
+    expected.port = 9000;
+    expected.dir = "later\"data\\files";
+    expected.dbfilename = "later.kgc";
+    expected.save_rules = &.{.{ .seconds = 900, .changes = 100 }};
+    try testing.expectEqualDeep(expected, later);
 }
 
 test "persistence paths use the final file and CLI configuration" {
@@ -132,13 +196,12 @@ test "persistence paths use the final file and CLI configuration" {
         argv[0] = "kgcache";
         argv[1] = path_arg.ptr;
         @memcpy(argv[2..][0..case.args.len], case.args);
-        var cli = try Cli.parse(testing.allocator, .{ .vector = argv[0 .. 2 + case.args.len] });
-        defer cli.deinit();
-
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
+        var cli = try Cli.parse(&arena, .{ .vector = argv[0 .. 2 + case.args.len] });
+        defer cli.deinit();
 
-        const config = try ConfigLoader.load(testing.io, arena.allocator(), cli.config_path, cli.overrides.items);
+        const config = try ConfigLoader.load(testing.io, &arena, cli.config_path, cli.overrides.items);
         const snapshot = try config.resolveSnapshotPath(testing.allocator);
         defer testing.allocator.free(snapshot);
 
@@ -164,7 +227,7 @@ test "persistence paths use the final file and CLI configuration" {
     }
 }
 
-test "load frees the file buffer and builder output after CLI apply or finalizer failure" {
+test "load preserves CLI application and finalizer errors" {
     const Probe = struct {
         fn apply(_: *directive_definition.ApplyContext, _: directive_definition.Value) directive_definition.ApplyError!void {
             return error.OutOfMemory;
@@ -189,10 +252,9 @@ test "load frees the file buffer and builder output after CLI apply or finalizer
         try registry.prepare(&apply_failure, &.{"7000"}),
         try registry.prepare(&finalize_failure, &.{ "300", "10" }),
     }) |prepared| {
-        var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        try testing.expectError(error.OutOfMemory, ConfigLoader.load(testing.io, failing.allocator(), path, &.{prepared}));
-        try testing.expect(failing.allocated_bytes > 0);
-        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        try testing.expectError(error.OutOfMemory, ConfigLoader.load(testing.io, &arena, path, &.{prepared}));
     }
 }
 
@@ -200,7 +262,8 @@ test "load cleans up every allocation failure in CLI application and finalizatio
     const Run = struct {
         fn run(backing_allocator: std.mem.Allocator) !void {
             var failing_resize = std.testing.FailingAllocator.init(backing_allocator, .{ .resize_fail_index = 0 });
-            const allocator = failing_resize.allocator();
+            var arena = std.heap.ArenaAllocator.init(failing_resize.allocator());
+            defer arena.deinit();
             var overrides: [66]directive_definition.PreparedDirective = undefined;
             overrides[0] = try registry.prepare(registry.find("save").?, &.{""});
             for (overrides[1..65], 0..) |*prepared, index| {
@@ -210,8 +273,7 @@ test "load cleans up every allocation failure in CLI application and finalizatio
                 };
             }
             overrides[65] = try registry.prepare(registry.find("port").?, &.{"7000"});
-            const config = try ConfigLoader.load(std.testing.io, allocator, null, &overrides);
-            defer allocator.free(config.save_rules);
+            const config = try ConfigLoader.load(std.testing.io, &arena, null, &overrides);
             try std.testing.expectEqual(7000, config.port);
             try std.testing.expectEqual(64, config.save_rules.len);
             try std.testing.expectEqualDeep(Config.SaveRule{ .seconds = 1, .changes = 1 }, config.save_rules[0]);
@@ -219,4 +281,39 @@ test "load cleans up every allocation failure in CLI application and finalizatio
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Run.run, .{});
+}
+
+test "CLI and file construction clean up every allocation failure" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "kgcache.conf",
+        .data = ("save \"60\" \"1\"\n" ** 64) ++ "dir \"file data\"\ndbfilename \"state\\\" file.kgc\"",
+    });
+    const path = try std.fmt.allocPrintSentinel(testing.allocator, ".zig-cache/tmp/{s}/kgcache.conf", .{tmp.sub_path}, 0);
+    defer testing.allocator.free(path);
+
+    const Run = struct {
+        fn run(allocator: std.mem.Allocator, config_path: [*:0]const u8) !void {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const config = blk: {
+                var cli = try Cli.parse(&arena, .{ .vector = &.{
+                    "kgcache", config_path, "--dir",  "first data", "--dir",  "cli \"data\\files",
+                    "--port",  "7000",      "--save", "",           "--save", "300",
+                    "10",
+                } });
+                defer cli.deinit();
+                break :blk try ConfigLoader.load(testing.io, &arena, cli.config_path, cli.overrides.items);
+            };
+            var expected = Config.default();
+            expected.dir = "cli \"data\\files";
+            expected.port = 7000;
+            expected.dbfilename = "state\" file.kgc";
+            expected.save_rules = &.{.{ .seconds = 300, .changes = 10 }};
+            try testing.expectEqualDeep(expected, config);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Run.run, .{path.ptr});
 }

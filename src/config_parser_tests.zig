@@ -10,6 +10,8 @@ const apply = ConfigParser.apply;
 
 test "parse overlays every directive onto the defaults" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
     const contents =
         \\# kgcache.conf
@@ -28,7 +30,7 @@ test "parse overlays every directive onto the defaults" {
         \\bgsave-retry-delay-ms 10000
     ;
 
-    const config = try parse(testing.allocator, contents);
+    const config = try parse(&arena, contents);
 
     try testing.expectEqualStrings("0.0.0.0", config.bind_address);
     try testing.expectEqual(7000, config.port);
@@ -46,12 +48,14 @@ test "parse overlays every directive onto the defaults" {
 
 test "parse leaves directives absent from a partial file at their defaults" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
     const contents =
         \\port 7000
     ;
 
-    const config = try parse(testing.allocator, contents);
+    const config = try parse(&arena, contents);
     const defaults = Config.default();
 
     try testing.expectEqual(7000, config.port);
@@ -70,11 +74,15 @@ test "parse leaves directives absent from a partial file at their defaults" {
 
 test "parse rejects a negative bgsave retry delay" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "bgsave-retry-delay-ms -1"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.InvalidValue, parse(&arena, "bgsave-retry-delay-ms -1"));
 }
 
 test "parse enforces numeric directive boundaries" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const cases = [_]struct {
         minimum: []const u8,
         maximum: []const u8,
@@ -91,11 +99,10 @@ test "parse enforces numeric directive boundaries" {
 
     for (cases) |case| {
         for ([_][]const u8{ case.minimum, case.maximum }) |line| {
-            const config = try parse(testing.allocator, line);
-            testing.allocator.free(config.save_rules);
+            _ = try parse(&arena, line);
         }
         for ([_][]const u8{ case.below_minimum, case.above_maximum }) |line| {
-            try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+            try testing.expectError(Error.InvalidValue, parse(&arena, line));
         }
     }
 
@@ -105,28 +112,29 @@ test "parse enforces numeric directive boundaries" {
     defer testing.allocator.free(above_max_buffer_size);
 
     for ([_][]const u8{ "connection-buffer-size 1", max_buffer_size }) |line| {
-        const config = try parse(testing.allocator, line);
-        testing.allocator.free(config.save_rules);
+        _ = try parse(&arena, line);
     }
     for ([_][]const u8{ "connection-buffer-size 0", above_max_buffer_size }) |line| {
-        try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+        try testing.expectError(Error.InvalidValue, parse(&arena, line));
     }
 }
 
 test "parse accepts port zero for an OS-selected listener" {
     const testing = std.testing;
-    const config = try parse(testing.allocator, "port 0");
-    defer testing.allocator.free(config.save_rules);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const config = try parse(&arena, "port 0");
     try testing.expectEqual(0, config.port);
 }
 
 test "parse preserves zero controls and their upper boundaries" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const config = try parse(
-        testing.allocator,
+        &arena,
         "auto-aof-rewrite-percentage 0\nbgsave-retry-delay-ms 0",
     );
-    defer testing.allocator.free(config.save_rules);
     try testing.expectEqual(0, config.auto_aof_rewrite_percentage);
     try testing.expectEqual(0, config.bgsave_retry_delay_ms);
 
@@ -134,55 +142,73 @@ test "parse preserves zero controls and their upper boundaries" {
         "auto-aof-rewrite-percentage 4294967295",
         "bgsave-retry-delay-ms 9223372036854775807",
     }) |line| {
-        const boundary = try parse(testing.allocator, line);
-        testing.allocator.free(boundary.save_rules);
+        _ = try parse(&arena, line);
     }
     for ([_][]const u8{
         "auto-aof-rewrite-percentage -1",
         "auto-aof-rewrite-percentage 4294967296",
         "bgsave-retry-delay-ms 9223372036854775808",
     }) |line| {
-        try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+        try testing.expectError(Error.InvalidValue, parse(&arena, line));
     }
 }
 
 test "parse accepts zero and the type limit for minimum AOF rewrite size" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const max_size = try std.fmt.allocPrint(testing.allocator, "auto-aof-rewrite-min-size {d}", .{std.math.maxInt(usize)});
     defer testing.allocator.free(max_size);
     const above_max_size = try std.fmt.allocPrint(testing.allocator, "auto-aof-rewrite-min-size {d}", .{@as(u128, std.math.maxInt(usize)) + 1});
     defer testing.allocator.free(above_max_size);
 
     for ([_][]const u8{ "auto-aof-rewrite-min-size 0", max_size }) |line| {
-        const config = try parse(testing.allocator, line);
-        testing.allocator.free(config.save_rules);
+        _ = try parse(&arena, line);
     }
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, above_max_size));
+    try testing.expectError(Error.InvalidValue, parse(&arena, above_max_size));
 }
 
 test "parse rejects a line with a directive but no value" {
     const testing = std.testing;
-    try testing.expectError(Error.MalformedLine, parse(testing.allocator, "port"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.MalformedLine, parse(&arena, "port"));
 }
 
 test "parse rejects a directive name that isn't recognized" {
     const testing = std.testing;
-    try testing.expectError(Error.UnknownDirective, parse(testing.allocator, "maxmemory 100mb"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.UnknownDirective, parse(&arena, "maxmemory 100mb"));
+}
+
+test "parse reports unknown directives before quote syntax errors" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    for ([_][]const u8{ "unknown \"", "unknown \"unterminated", "unknown \"\\q\"" }) |contents| {
+        try testing.expectError(Error.UnknownDirective, parse(&arena, contents));
+    }
 }
 
 test "parse rejects removed database and AOF directive names" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][]const u8{
         "num-databases 4",
         "append-dirname appendonlydir",
         "append-filename appendonly.aof",
     }) |contents| {
-        try testing.expectError(Error.UnknownDirective, parse(testing.allocator, contents));
+        try testing.expectError(Error.UnknownDirective, parse(&arena, contents));
     }
 }
 
 test "parse uses the last value for repeated database and AOF settings" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const contents =
         \\databases 4
         \\appenddirname first-aof
@@ -192,8 +218,7 @@ test "parse uses the last value for repeated database and AOF settings" {
         \\appendfilename second.aof
     ;
 
-    const config = try parse(testing.allocator, contents);
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, contents);
 
     try testing.expectEqual(8, config.num_databases);
     try testing.expectEqualStrings("second-aof", config.append_dirname);
@@ -202,6 +227,8 @@ test "parse uses the last value for repeated database and AOF settings" {
 
 test "parse uses the last dir and dbfilename values" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const contents =
         \\dir ./first
         \\dbfilename first.kgc
@@ -209,8 +236,7 @@ test "parse uses the last dir and dbfilename values" {
         \\dbfilename second.kgc
     ;
 
-    const config = try parse(testing.allocator, contents);
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, contents);
 
     try testing.expectEqualStrings("./second", config.dir);
     try testing.expectEqualStrings("second.kgc", config.dbfilename);
@@ -218,11 +244,15 @@ test "parse uses the last dir and dbfilename values" {
 
 test "parse rejects the removed snapshot-path directive" {
     const testing = std.testing;
-    try testing.expectError(Error.UnknownDirective, parse(testing.allocator, "snapshot-path dump.kgc"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.UnknownDirective, parse(&arena, "snapshot-path dump.kgc"));
 }
 
 test "parse requires a snapshot basename ending in kgc" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][]const u8{
         "dbfilename dump.rdb",
         "dbfilename /absolute/path/dump.kgc",
@@ -231,12 +261,14 @@ test "parse requires a snapshot basename ending in kgc" {
         "dbfilename data\\dump.kgc",
         "dbfilename dump\x00.kgc",
     }) |contents| {
-        try testing.expectError(Error.InvalidValue, parse(testing.allocator, contents));
+        try testing.expectError(Error.InvalidValue, parse(&arena, contents));
     }
 }
 
 test "parse requires an AOF directory name within dir" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][]const u8{
         "appenddirname .",
         "appenddirname ..",
@@ -246,43 +278,52 @@ test "parse requires an AOF directory name within dir" {
         "appenddirname data\\aof",
         "appenddirname aof\x00dir",
     }) |contents| {
-        try testing.expectError(Error.InvalidValue, parse(testing.allocator, contents));
+        try testing.expectError(Error.InvalidValue, parse(&arena, contents));
     }
 }
 
 test "parse rejects persistence directives without values" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][]const u8{ "dir", "dbfilename", "appenddirname" }) |contents| {
-        try testing.expectError(Error.MalformedLine, parse(testing.allocator, contents));
+        try testing.expectError(Error.MalformedLine, parse(&arena, contents));
     }
 }
 
 test "parse validates every occurrence of persistence settings" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][]const u8{
         "dir data\x00dir\ndir ./data",
         "dbfilename dump.rdb\ndbfilename dump.kgc",
         "appenddirname ../aof\nappenddirname aof",
     }) |contents| {
-        try testing.expectError(Error.InvalidValue, parse(testing.allocator, contents));
+        try testing.expectError(Error.InvalidValue, parse(&arena, contents));
     }
 }
 
 test "parse rejects a value that doesn't fit the directive's type" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "port not-a-number"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.InvalidValue, parse(&arena, "port not-a-number"));
 }
 
 test "parse rejects a reuse-address value that isn't yes or no" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "reuse-address maybe"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.InvalidValue, parse(&arena, "reuse-address maybe"));
 }
 
 test "parse accepts a single save rule" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    const config = try parse(testing.allocator, "save 300 100");
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, "save 300 100");
 
     try testing.expectEqual(1, config.save_rules.len);
     try testing.expectEqual(300, config.save_rules[0].seconds);
@@ -291,14 +332,15 @@ test "parse accepts a single save rule" {
 
 test "parse accepts multiple save lines and keeps all of them" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
     const contents =
         \\save 900 1
         \\save 300 10
         \\save 60 10000
     ;
-    const config = try parse(testing.allocator, contents);
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, contents);
 
     try testing.expectEqual(3, config.save_rules.len);
     try testing.expectEqual(900, config.save_rules[0].seconds);
@@ -311,36 +353,44 @@ test "parse accepts multiple save lines and keeps all of them" {
 
 test "parse defaults to no save rules when the directive is absent" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    const config = try parse(testing.allocator, "port 7000");
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, "port 7000");
 
     try testing.expectEqual(0, config.save_rules.len);
 }
 
 test "parse rejects a save line with only one value" {
     const testing = std.testing;
-    try testing.expectError(Error.MalformedLine, parse(testing.allocator, "save 300"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.MalformedLine, parse(&arena, "save 300"));
 }
 
 test "parse rejects a save line with more than two values" {
     const testing = std.testing;
-    try testing.expectError(Error.MalformedLine, parse(testing.allocator, "save 300 100 200"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.MalformedLine, parse(&arena, "save 300 100 200"));
 }
 
 test "parse rejects a save line with a non-numeric value" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "save 300 many"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.InvalidValue, parse(&arena, "save 300 many"));
 }
 
 test "parse enforces both save rule boundaries" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][]const u8{
         "save 1 1",
         "save 9223372036854775807 4294967295",
     }) |line| {
-        const config = try parse(testing.allocator, line);
-        defer testing.allocator.free(config.save_rules);
+        const config = try parse(&arena, line);
         try testing.expectEqual(1, config.save_rules.len);
     }
     for ([_][]const u8{
@@ -350,20 +400,24 @@ test "parse enforces both save rule boundaries" {
         "save 1 0",
         "save 1 4294967296",
     }) |line| {
-        try testing.expectError(Error.InvalidValue, parse(testing.allocator, line));
+        try testing.expectError(Error.InvalidValue, parse(&arena, line));
     }
 }
 
 test "parse frees collected save rules if a later directive is invalid" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     try testing.expectError(
         Error.InvalidValue,
-        parse(testing.allocator, "save 300 100\nport invalid"),
+        parse(&arena, "save 300 100\nport invalid"),
     );
 }
 
 test "parse reads every aof directive" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
     const contents =
         \\appendonly yes
@@ -375,8 +429,7 @@ test "parse reads every aof directive" {
         \\aof-load-truncated no
     ;
 
-    const config = try parse(testing.allocator, contents);
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, contents);
 
     try testing.expectEqual(true, config.append_only);
     try testing.expectEqual(Config.AppendFsync.always, config.append_fsync);
@@ -389,9 +442,10 @@ test "parse reads every aof directive" {
 
 test "parse defaults aof off with everysec fsync when no aof directive is present" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    const config = try parse(testing.allocator, "port 7000");
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, "port 7000");
     const defaults = Config.default();
 
     try testing.expectEqual(defaults.append_only, config.append_only);
@@ -406,60 +460,63 @@ test "parse defaults aof off with everysec fsync when no aof directive is presen
 
 test "parse accepts each appendfsync value" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
     {
-        const config = try parse(testing.allocator, "appendfsync always");
-        defer testing.allocator.free(config.save_rules);
+        const config = try parse(&arena, "appendfsync always");
         try testing.expectEqual(Config.AppendFsync.always, config.append_fsync);
     }
     {
-        const config = try parse(testing.allocator, "appendfsync everysec");
-        defer testing.allocator.free(config.save_rules);
+        const config = try parse(&arena, "appendfsync everysec");
         try testing.expectEqual(Config.AppendFsync.everysec, config.append_fsync);
     }
     {
-        const config = try parse(testing.allocator, "appendfsync no");
-        defer testing.allocator.free(config.save_rules);
+        const config = try parse(&arena, "appendfsync no");
         try testing.expectEqual(Config.AppendFsync.no, config.append_fsync);
     }
 }
 
 test "parse rejects an appendfsync value that isn't one of the three" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "appendfsync maybe"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.InvalidValue, parse(&arena, "appendfsync maybe"));
 }
 
 test "parse rejects a non-numeric auto-aof-rewrite-percentage" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "auto-aof-rewrite-percentage many"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.InvalidValue, parse(&arena, "auto-aof-rewrite-percentage many"));
 }
 
 test "parse rejects a size suffix in auto-aof-rewrite-min-size" {
     const testing = std.testing;
-    try testing.expectError(Error.InvalidValue, parse(testing.allocator, "auto-aof-rewrite-min-size 64mb"));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(Error.InvalidValue, parse(&arena, "auto-aof-rewrite-min-size 64mb"));
 }
 
 test "apply adds file contents to an existing builder without finishing it" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const config = blk: {
-        var builder = ConfigBuilder.init(testing.allocator);
+        var builder = ConfigBuilder.init(arena.allocator());
         defer builder.deinit();
         try builder.apply(try registry.prepare(registry.find("port").?, &.{"8000"}), .file);
         try builder.apply(try registry.prepare(registry.find("appendonly").?, &.{"yes"}), .file);
         try builder.apply(try registry.prepare(registry.find("save").?, &.{ "900", "1" }), .file);
 
-        try apply(&builder, "port 7000\ndir data files\nsave 60 1");
-        try apply(&builder, " \t# nothing to apply\r\n\r\n");
-        try apply(&builder, "save 300 10\nappendfsync always");
-        try testing.expectEqual(.building, builder.status);
-        try testing.expectEqual(1, builder.states.items.len);
-        try testing.expectEqual(0, builder.config.save_rules.len);
+        try apply(&builder, &arena, "port \"7000\"\ndir \"data\\\"files\\\\archive\"\nsave \"60\" \"1\"");
+        try apply(&builder, &arena, " \t# nothing to apply\r\n\r\n");
+        try apply(&builder, &arena, "save 300 10\nappendfsync always");
         break :blk try builder.finish();
     };
-    defer testing.allocator.free(config.save_rules);
     var expected = Config.default();
     expected.port = 7000;
-    expected.dir = "data files";
+    expected.dir = "data\"files\\archive";
     expected.append_only = true;
     expected.append_fsync = .always;
     expected.save_rules = &.{
@@ -472,32 +529,32 @@ test "apply adds file contents to an existing builder without finishing it" {
 
 test "apply failure leaves builder cleanup with its caller" {
     const testing = std.testing;
-    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     {
-        var builder = ConfigBuilder.init(failing.allocator());
+        var builder = ConfigBuilder.init(arena.allocator());
         defer builder.deinit();
         try testing.expectError(
             Error.InvalidValue,
-            apply(&builder, "port 7000\nsave 60 1\nsave 300 invalid"),
+            apply(&builder, &arena, "port 7000\nsave 60 1\nsave 300 invalid"),
         );
-        try testing.expectEqual(.failed, builder.status);
         try testing.expectEqual(7000, builder.config.port);
-        try testing.expectEqual(0, builder.config.save_rules.len);
-        try testing.expectEqual(1, builder.states.items.len);
-        try testing.expect(failing.allocated_bytes > failing.freed_bytes);
     }
-    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
-test "parse returns defaults for empty and comment-only files without allocation" {
+test "parse returns defaults for empty and comment-only files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][]const u8{ "", " \t\r\n\n\t# comment\r\n# another comment" }) |contents| {
-        const config = try parse(std.testing.failing_allocator, contents);
+        const config = try parse(&arena, contents);
         try std.testing.expectEqualDeep(Config.default(), config);
     }
 }
 
 test "parse builds all 21 directive fields through the registry" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const contents =
         \\bind example host
         \\port 7000
@@ -522,8 +579,7 @@ test "parse builds all 21 directive fields through the registry" {
         \\aof-load-truncated no
         \\bgsave-retry-delay-ms 0
     ;
-    const config = try parse(testing.allocator, contents);
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, contents);
     const expected: Config = .{
         .bind_address = "example host",
         .port = 7000,
@@ -553,31 +609,55 @@ test "parse builds all 21 directive fields through the registry" {
     try testing.expectEqualDeep(expected, config);
 }
 
-test "parse preserves file whitespace, literal quotes, and borrowed strings" {
+test "parse preserves file whitespace and quoted scalar contents" {
     const testing = std.testing;
-    var contents = (" \t# full-line comment\r\n \t\r\n\tport\t7000 \r\n" ++
-        " dir\t \"data\tfiles\" \r\n bind example host # literal\r\n" ++
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const contents = (" \t# full-line comment\r\n \t\r\n\tport\t7000 \r\n" ++
+        " dir\t \"data\tfiles\" \r\n bind example \"host\\name # literal\r\n" ++
         "save\t60\t1\r\nsave  300\t10").*;
-    const config = try parse(testing.allocator, &contents);
-    defer testing.allocator.free(config.save_rules);
+    const config = try parse(&arena, &contents);
     try testing.expectEqual(7000, config.port);
-    try testing.expectEqualStrings("\"data\tfiles\"", config.dir);
-    try testing.expectEqualStrings("example host # literal", config.bind_address);
+    try testing.expectEqualStrings("data\tfiles", config.dir);
+    try testing.expectEqualStrings("example \"host\\name # literal", config.bind_address);
     try testing.expectEqualDeep(&[_]Config.SaveRule{
         .{ .seconds = 60, .changes = 1 },
         .{ .seconds = 300, .changes = 10 },
     }, config.save_rules);
-    const directory_offset = std.mem.indexOf(u8, &contents, "\"data\tfiles\"").?;
-    try testing.expect(config.dir.ptr == contents[directory_offset..].ptr);
-    contents[directory_offset + 1] = 'D';
-    try testing.expectEqualStrings("\"Data\tfiles\"", config.dir);
 
-    const quoted_empty = try parse(testing.failing_allocator, "dir \"\"");
-    try testing.expectEqualStrings("\"\"", quoted_empty.dir);
+    try testing.expectError(Error.InvalidValue, parse(&arena, "dir \"\""));
+}
+
+test "parse decodes quoted scalars and preserves scalar syntax errors" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const config = try parse(&arena, "port \"7000\"\nappendonly \"yes\"\nappendfsync \"always\"\ndir \"a\\\"b\\\\c\"");
+    try testing.expectEqual(7000, config.port);
+    try testing.expect(config.append_only);
+    try testing.expectEqual(Config.AppendFsync.always, config.append_fsync);
+    try testing.expectEqualStrings("a\"b\\c", config.dir);
+
+    for ([_][]const u8{
+        "dir \"",
+        "dir \"unterminated",
+        "dir \"data\" extra",
+        "dir \"data\"\"files\"",
+        "dir \"data\\q\"",
+        "dir \"data\nfiles\"",
+        "port \"invalid\" extra",
+    }) |contents| {
+        try testing.expectError(Error.MalformedLine, parse(&arena, contents));
+    }
+    for ([_][]const u8{ "port \"\"", "port \" 7000 \"", "dir \"\"", "port \"invalid\"\nport \"7000\"" }) |contents| {
+        try testing.expectError(Error.InvalidValue, parse(&arena, contents));
+    }
 }
 
 test "parse preserves arity, value, and name errors for every occurrence" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_]struct { contents: []const u8, err: Error }{
         .{ .contents = "port \t\r\n", .err = Error.MalformedLine },
         .{ .contents = "unknown", .err = Error.MalformedLine },
@@ -585,9 +665,9 @@ test "parse preserves arity, value, and name errors for every occurrence" {
         .{ .contents = "save 60 1 " ++ ("extra " ** 24), .err = Error.MalformedLine },
         .{ .contents = "port 7000 extra", .err = Error.InvalidValue },
         .{ .contents = "port 7000 # inline", .err = Error.InvalidValue },
-        .{ .contents = "port \"7000\"", .err = Error.InvalidValue },
-        .{ .contents = "appendonly \"yes\"", .err = Error.InvalidValue },
-        .{ .contents = "appendfsync \"always\"", .err = Error.InvalidValue },
+        .{ .contents = "port \" 7000 \"", .err = Error.InvalidValue },
+        .{ .contents = "appendonly \"YES\"", .err = Error.InvalidValue },
+        .{ .contents = "appendfsync \"Always\"", .err = Error.InvalidValue },
         .{ .contents = "port invalid\nport 7000", .err = Error.InvalidValue },
         .{ .contents = "appendonly YES\nappendonly yes", .err = Error.InvalidValue },
         .{ .contents = "save 0 1\nsave 60 1", .err = Error.InvalidValue },
@@ -598,12 +678,14 @@ test "parse preserves arity, value, and name errors for every occurrence" {
         .{ .contents = "version yes", .err = Error.UnknownDirective },
         .{ .contents = "healthcheck yes", .err = Error.UnknownDirective },
     }) |case| {
-        try testing.expectError(case.err, parse(testing.allocator, case.contents));
+        try testing.expectError(case.err, parse(&arena, case.contents));
     }
 }
 
 test "file save clearing removes prior rules and preserves later rules" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const first_rule = &[_]Config.SaveRule{.{ .seconds = 60, .changes = 1 }};
     const later_rules = &[_]Config.SaveRule{
         .{ .seconds = 300, .changes = 10 },
@@ -621,16 +703,42 @@ test "file save clearing removes prior rules and preserves later rules" {
         .{ .contents = "save 60 1\nsave \t\"\" \r\nsave 300 10\nsave 900 100", .rules = later_rules },
         .{ .contents = "save 60 1\nsave \"\"\nsave \"\"\nsave 300 10\nsave 900 100", .rules = later_rules },
     }) |case| {
-        const config = try parse(testing.allocator, case.contents);
-        defer testing.allocator.free(config.save_rules);
+        const config = try parse(&arena, case.contents);
         var expected = Config.default();
         expected.save_rules = case.rules;
         try testing.expectEqualDeep(expected, config);
     }
 }
 
+test "parse collects mixed quoted save tokens around clears" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const config = try parse(&arena, "dir \"data files\"\nappendonly \"yes\"\nsave \"60\" \"1\"\nsave \"\"\nsave \"300\" 10\nsave 900 \"100\"");
+    try testing.expectEqualStrings("data files", config.dir);
+    try testing.expect(config.append_only);
+    try testing.expectEqualDeep(&[_]Config.SaveRule{
+        .{ .seconds = 300, .changes = 10 },
+        .{ .seconds = 900, .changes = 100 },
+    }, config.save_rules);
+
+    for ([_][]const u8{
+        "save \"60\"1",
+        "save \"60\"\"1\"",
+        "save \"60\\q\" 1",
+        "save \"60 1\"",
+    }) |contents| {
+        try testing.expectError(Error.MalformedLine, parse(&arena, contents));
+    }
+    for ([_][]const u8{ "save \"0\" \"1\"\nsave \"\"", "save \"60\" \"0\"\nsave \"\"", "save \"60\" \"1\"\nsave \"\"\nsave \"300\" invalid" }) |contents| {
+        try testing.expectError(Error.InvalidValue, parse(&arena, contents));
+    }
+}
+
 test "file save rejects missing values and alternatives to exact empty quotes" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const prefixes = [_][]const u8{
         "",
         "save 60 1\n",
@@ -641,15 +749,15 @@ test "file save rejects missing values and alternatives to exact empty quotes" {
         .{ .contents = "save", .err = error.MalformedLine },
         .{ .contents = "save \t\r", .err = error.MalformedLine },
         .{ .contents = "save ''", .err = error.MalformedLine },
-        .{ .contents = "save \" \"", .err = error.InvalidValue },
-        .{ .contents = "save \"\t\"", .err = error.InvalidValue },
+        .{ .contents = "save \" \"", .err = error.MalformedLine },
+        .{ .contents = "save \"\t\"", .err = error.MalformedLine },
         .{ .contents = "save \\\"\\\"", .err = error.MalformedLine },
         .{ .contents = "save \"\"1", .err = error.MalformedLine },
         .{ .contents = "save \"\" 1", .err = error.InvalidValue },
         .{ .contents = "save \"\" \"\"", .err = error.InvalidValue },
         .{ .contents = "save \"\" 60 1", .err = error.MalformedLine },
         .{ .contents = "save \"\" #comment", .err = error.InvalidValue },
-        .{ .contents = "save \"60 1\"", .err = error.InvalidValue },
+        .{ .contents = "save \"60 1\"", .err = error.MalformedLine },
         .{ .contents = "save 0 1", .err = error.InvalidValue },
         .{ .contents = "save 60 0", .err = error.InvalidValue },
         .{ .contents = "save 60 invalid", .err = error.InvalidValue },
@@ -658,24 +766,24 @@ test "file save rejects missing values and alternatives to exact empty quotes" {
         for (invalid_lines) |case| {
             const contents = try std.fmt.allocPrint(testing.allocator, "{s}{s}\nsave \"\"\nsave 300 10", .{ prefix, case.contents });
             defer testing.allocator.free(contents);
-            try testing.expectError(case.err, parse(testing.allocator, contents));
+            try testing.expectError(case.err, parse(&arena, contents));
         }
     }
 }
 
-test "parse discards accumulated states and token storage after file errors" {
+test "parse preserves file errors with caller cleanup" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_]struct { contents: []const u8, err: Error }{
         .{ .contents = "save 60 1\nunknown value", .err = Error.UnknownDirective },
         .{ .contents = "save 60 1\nport", .err = Error.MalformedLine },
         .{ .contents = "save 60 1\nsave 300 10 extra", .err = Error.MalformedLine },
         .{ .contents = "save 60 1\nport invalid", .err = Error.InvalidValue },
         .{ .contents = "save 60 1\nsave 0 1", .err = Error.InvalidValue },
+        .{ .contents = "dir \"a\\\"b\"\nsave \"60\" \"1\"\ndir \"bad\\q\"", .err = Error.MalformedLine },
     }) |case| {
-        var failing = testing.FailingAllocator.init(testing.allocator, .{});
-        try testing.expectError(case.err, parse(failing.allocator(), case.contents));
-        try testing.expect(failing.allocated_bytes > 0);
-        try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        try testing.expectError(case.err, parse(&arena, case.contents));
     }
 }
 
@@ -683,10 +791,10 @@ test "parse cleans up every allocation failure in file application and finish" {
     const Run = struct {
         fn run(backing_allocator: std.mem.Allocator) !void {
             var failing_resize = std.testing.FailingAllocator.init(backing_allocator, .{ .resize_fail_index = 0 });
-            const allocator = failing_resize.allocator();
+            var arena = std.heap.ArenaAllocator.init(failing_resize.allocator());
+            defer arena.deinit();
             const contents = "port 7000\ndir data files\n" ++ ("save 60 1\n" ** 64);
-            const config = try parse(allocator, contents);
-            defer allocator.free(config.save_rules);
+            const config = try parse(&arena, contents);
             try std.testing.expectEqual(7000, config.port);
             try std.testing.expectEqualStrings("data files", config.dir);
             try std.testing.expectEqual(64, config.save_rules.len);
