@@ -414,6 +414,9 @@ test "find excludes process options, CLI prefixes, and unsupported names" {
 test "single-value preparation and application agree with file parsing for every setting" {
     const testing = std.testing;
     const ConfigParser = @import("../config_parser.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     const cases = [_]struct { line: []const u8, value: Value }{
         .{ .line = "bind example host", .value = .{ .string = "example host" } },
         .{ .line = "port 7000", .value = .{ .u16_value = 7000 } },
@@ -451,7 +454,7 @@ test "single-value preparation and application agree with file parsing for every
             .config = &config,
         };
         try prepared.definition.apply(&context, prepared.value);
-        const expected = try ConfigParser.parse(testing.failing_allocator, case.line);
+        const expected = try ConfigParser.parse(&arena, case.line);
         try testing.expectEqualDeep(expected, config);
     }
 }

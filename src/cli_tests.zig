@@ -6,12 +6,14 @@ const registry = @import("config/registry.zig");
 
 test "CLI consumes required values by position without changing option parsing" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][*:0]const u8{ "-data", "--", "--ready-fd", "healthcheck", "--dir=value" }) |value| {
-        var cli = try Cli.parse(testing.allocator, .{ .vector = &.{ "kgcache", "--dir", value, "--port", "7000" } });
+        var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--dir", value, "--port", "7000" } });
         defer cli.deinit();
         try testing.expect(cli.config_path == null);
         try testing.expect(cli.ready_fd == null);
-        const config = try ConfigLoader.load(testing.io, testing.failing_allocator, null, cli.overrides.items);
+        const config = try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);
         try testing.expectEqualStrings(std.mem.span(value), config.dir);
         try testing.expectEqual(7000, config.port);
     }
@@ -19,6 +21,8 @@ test "CLI consumes required values by position without changing option parsing" 
 
 test "CLI rejects a bare double hyphen at an argument boundary" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const invocations = [_][]const [*:0]const u8{
         &.{ "kgcache", "--" },
         &.{ "kgcache", "--", "-cache.conf" },
@@ -29,7 +33,7 @@ test "CLI rejects a bare double hyphen at an argument boundary" {
         &.{ "kgcache", "--", "healthcheck" },
     };
     for (invocations) |argv| {
-        try testing.expectError(error.UnknownFlag, Cli.parse(testing.allocator, .{ .vector = argv }));
+        try testing.expectError(error.UnknownFlag, Cli.parse(&arena, .{ .vector = argv }));
     }
 }
 
@@ -53,10 +57,10 @@ test "config path placement preserves file before CLI precedence" {
     for (invocations) |argv| {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
-        var cli = try Cli.parse(testing.allocator, .{ .vector = argv });
+        var cli = try Cli.parse(&arena, .{ .vector = argv });
         defer cli.deinit();
         try testing.expectEqualStrings(path, cli.config_path.?);
-        const config = try ConfigLoader.load(testing.io, arena.allocator(), cli.config_path, cli.overrides.items);
+        const config = try ConfigLoader.load(testing.io, &arena, cli.config_path, cli.overrides.items);
         var expected = Config.default();
         expected.port = 8000;
         expected.num_databases = 4;
@@ -67,8 +71,10 @@ test "config path placement preserves file before CLI precedence" {
 
 test "CLI leaves a trailing positional token after a complete save option" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     for ([_][*:0]const u8{ "cache.conf", "2" }) |path| {
-        var cli = try Cli.parse(testing.allocator, .{ .vector = &.{ "kgcache", "--save", "60", "1", path } });
+        var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--save", "60", "1", path } });
         defer cli.deinit();
         try testing.expectEqualStrings(std.mem.span(path), cli.config_path.?);
         try testing.expectEqual(1, cli.overrides.items.len);
@@ -117,13 +123,11 @@ test "CLI save rules replace file rules and apply clears in input order" {
             const start: usize = if (with_file) 2 else 1;
             if (with_file) argv[1] = path_arg.ptr;
             @memcpy(argv[start..][0..case.args.len], case.args);
-            var cli = try Cli.parse(testing.allocator, .{ .vector = argv[0 .. start + case.args.len] });
-            defer cli.deinit();
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
-            const allocator = if (with_file) arena.allocator() else testing.allocator;
-            const config = try ConfigLoader.load(testing.io, allocator, cli.config_path, cli.overrides.items);
-            defer if (!with_file) allocator.free(config.save_rules);
+            var cli = try Cli.parse(&arena, .{ .vector = argv[0 .. start + case.args.len] });
+            defer cli.deinit();
+            const config = try ConfigLoader.load(testing.io, &arena, cli.config_path, cli.overrides.items);
             var expected = Config.default();
             if (with_file) {
                 expected.port = 7000;
@@ -138,6 +142,8 @@ test "CLI save rules replace file rules and apply clears in input order" {
 
 test "CLI rejects invalid save rules after valid rules and clears" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const prefixes = [_][]const [*:0]const u8{
         &.{},
         &.{ "--save", "60", "1" },
@@ -160,14 +166,16 @@ test "CLI rejects invalid save rules after valid rules and clears" {
             argv[1] = "scratch-missing-cli-config.conf";
             @memcpy(argv[2..][0..prefix.len], prefix);
             @memcpy(argv[2 + prefix.len ..][0..case.args.len], case.args);
-            try testing.expectError(case.err, Cli.parse(testing.allocator, .{ .vector = argv[0 .. 2 + prefix.len + case.args.len] }));
+            try testing.expectError(case.err, Cli.parse(&arena, .{ .vector = argv[0 .. 2 + prefix.len + case.args.len] }));
         }
     }
 }
 
 test "CLI prepares every directive in argv order beside process arguments" {
     const testing = std.testing;
-    var cli = try Cli.parse(testing.allocator, .{ .vector = &.{
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cli = try Cli.parse(&arena, .{ .vector = &.{
         "kgcache",                 "--bind",                            "0.0.0.0",                   "--port",                     "7000",
         "--reuse-address",         "no",                                "--connection-buffer-size",  "2048",                       "--databases",
         "4",                       "--dir",                             "data files",                "--dbfilename",               "state.kgc",
@@ -188,8 +196,7 @@ test "CLI prepares every directive in argv order beside process arguments" {
         try testing.expectEqualStrings(definition.name, prepared.definition.name);
     }
 
-    const config = try ConfigLoader.load(testing.io, testing.allocator, null, cli.overrides.items);
-    defer testing.allocator.free(config.save_rules);
+    const config = try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);
     var expected = Config.default();
     expected.bind_address = "0.0.0.0";
     expected.port = 7001;
@@ -215,41 +222,69 @@ test "CLI prepares every directive in argv order beside process arguments" {
     try testing.expectEqualDeep(expected, config);
 }
 
-test "CLI deinit releases owned storage while Config keeps borrowing argv bytes" {
+test "CLI preserves literal values and config path after argv is released" {
     const testing = std.testing;
-    const directory = try testing.allocator.dupeZ(u8, "data files");
-    defer testing.allocator.free(directory);
-    var failing = testing.FailingAllocator.init(testing.allocator, .{});
-    const config = blk: {
-        var cli = try Cli.parse(failing.allocator(), .{ .vector = &.{ "kgcache", "--dir", directory.ptr } });
-        defer cli.deinit();
-        try testing.expect(failing.allocated_bytes > failing.freed_bytes);
-        try testing.expect(cli.overrides.items[0].value.string.ptr == directory.ptr);
-        break :blk try ConfigLoader.load(testing.io, testing.failing_allocator, null, cli.overrides.items);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const original_path = "config \"files\"\\cache.conf";
+    const original_directory = "\"data\\files\"\t";
+
+    var cli = blk: {
+        const path = try testing.allocator.dupeZ(u8, original_path);
+        defer testing.allocator.free(path);
+        const directory = try testing.allocator.dupeZ(u8, original_directory);
+        defer testing.allocator.free(directory);
+        const parsed = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", path.ptr, "--dir", directory.ptr, "--port", "7000" } });
+        @memset(path, 'x');
+        @memset(directory, 'y');
+        break :blk parsed;
     };
-    try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
-    try testing.expect(config.dir.ptr == directory.ptr);
-    directory[0] = 'D';
-    try testing.expectEqualStrings("Data files", config.dir);
+    defer cli.deinit();
+
+    try testing.expectEqualStrings(original_path, cli.config_path.?);
+    const config = try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);
+    try testing.expectEqualStrings(original_directory, config.dir);
+    try testing.expectEqual(7000, config.port);
 }
 
-test "CLI cleans up every allocation failure in argument storage and prepared list growth" {
+test "CLI cleanup leaves loaded Config usable after argv is released" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const config = blk: {
+        const directory = try testing.allocator.dupeZ(u8, "data files");
+        defer testing.allocator.free(directory);
+        var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--dir", directory.ptr } });
+        defer cli.deinit();
+        break :blk try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);
+    };
+    try testing.expectEqualStrings("data files", config.dir);
+}
+
+test "CLI caller cleanup covers allocation failures with retained values and config path" {
     const Run = struct {
         fn run(backing_allocator: std.mem.Allocator) !void {
             var failing_resize = std.testing.FailingAllocator.init(backing_allocator, .{ .resize_fail_index = 0 });
-            var argv: [1 + 64 * 3][*:0]const u8 = undefined;
-            argv[0] = "kgcache";
+            const directory = "x" ** 4096;
+            var argv: [4 + 64 * 3][*:0]const u8 = undefined;
+            argv[0..3].* = .{ "kgcache", "--dir", directory };
             for (0..64) |index| {
-                const start = 1 + index * 3;
+                const start = 3 + index * 3;
                 argv[start..][0..3].* = .{ "--save", "60", "1" };
             }
-            var cli = try Cli.parse(failing_resize.allocator(), .{ .vector = &argv });
+            argv[3 + 64 * 3] = "config files.conf";
+            var arena = std.heap.ArenaAllocator.init(failing_resize.allocator());
+            defer arena.deinit();
+            var cli = try Cli.parse(&arena, .{ .vector = &argv });
             defer cli.deinit();
-            try std.testing.expectEqual(64, cli.overrides.items.len);
-            for (cli.overrides.items) |prepared| {
+            try std.testing.expectEqualStrings("config files.conf", cli.config_path.?);
+            const config = try ConfigLoader.load(std.testing.io, &arena, null, cli.overrides.items);
+            try std.testing.expectEqualStrings(directory, config.dir);
+            try std.testing.expectEqual(64, config.save_rules.len);
+            for (config.save_rules) |rule| {
                 try std.testing.expectEqualDeep(
                     Config.SaveRule{ .seconds = 60, .changes = 1 },
-                    prepared.value.save.rule,
+                    rule,
                 );
             }
         }

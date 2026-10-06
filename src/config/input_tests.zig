@@ -11,6 +11,8 @@ fn expectEquivalentInput(
     expected: anyerror!Config,
 ) !void {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
     const contents = try std.fmt.allocPrint(testing.allocator, " \t{s}\t {s} \r\n", .{ name, file_value });
     defer testing.allocator.free(contents);
     const flag = try std.fmt.allocPrint(testing.allocator, "--{s}", .{name});
@@ -24,17 +26,15 @@ fn expectEquivalentInput(
     for (cli_values, argv[2..]) |value, *arg| arg.* = value.ptr;
 
     if (expected) |wanted| {
-        const file_config = try ConfigParser.parse(testing.allocator, contents);
-        defer testing.allocator.free(file_config.save_rules);
+        const file_config = try ConfigParser.parse(&arena, contents);
         try testing.expectEqualDeep(wanted, file_config);
-        var cli = try Cli.parse(testing.allocator, .{ .vector = argv });
+        var cli = try Cli.parse(&arena, .{ .vector = argv });
         defer cli.deinit();
-        const cli_config = try ConfigLoader.load(testing.io, testing.allocator, null, cli.overrides.items);
-        defer testing.allocator.free(cli_config.save_rules);
+        const cli_config = try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);
         try testing.expectEqualDeep(wanted, cli_config);
     } else |err| {
-        try testing.expectError(err, ConfigParser.parse(testing.allocator, contents));
-        try testing.expectError(err, Cli.parse(testing.allocator, .{ .vector = argv }));
+        try testing.expectError(err, ConfigParser.parse(&arena, contents));
+        try testing.expectError(err, Cli.parse(&arena, .{ .vector = argv }));
     }
 }
 
@@ -144,13 +144,13 @@ test "file and CLI persistence settings enforce the same path rules" {
 
 test "file quotes remain literal while CLI receives shell grouped values" {
     const testing = std.testing;
-    const file_config = try ConfigParser.parse(testing.allocator, "dir \"data files\"");
-    defer testing.allocator.free(file_config.save_rules);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const file_config = try ConfigParser.parse(&arena, "dir \"data files\"");
     try testing.expectEqualStrings("\"data files\"", file_config.dir);
-    var cli = try Cli.parse(testing.allocator, .{ .vector = &.{ "kgcache", "--dir", "data files", "--port", "7000", "--appendonly", "yes", "--appendfsync", "always" } });
+    var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--dir", "data files", "--port", "7000", "--appendonly", "yes", "--appendfsync", "always" } });
     defer cli.deinit();
-    const cli_config = try ConfigLoader.load(testing.io, testing.allocator, null, cli.overrides.items);
-    defer testing.allocator.free(cli_config.save_rules);
+    const cli_config = try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);
     var expected = Config.default();
     expected.dir = "data files";
     expected.port = 7000;
@@ -158,16 +158,16 @@ test "file quotes remain literal while CLI receives shell grouped values" {
     expected.append_fsync = .always;
     try testing.expectEqualDeep(expected, cli_config);
     for ([_][]const u8{ "port \"7000\"", "appendonly \"yes\"", "appendfsync \"always\"" }) |contents| {
-        try testing.expectError(error.InvalidValue, ConfigParser.parse(testing.allocator, contents));
+        try testing.expectError(error.InvalidValue, ConfigParser.parse(&arena, contents));
     }
     for ([_][*:0]const u8{ "dir", "dbfilename", "appenddirname", "appendfilename" }) |name| {
         const contents = try std.fmt.allocPrint(testing.allocator, "{s} \t\r\n", .{name});
         defer testing.allocator.free(contents);
-        try testing.expectError(error.MalformedLine, ConfigParser.parse(testing.allocator, contents));
+        try testing.expectError(error.MalformedLine, ConfigParser.parse(&arena, contents));
         const flag = try std.fmt.allocPrint(testing.allocator, "--{s}", .{name});
         defer testing.allocator.free(flag);
         const flag_arg = try testing.allocator.dupeZ(u8, flag);
         defer testing.allocator.free(flag_arg);
-        try testing.expectError(error.InvalidValue, Cli.parse(testing.allocator, .{ .vector = &.{ "kgcache", flag_arg.ptr, "" } }));
+        try testing.expectError(error.InvalidValue, Cli.parse(&arena, .{ .vector = &.{ "kgcache", flag_arg.ptr, "" } }));
     }
 }

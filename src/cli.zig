@@ -1,4 +1,5 @@
 const std = @import("std");
+const ConfigDirectiveParser = @import("config/directive_parser.zig");
 const registry = @import("config/registry.zig");
 const directive_definition = @import("config/definition.zig");
 const PreparedDirective = directive_definition.PreparedDirective;
@@ -20,7 +21,8 @@ config_path: ?[]const u8 = null,
 ready_fd: ?std.posix.fd_t = null,
 overrides: std.ArrayList(PreparedDirective) = .empty,
 
-pub fn parse(allocator: std.mem.Allocator, process_args: std.process.Args) Error!Cli {
+pub fn parse(arena: *std.heap.ArenaAllocator, process_args: std.process.Args) Error!Cli {
+    const allocator = arena.allocator();
     var args = process_args.iterate();
     _ = args.skip();
 
@@ -56,7 +58,7 @@ pub fn parse(allocator: std.mem.Allocator, process_args: std.process.Args) Error
 
             if (count > remaining.len) return error.MissingValue;
 
-            const prepared = try registry.prepare(definition, remaining[0..count]);
+            const prepared = try ConfigDirectiveParser.prepareArgs(arena, definition, remaining[0..count]);
 
             try cli.overrides.append(allocator, prepared);
             index += count;
@@ -68,13 +70,14 @@ pub fn parse(allocator: std.mem.Allocator, process_args: std.process.Args) Error
         if (std.mem.eql(u8, arg, "healthcheck")) return error.HealthcheckNotImplemented;
 
         if (cli.config_path != null) return error.DuplicateConfigPath;
-        cli.config_path = arg;
+
+        cli.config_path = try allocator.dupe(u8, arg);
     }
 
     return cli;
 }
 
-/// Free only the prepared list. Config strings continue to borrow argv bytes.
+/// Retained values and config path stay in the caller's arena.
 pub fn deinit(self: *Cli) void {
     self.overrides.deinit(self.allocator);
     self.* = undefined;
@@ -90,20 +93,22 @@ fn parseReadyFd(value: []const u8) error{InvalidReadyFd}!std.posix.fd_t {
     return fd;
 }
 
-fn parseTestArgs(argv: []const [*:0]const u8) Error!Cli {
-    return parse(std.testing.allocator, .{ .vector = argv });
+fn parseTestArgs(arena: *std.heap.ArenaAllocator, argv: []const [*:0]const u8) Error!Cli {
+    return parse(arena, .{ .vector = argv });
 }
 
 test "CLI accepts default and config-path invocations" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    var defaults = try parseTestArgs(&.{"kgcache"});
+    var defaults = try parseTestArgs(&arena, &.{"kgcache"});
     defer defaults.deinit();
     try testing.expect(defaults.config_path == null);
     try testing.expect(defaults.ready_fd == null);
 
     for ([_][*:0]const u8{ "cache.conf", "./-cache.conf" }) |path| {
-        var with_config = try parseTestArgs(&.{ "kgcache", path });
+        var with_config = try parseTestArgs(&arena, &.{ "kgcache", path });
         defer with_config.deinit();
         try testing.expectEqualStrings(std.mem.span(path), with_config.config_path.?);
         try testing.expect(with_config.ready_fd == null);
@@ -112,18 +117,20 @@ test "CLI accepts default and config-path invocations" {
 
 test "CLI accepts a decimal readiness descriptor and optional config path" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
 
-    var ready_only = try parseTestArgs(&.{ "kgcache", "--ready-fd", "3" });
+    var ready_only = try parseTestArgs(&arena, &.{ "kgcache", "--ready-fd", "3" });
     defer ready_only.deinit();
     try testing.expectEqual(3, ready_only.ready_fd.?);
     try testing.expect(ready_only.config_path == null);
 
-    var with_config = try parseTestArgs(&.{ "kgcache", "--ready-fd", "0042", "cache.conf" });
+    var with_config = try parseTestArgs(&arena, &.{ "kgcache", "--ready-fd", "0042", "cache.conf" });
     defer with_config.deinit();
     try testing.expectEqual(42, with_config.ready_fd.?);
     try testing.expectEqualStrings("cache.conf", with_config.config_path.?);
 
-    var config_first = try parseTestArgs(&.{ "kgcache", "cache.conf", "--ready-fd", "0042" });
+    var config_first = try parseTestArgs(&arena, &.{ "kgcache", "cache.conf", "--ready-fd", "0042" });
     defer config_first.deinit();
     try testing.expectEqual(with_config.ready_fd.?, config_first.ready_fd.?);
     try testing.expectEqualStrings(with_config.config_path.?, config_first.config_path.?);
@@ -131,6 +138,8 @@ test "CLI accepts a decimal readiness descriptor and optional config path" {
 
 test "CLI rejects invalid argument shapes" {
     const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const cases = .{
         .{ error.UnknownFlag, &.{ "kgcache", "--unknown" } },
         .{ error.UnknownFlag, &.{ "kgcache", "-x" } },
@@ -180,6 +189,6 @@ test "CLI rejects invalid argument shapes" {
     };
 
     inline for (cases) |case| {
-        try testing.expectError(case[0], parseTestArgs(case[1]));
+        try testing.expectError(case[0], parseTestArgs(&arena, case[1]));
     }
 }

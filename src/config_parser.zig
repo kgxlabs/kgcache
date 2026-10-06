@@ -1,8 +1,8 @@
 const std = @import("std");
 const Config = @import("config.zig");
 const ConfigBuilder = @import("config/builder.zig");
+const ConfigDirectiveParser = @import("config/directive_parser.zig");
 const registry = @import("config/registry.zig");
-const directive_definition = @import("config/definition.zig");
 
 pub const Error = error{
     MalformedLine,
@@ -11,20 +11,17 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub fn parse(allocator: std.mem.Allocator, contents: []const u8) Error!Config {
-    var builder = ConfigBuilder.init(allocator);
+pub fn parse(arena: *std.heap.ArenaAllocator, contents: []const u8) Error!Config {
+    var builder = ConfigBuilder.init(arena.allocator());
     defer builder.deinit();
 
-    try apply(&builder, contents);
+    try apply(&builder, arena, contents);
     return builder.finish();
 }
 
-pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
+pub fn apply(builder: *ConfigBuilder, arena: *std.heap.ArenaAllocator, contents: []const u8) Error!void {
     std.debug.assert(builder.status == .building);
     errdefer builder.status = .failed;
-
-    var token_values: std.ArrayList([]const u8) = .empty;
-    defer token_values.deinit(builder.allocator);
 
     var lines = std.mem.splitScalar(u8, contents, '\n');
     while (lines.next()) |raw_line| {
@@ -37,36 +34,17 @@ pub fn apply(builder: *ConfigBuilder, contents: []const u8) Error!void {
         if (value.len == 0) return Error.MalformedLine;
 
         const definition = registry.find(directive_name) orelse return Error.UnknownDirective;
-        const normalize_empty = definition.input.normalize_empty_file_value and std.mem.eql(u8, value, "\"\"");
-        var normalized_value = value;
-        if (normalize_empty) {
-            normalized_value = "";
-        }
+        const prepared = ConfigDirectiveParser.prepareFile(arena, definition, value) catch |err| return mapPreparationError(err);
 
-        const unsplit_value = [_][]const u8{normalized_value};
-        const values: []const []const u8 = if (normalize_empty) &unsplit_value else switch (definition.input.file_values) {
-            .unsplit_value => &unsplit_value,
-            .tokens => blk: {
-                token_values.clearRetainingCapacity();
-
-                var tokens = std.mem.tokenizeAny(u8, value, " \t");
-                while (tokens.next()) |token| try token_values.append(builder.allocator, token);
-                break :blk token_values.items;
-            },
-        };
-
-        const prepared = registry.prepare(
-            definition,
-            values,
-        ) catch |err| return mapParseError(err);
         try builder.apply(prepared, .file);
     }
 }
 
-fn mapParseError(err: directive_definition.ParseError) Error {
+fn mapPreparationError(err: ConfigDirectiveParser.FileError) Error {
     return switch (err) {
-        error.InvalidArity => Error.MalformedLine,
+        error.InvalidArity, error.MalformedLine => Error.MalformedLine,
         error.InvalidValue => Error.InvalidValue,
+        error.OutOfMemory => Error.OutOfMemory,
     };
 }
 
