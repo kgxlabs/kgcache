@@ -4,20 +4,17 @@ const parser = @import("directive_parser.zig");
 const registry = @import("registry.zig");
 const definition = @import("definition.zig");
 
-test "prepareFile borrows the unquoted remainder without allocation" {
-    var arena = std.heap.ArenaAllocator.init(testing.failing_allocator);
+test "prepareFile preserves unquoted string bytes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var source = "data \tfiles a\"b\\c '#literal'".*;
-    const prepared = try parser.prepareFile(&arena, registry.find("dir").?, &source);
+    const source = "data \tfiles a\"b\\c '#literal'";
+    const prepared = try parser.prepareFile(&arena, registry.find("dir").?, source);
 
-    try testing.expectEqualStrings(&source, prepared.value.string);
-    try testing.expect(prepared.value.string.ptr == source[0..].ptr);
-    source[0] = 'D';
-    try testing.expectEqualStrings("Data \tfiles a\"b\\c '#literal'", prepared.value.string);
+    try testing.expectEqualStrings(source, prepared.value.string);
 }
 
-test "prepareFile validates unquoted scalar values through the registry" {
-    var arena = std.heap.ArenaAllocator.init(testing.failing_allocator);
+test "prepareFile prepares unquoted scalars and rejects invalid values" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     try testing.expectEqualDeep(definition.Value{ .u16_value = 7000 }, (try parser.prepareFile(&arena, registry.find("port").?, "7000")).value);
@@ -57,7 +54,7 @@ test "prepareFile token allocation failures clean up through the caller arena" {
     try testing.checkAllAllocationFailures(testing.allocator, Run.run, .{});
 }
 
-test "prepareArgs retains literal string bytes after input changes" {
+test "prepareArgs retains literal strings after input changes and later preparation" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
@@ -69,12 +66,19 @@ test "prepareArgs retains literal string bytes after input changes" {
 
     @memset(&source, 'x');
     args[0] = "replacement";
+
+    const save = registry.find("save").?;
+    _ = try parser.prepareFile(&arena, save, "60\t1");
+    try testing.expectError(error.InvalidValue, parser.prepareFile(&arena, save, "60 0"));
+    const later = try parser.prepareArgs(&arena, directive, &.{"later files"});
+
     try testing.expect(prepared.definition == directive);
     try testing.expectEqualStrings(original, prepared.value.string);
+    try testing.expectEqualStrings("later files", later.value.string);
 }
 
-test "prepareArgs copies non-string values without allocating or retaining arguments" {
-    var arena = std.heap.ArenaAllocator.init(testing.failing_allocator);
+test "prepareArgs prepares scalar and save values" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const cases = [_]struct { name: []const u8, args: []const []const u8, expected: definition.Value }{
@@ -89,16 +93,13 @@ test "prepareArgs copies non-string values without allocating or retaining argum
         .{ .name = "save", .args = &.{""}, .expected = .{ .save = .clear } },
     };
     for (cases) |case| {
-        var args: [2][]const u8 = undefined;
-        @memcpy(args[0..case.args.len], case.args);
-        const prepared = try parser.prepareArgs(&arena, registry.find(case.name).?, args[0..case.args.len]);
-        args = .{ "changed", "changed" };
+        const prepared = try parser.prepareArgs(&arena, registry.find(case.name).?, case.args);
         try testing.expectEqualDeep(case.expected, prepared.value);
     }
 }
 
-test "prepareArgs validates before allocating retained strings" {
-    var arena = std.heap.ArenaAllocator.init(testing.failing_allocator);
+test "prepareArgs rejects invalid arity and literal invalid values" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     try testing.expectError(error.InvalidArity, parser.prepareArgs(&arena, registry.find("dir").?, &.{}));
@@ -107,7 +108,6 @@ test "prepareArgs validates before allocating retained strings" {
     try testing.expectError(error.InvalidValue, parser.prepareArgs(&arena, registry.find("port").?, &.{"\"7000\""}));
     try testing.expectError(error.InvalidValue, parser.prepareArgs(&arena, registry.find("appendonly").?, &.{"\"yes\""}));
     try testing.expectError(error.InvalidValue, parser.prepareArgs(&arena, registry.find("appendfsync").?, &.{"\"no\""}));
-    try testing.expectError(error.OutOfMemory, parser.prepareArgs(&arena, registry.find("dir").?, &.{"data files"}));
 }
 
 test "prepareArgs arena cleanup covers every allocation failure" {

@@ -65,12 +65,30 @@ test {
     std.testing.refAllDecls(@This());
     const file: *const fn (*std.heap.ArenaAllocator, *const definition.Definition, []const u8) FileError!definition.PreparedDirective = prepareFile;
     const args: *const fn (*std.heap.ArenaAllocator, *const definition.Definition, []const []const u8) PrepareError!definition.PreparedDirective = prepareArgs;
-    const decode: *const fn (*std.heap.ArenaAllocator, []const u8) SyntaxError![]const u8 = decodeUnsplit;
-    const append: *const fn (*std.heap.ArenaAllocator, []const u8, *std.ArrayList([]const u8)) SyntaxError!void = appendTokens;
     _ = file;
     _ = args;
-    _ = decode;
-    _ = append;
+}
+
+test "decodeUnsplit preserves unquoted bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    for ([_][]const u8{ "", " \t ", "data files", " a\"b\\c '#literal'\t " }) |text| {
+        const decoded = try decodeUnsplit(&arena, text);
+        try std.testing.expectEqualStrings(text, decoded);
+    }
+}
+
+test "appendTokens produces no values for empty input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var values: std.ArrayList([]const u8) = .empty;
+    defer values.deinit(arena.allocator());
+
+    for ([_][]const u8{ "", " \t\t " }) |text| {
+        try appendTokens(&arena, text, &values);
+        try std.testing.expectEqual(0, values.items.len);
+    }
 }
 
 test "appendTokens preserves unquoted bytes and releases storage on allocation failures" {
