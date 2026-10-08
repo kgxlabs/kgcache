@@ -1,31 +1,9 @@
 const std = @import("std");
 const legacy = @import("../resp.zig");
 const CommandFrame = @import("command_frame.zig");
-const request_decoder = @import("request_decoder.zig");
 const Resp = @import("interface.zig");
 
 pub const ReplyError = std.mem.Allocator.Error || Resp.EncodeError;
-
-pub fn decode(input: []const u8, allocator: std.mem.Allocator, limits: request_decoder.Limits) request_decoder.DecodeError!request_decoder.DecodeResult {
-    if (input.len == 0) return .incomplete;
-    if (input[0] != '*') return error.ExpectedArray;
-    const parsed = legacy.parseValue(allocator, input) catch |err| switch (err) {
-        error.Incomplete => return .incomplete,
-        error.OutOfMemory => return error.OutOfMemory,
-        error.MalformedSize, error.NotInteger => return error.InvalidBulkLength,
-        error.InvalidType => return error.ExpectedBulkString,
-        error.IncorrectToken, error.Malformed, error.ExceededSize => return error.InvalidBulkTerminator,
-    };
-    defer legacy.freeValue(allocator, parsed.value);
-    if (parsed.consumed > limits.max_frame_bytes) return error.FrameTooLarge;
-    if (parsed.value.array) |items| {
-        if (items.len > limits.max_elements) return error.TooManyElements;
-    }
-    return .{ .complete = .{
-        .frame = try commandFrame(allocator, parsed.value),
-        .consumed = parsed.consumed,
-    } };
-}
 
 pub fn writeCommand(writer: *std.Io.Writer, frame: CommandFrame) @import("resp_command_encoder.zig").CommandEncodeError!void {
     const count = std.math.add(usize, frame.arguments.len, 1) catch return error.LengthOverflow;
@@ -42,26 +20,6 @@ fn writeBulk(writer: *std.Io.Writer, bytes: []const u8) std.Io.Writer.Error!void
     try writer.print("${d}\r\n", .{bytes.len});
     try writer.writeAll(bytes);
     try writer.writeAll("\r\n");
-}
-
-pub fn commandFrame(allocator: std.mem.Allocator, value: legacy.RESPValue) request_decoder.DecodeError!CommandFrame {
-    const items = switch (value) {
-        .array => |maybe_items| maybe_items orelse return error.InvalidArrayLength,
-        else => return error.ExpectedArray,
-    };
-    if (items.len == 0) return error.EmptyArray;
-
-    for (items) |item| {
-        switch (item) {
-            .bulk_string => |bytes| if (bytes == null) return error.InvalidBulkLength,
-            else => return error.ExpectedBulkString,
-        }
-    }
-
-    const arguments = try allocator.alloc([]const u8, items.len - 1);
-    for (items[1..], arguments) |item, *argument| argument.* = item.bulk_string.?;
-
-    return .{ .name = items[0].bulk_string.?, .arguments = arguments };
 }
 
 pub fn writeReply(

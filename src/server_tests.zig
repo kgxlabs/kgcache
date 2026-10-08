@@ -518,6 +518,51 @@ test "failed AOF replay frees loaded entries and leaves orphaned files untouched
     try dir.access(testing.io, "appendonly.aof.2.base", .{});
 }
 
+test "malformed AOF headers and terminators fail startup without tail repair" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-malformed-input";
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+    try writeReplayFixture(testing.io, dirname, "");
+
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+    config.aof_load_truncated = true;
+
+    const good = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+    const invalid = [_]struct { bytes: []const u8, err: anyerror }{
+        .{ .bytes = "*x", .err = error.InvalidArrayLength },
+        .{ .bytes = "*0\r\n", .err = error.EmptyArray },
+        .{ .bytes = "*-1\r\n", .err = error.InvalidArrayLength },
+        .{ .bytes = "*1\rX", .err = error.InvalidLineEnding },
+        .{ .bytes = "*1\r\n$-", .err = error.InvalidBulkLength },
+        .{ .bytes = "*1\r\n$x", .err = error.InvalidBulkLength },
+        .{ .bytes = "*1\r\n$9223372036854775808", .err = error.LengthOverflow },
+        .{ .bytes = "*1\r\n:", .err = error.ExpectedBulkString },
+        .{ .bytes = "*1\r\n$1\r\nxX", .err = error.InvalidBulkTerminator },
+    };
+    for (invalid) |item| {
+        for ([_][]const u8{ "", good }) |suffix| {
+            var buffer: [256]u8 = undefined;
+            const contents = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ good, item.bytes, suffix });
+            try dir.writeFile(testing.io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
+            var logger = logging.TestLogger.init();
+
+            try testing.expectError(item.err, Server.create(testing.io, testing.allocator, config, logger.logger()));
+            const preserved = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(preserved);
+            try testing.expectEqualStrings(contents, preserved);
+            for (logger.recordedEvents()) |event| {
+                try testing.expect(!std.mem.startsWith(u8, event.message(), "AOF recovery:"));
+            }
+        }
+    }
+}
+
 test "manifest without incrementals is repaired and server remains writable" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();

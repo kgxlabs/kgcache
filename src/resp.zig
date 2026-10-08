@@ -38,16 +38,6 @@ fn ParseResult(comptime T: type) type {
     };
 }
 
-pub const ParsedValue = ParseResult(RESPValue);
-
-pub fn parseValue(allocator: std.mem.Allocator, data: []const u8) ParseError!ParsedValue {
-    return parseRESP(allocator, data);
-}
-
-pub fn freeValue(allocator: std.mem.Allocator, value: RESPValue) void {
-    deinitValue(allocator, value);
-}
-
 // TODO: Refactor this with tagged unions instead of switch statement
 pub const Parser = struct {
     _pos: usize = 0,

@@ -22,6 +22,7 @@ test {
     _ = @import("protocol/interface_tests.zig");
     _ = @import("protocol/compatibility_tests.zig");
     _ = @import("protocol/legacy_adapter_tests.zig");
+    _ = @import("protocol/request_decoder_tests.zig");
     _ = @import("arity.zig");
     _ = @import("resp.zig");
     _ = @import("commander_tests.zig");
