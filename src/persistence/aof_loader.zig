@@ -48,27 +48,35 @@ pub fn replayBytes(
 ) anyerror!ReplayOutcome {
     var cursor: usize = 0;
     var safe_offset: usize = 0;
+
     while (cursor < contents.len) {
         const outcome = try request_decoder.decode(contents[cursor..], allocator, policy.limits);
         const consumed = switch (outcome) {
             .incomplete => {
                 if (!policy.mayRecoverTail()) return error.TruncatedAof;
+
                 return .{ .incomplete_tail = .{ .safe_offset = safe_offset, .discarded_bytes = contents.len - safe_offset } };
             },
             .complete => |complete| blk: {
                 var decoded = complete;
                 defer decoded.deinit(allocator);
+
                 const command = try commander.init(allocator, decoded.frame);
                 defer command.deinit();
+
                 var result = try command.execute(io, data_store, client_state);
                 defer result.deinit();
+
                 if (result.value == .error_reply) return error.InvalidAofCommandResult;
+
                 break :blk decoded.consumed;
             },
         };
+
         cursor = std.math.add(usize, cursor, consumed) catch return error.LengthOverflow;
         safe_offset = cursor;
     }
+
     return .{ .complete = cursor };
 }
 
@@ -141,21 +149,27 @@ fn replayFile(
         else => return err,
     };
     defer allocator.free(contents);
+
     const policy: ReplayPolicy = .{ .role = role, .recover_truncated_tail = config.aof_load_truncated, .limits = request_decoder.aof_limits };
     const result = try replayBytes(io, allocator, contents, data_store, client_state, policy);
+
     switch (result) {
         .complete => |size| return @intCast(size),
         .incomplete_tail => |tail| {
             if (!policy.mayRecoverTail()) return error.TruncatedAof;
+
             const file = dir.openFile(io, filename, .{ .mode = .read_write }) catch |err| switch (err) {
                 error.FileNotFound => return error.MissingAofFile,
                 else => return err,
             };
             defer file.close(io);
+
             try file.setLength(io, @intCast(tail.safe_offset));
+
             var buffer: [256]u8 = undefined;
             const message = std.fmt.bufPrint(&buffer, "AOF recovery: truncated unfinished tail at offset {d}, discarded {d} bytes", .{ tail.safe_offset, tail.discarded_bytes }) catch unreachable;
             logger.warn(message);
+
             return @intCast(tail.safe_offset);
         },
     }
@@ -284,7 +298,13 @@ test "a truncated final command fails the load when aof-load-truncated is no" {
             config.aof_load_truncated = false;
             var mock = MockStore.init();
             var data_store = mock.store();
-            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
+            var logger = logging.TestLogger.init();
+            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config, logger.logger()));
+            const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(preserved);
+            try testing.expectEqualStrings(truncated_set, preserved);
+            try testing.expectEqual(0, mock.set_calls);
+            try testing.expectEqual(0, logger.recordedEvents().len);
         }
     }.run);
 }
@@ -302,7 +322,13 @@ test "truncation in the base file is fatal even with aof-load-truncated yes" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
-            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
+            var logger = logging.TestLogger.init();
+            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config, logger.logger()));
+            const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.base", testing.allocator, .unlimited);
+            defer testing.allocator.free(preserved);
+            try testing.expectEqualStrings(truncated_set, preserved);
+            try testing.expectEqual(0, mock.set_calls);
+            try testing.expectEqual(0, logger.recordedEvents().len);
         }
     }.run);
 }
@@ -443,4 +469,186 @@ fn replayWithCleanup(allocator: std.mem.Allocator) !void {
     const result = try replayBytes(testing.io, allocator, contents, &data_store, &state, .{ .role = .base, .recover_truncated_tail = true, .limits = request_decoder.aof_limits });
     try testing.expectEqual(contents.len, result.complete);
     try testing.expectEqual(1, mock.set_calls);
+}
+
+test "clean EOF succeeds for every file role and recovery setting" {
+    for ([_]FileRole{ .base, .earlier_incremental, .final_incremental }) |role| {
+        for ([_]bool{ false, true }) |recover| {
+            for ([_][]const u8{ "", set_key_final }) |contents| {
+                var mock = MockStore.init();
+                var data_store = mock.store();
+                var state = ClientState.init();
+                const result = try replayBytes(testing.io, testing.allocator, contents, &data_store, &state, .{
+                    .role = role,
+                    .recover_truncated_tail = recover,
+                    .limits = request_decoder.aof_limits,
+                });
+                try testing.expectEqual(contents.len, result.complete);
+                try testing.expectEqual(@as(usize, if (contents.len == 0) 0 else 1), mock.set_calls);
+            }
+        }
+    }
+}
+
+test "every unfinished final command prefix recovers only the successful records" {
+    try withReplayDir("scratch-aof-replay-every-prefix", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            for ([_][]const u8{ "", set_key_final }) |prefix| {
+                for (0..set_key_base.len + 1) |length| {
+                    var buffer: [128]u8 = undefined;
+                    const contents = try std.fmt.bufPrint(&buffer, "{s}{s}", .{ prefix, set_key_base[0..length] });
+                    try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
+                    var mock = MockStore.init();
+                    var data_store = mock.store();
+                    var logger = logging.TestLogger.init();
+                    const stats = try replay(io, testing.allocator, &data_store, config, logger.logger());
+                    const complete = length == set_key_base.len;
+                    const expected = if (complete) contents else prefix;
+                    const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+                    defer testing.allocator.free(preserved);
+                    try testing.expectEqualStrings(expected, preserved);
+                    try testing.expectEqual(@as(u64, expected.len), stats.incr_bytes);
+                    try testing.expectEqual(@as(u64, expected.len), stats.file_offset);
+                    try testing.expectEqual(@as(usize, @intFromBool(prefix.len != 0)) + @intFromBool(complete), mock.set_calls);
+                    try testing.expectEqual(@as(usize, if (length != 0 and !complete) 1 else 0), logger.recordedEvents().len);
+                }
+            }
+        }
+    }.run);
+}
+
+test "invalid commands and unrepresentable argument tables never repair a final file" {
+    try withReplayDir("scratch-aof-replay-rejected-record", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            var count_buffer: [32]u8 = undefined;
+            const oversized_table = try std.fmt.bufPrint(&count_buffer, "*{d}\r\n", .{std.math.maxInt(usize) / @sizeOf([]const u8) + 2});
+            const cases = [_]struct { bytes: []const u8, err: anyerror }{
+                .{ .bytes = "*1\r\n$7\r\nUNKNOWN\r\n", .err = error.UnknownCommand },
+                .{ .bytes = "*1\r\n$3\r\nSET\r\n", .err = error.WrongNumberArguments },
+                .{ .bytes = "*4\r\n$3\r\nSET\r\n$3\r\nkey\r\n$1\r\nx\r\n$3\r\nBAD\r\n", .err = error.Syntax },
+                .{ .bytes = oversized_table, .err = error.ArgumentTableTooLarge },
+            };
+            for (cases) |case| {
+                var buffer: [256]u8 = undefined;
+                const contents = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ set_key_final, case.bytes, truncated_set });
+                try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
+                var mock = MockStore.init();
+                var data_store = mock.store();
+                var logger = logging.TestLogger.init();
+                try testing.expectError(case.err, replay(io, testing.allocator, &data_store, config, logger.logger()));
+                const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+                defer testing.allocator.free(preserved);
+                try testing.expectEqualStrings(contents, preserved);
+                try testing.expectEqual(1, mock.set_calls);
+                try testing.expectEqual(0, logger.recordedEvents().len);
+            }
+        }
+    }.run);
+}
+
+test "replay returns frame and element limit failures without treating them as tails" {
+    const cases = [_]struct { tail: []const u8, limits: request_decoder.Limits, err: anyerror }{
+        .{ .tail = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$50\r\n", .limits = .{ .max_frame_bytes = set_key_final.len, .max_elements = 3 }, .err = error.FrameTooLarge },
+        .{ .tail = "*4\r\n", .limits = .{ .max_frame_bytes = 1024, .max_elements = 3 }, .err = error.TooManyElements },
+    };
+    for (cases) |case| {
+        var buffer: [128]u8 = undefined;
+        const contents = try std.fmt.bufPrint(&buffer, "{s}{s}", .{ set_key_final, case.tail });
+        var mock = MockStore.init();
+        var data_store = mock.store();
+        var state = ClientState.init();
+        try testing.expectError(case.err, replayBytes(testing.io, testing.allocator, contents, &data_store, &state, .{
+            .role = .final_incremental,
+            .recover_truncated_tail = true,
+            .limits = case.limits,
+        }));
+        try testing.expectEqual(1, mock.set_calls);
+    }
+}
+
+test "allocation failures during file recovery leave its original bytes intact" {
+    try withReplayDir("scratch-aof-replay-recovery-allocation", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            try testing.checkAllAllocationFailures(testing.allocator, recoverWithAllocationFailures, .{ io, dir, config });
+        }
+    }.run);
+}
+
+fn recoverWithAllocationFailures(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, config: Config) !void {
+    const contents = set_key_final ++ truncated_set;
+    try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
+    var mock = MockStore.init();
+    var data_store = mock.store();
+    var logger = logging.TestLogger.init();
+    const stats = replay(io, allocator, &data_store, config, logger.logger()) catch |err| {
+        const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+        defer testing.allocator.free(preserved);
+        try testing.expectEqualStrings(contents, preserved);
+        try testing.expectEqual(0, logger.recordedEvents().len);
+        return err;
+    };
+    try testing.expectEqual(@as(u64, set_key_final.len), stats.file_offset);
+    try testing.expectEqual(1, mock.set_calls);
+    try testing.expectEqual(1, logger.recordedEvents().len);
+}
+
+test "file read and recovery I/O failures preserve bytes and emit no recovery warning" {
+    try withReplayDir("scratch-aof-replay-io-failure", struct {
+        fn open(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            return error.AccessDenied;
+        }
+
+        fn read(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+            return error.InputOutput;
+        }
+
+        fn repairOpen(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
+            if (options.mode == .read_write) return error.AccessDenied;
+            return testing.io.vtable.dirOpenFile(userdata, dir, path, options);
+        }
+
+        fn truncate(_: ?*anyopaque, _: std.Io.File, _: u64) std.Io.File.SetLengthError!void {
+            return error.InputOutput;
+        }
+
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            const contents = set_key_final ++ truncated_set;
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
+            for ([_]enum { open, read, repair_open, truncate }{ .open, .read, .repair_open, .truncate }) |stage| {
+                var vtable = io.vtable.*;
+                const expected: anyerror = switch (stage) {
+                    .open => blk: {
+                        vtable.dirOpenFile = open;
+                        break :blk error.AccessDenied;
+                    },
+                    .read => blk: {
+                        vtable.fileReadPositional = read;
+                        break :blk error.InputOutput;
+                    },
+                    .repair_open => blk: {
+                        vtable.dirOpenFile = repairOpen;
+                        break :blk error.AccessDenied;
+                    },
+                    .truncate => blk: {
+                        vtable.fileSetLength = truncate;
+                        break :blk error.InputOutput;
+                    },
+                };
+                const injected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+                var mock = MockStore.init();
+                var data_store = mock.store();
+                var state = ClientState.init();
+                var logger = logging.TestLogger.init();
+                try testing.expectError(expected, replayFile(injected_io, testing.allocator, &data_store, &state, config, logger.logger(), dir, "appendonly.aof.1.incr", .final_incremental));
+                const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+                defer testing.allocator.free(preserved);
+                try testing.expectEqualStrings(contents, preserved);
+                try testing.expectEqual(@as(usize, if (stage == .open or stage == .read) 0 else 1), mock.set_calls);
+                try testing.expectEqual(0, logger.recordedEvents().len);
+            }
+        }
+    }.run);
 }

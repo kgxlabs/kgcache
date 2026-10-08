@@ -486,6 +486,70 @@ test "replay leaves the dirty count at zero" {
     try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
 }
 
+test "startup recovers an unfinished final command and resumes writing at the safe offset" {
+    const testing = std.testing;
+    const cwd = std.Io.Dir.cwd();
+    const dirname = "scratch-server-aof-recovered-tail";
+    const good = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+    const tail = "*3\r\n$3\r\nSET\r\n$3\r\nbad\r\n$5\r\npar";
+    cwd.deleteTree(testing.io, dirname) catch {};
+    defer cwd.deleteTree(testing.io, dirname) catch {};
+    try writeReplayFixture(testing.io, dirname, good ++ tail);
+
+    var config = Config.default();
+    config.append_only = true;
+    config.append_dirname = dirname;
+    config.aof_load_truncated = true;
+    config.append_fsync = .always;
+    var dir = try cwd.openDir(testing.io, dirname, .{});
+    defer dir.close(testing.io);
+
+    {
+        var logger = logging.TestLogger.init();
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+        defer server.destroy() catch unreachable;
+        var loaded = try server._store.get("key", 0) orelse return error.TestUnexpectedResult;
+        defer loaded.deinit();
+        try testing.expectEqualStrings("value", loaded.value.string);
+        try testing.expectEqual(null, try server._store.get("bad", 0));
+        try testing.expectEqual(@as(u64, good.len), server._aof.?._file_offset);
+        try testing.expectEqual(@as(u64, good.len), server._aof.?._incr_bytes);
+        try testing.expect(!server._aof.?._loading);
+        try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
+        const recovered = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+        defer testing.allocator.free(recovered);
+        try testing.expectEqualStrings(good, recovered);
+        var warnings: usize = 0;
+        for (logger.recordedEvents()) |event| {
+            if (std.mem.startsWith(u8, event.message(), "AOF recovery:")) {
+                try testing.expectEqual(logging.Logger.Level.warn, event.level.?);
+                warnings += 1;
+            }
+        }
+        try testing.expectEqual(1, warnings);
+
+        _ = try server._store.set(.{
+            .key = "after-recovery",
+            .value = "writable",
+            .condition = null,
+            .expires_at = null,
+            .keepttl = false,
+            .response = null,
+        }, 0);
+    }
+
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    defer server.destroy() catch unreachable;
+    var loaded = try server._store.get("after-recovery", 0) orelse return error.TestUnexpectedResult;
+    defer loaded.deinit();
+    try testing.expectEqualStrings("writable", loaded.value.string);
+    try testing.expectEqual(null, try server._store.get("bad", 0));
+    const contents = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+    defer testing.allocator.free(contents);
+    try testing.expect(std.mem.startsWith(u8, contents, good));
+    try testing.expect(contents.len > good.len);
+}
+
 test "failed AOF replay frees loaded entries and leaves orphaned files untouched" {
     const testing = std.testing;
     const cwd = std.Io.Dir.cwd();
@@ -546,18 +610,20 @@ test "malformed AOF headers and terminators fail startup without tail repair" {
         .{ .bytes = "*1\r\n$1\r\nxX", .err = error.InvalidBulkTerminator },
     };
     for (invalid) |item| {
-        for ([_][]const u8{ "", good }) |suffix| {
-            var buffer: [256]u8 = undefined;
-            const contents = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ good, item.bytes, suffix });
-            try dir.writeFile(testing.io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
-            var logger = logging.TestLogger.init();
+        for ([_][]const u8{ "", good }) |prefix| {
+            for ([_][]const u8{ "", good }) |suffix| {
+                var buffer: [256]u8 = undefined;
+                const contents = try std.fmt.bufPrint(&buffer, "{s}{s}{s}", .{ prefix, item.bytes, suffix });
+                try dir.writeFile(testing.io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
+                var logger = logging.TestLogger.init();
 
-            try testing.expectError(item.err, Server.create(testing.io, testing.allocator, config, logger.logger()));
-            const preserved = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
-            defer testing.allocator.free(preserved);
-            try testing.expectEqualStrings(contents, preserved);
-            for (logger.recordedEvents()) |event| {
-                try testing.expect(!std.mem.startsWith(u8, event.message(), "AOF recovery:"));
+                try testing.expectError(item.err, Server.create(testing.io, testing.allocator, config, logger.logger()));
+                const preserved = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+                defer testing.allocator.free(preserved);
+                try testing.expectEqualStrings(contents, preserved);
+                for (logger.recordedEvents()) |event| {
+                    try testing.expect(!std.mem.startsWith(u8, event.message(), "AOF recovery:"));
+                }
             }
         }
     }

@@ -11,7 +11,6 @@ test {
     testing.refAllDecls(protocol.Resp2);
     testing.refAllDecls(protocol.Resp3);
     testing.refAllDecls(protocol.command_encoder);
-    testing.refAllDecls(protocol.legacy_adapter);
     testing.refAllDecls(@import("client_state.zig"));
     _ = @as(protocol.request_decoder.DecodeFn, protocol.request_decoder.decode);
     _ = @as(protocol.command_encoder.WriteCommandFn, protocol.command_encoder.writeCommand);
@@ -21,7 +20,7 @@ test {
     _ = @as(aof_loader.ReplayBytesFn, aof_loader.replayBytes);
     _ = @import("protocol/interface_tests.zig");
     _ = @import("protocol/compatibility_tests.zig");
-    _ = @import("protocol/legacy_adapter_tests.zig");
+    _ = @import("protocol/resp_command_encoder_tests.zig");
     _ = @import("protocol/request_decoder_tests.zig");
     _ = @import("arity.zig");
     _ = @import("resp.zig");

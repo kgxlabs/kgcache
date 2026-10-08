@@ -207,14 +207,39 @@ fn dupeManifest(allocator: std.mem.Allocator, manifest: Manifest) !Manifest {
     }
 
     for (manifest.incrs) |incr| {
+        const name = try allocator.dupe(u8, incr.name);
+        errdefer allocator.free(name);
+
         try incrs.append(allocator, .{
-            .name = try allocator.dupe(u8, incr.name),
+            .name = name,
             .seq = incr.seq,
             .kind = incr.kind,
         });
     }
 
     return .{ .base = base, .incrs = try incrs.toOwnedSlice(allocator) };
+}
+
+test "manifest copying releases names on every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, copyManifestWithAllocationFailures, .{});
+}
+
+fn copyManifestWithAllocationFailures(allocator: std.mem.Allocator) !void {
+    var entries: [32]Entry = undefined;
+    for (&entries, 0..) |*entry, index| {
+        entry.* = .{ .name = "appendonly.aof.incr", .seq = @intCast(index + 2), .kind = .incr };
+    }
+    const copied = try dupeManifest(allocator, .{
+        .base = .{ .name = "appendonly.aof.base", .seq = 1, .kind = .base },
+        .incrs = &entries,
+    });
+    defer copied.deinit(allocator);
+    try std.testing.expectEqualStrings("appendonly.aof.base", copied.base.?.name);
+    try std.testing.expectEqual(entries.len, copied.incrs.len);
+    for (copied.incrs, entries) |copy, original| {
+        try std.testing.expectEqualStrings(original.name, copy.name);
+        try std.testing.expectEqual(original.seq, copy.seq);
+    }
 }
 
 test "parse reads a manifest with a base and two incrs, in order" {

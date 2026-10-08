@@ -134,3 +134,18 @@ test "RESP output failure returns the partial prefix without appending a reply" 
         try testing.expectEqualStrings(expected[0..7], sink.bytes[0..sink.len]);
     }
 }
+
+test "RESP output keeps the owned command result alive through flush" {
+    const Commander = @import("../commander/interface.zig");
+    const object = @import("../object.zig");
+    var result = try Commander.Result.owned(try object.Owned.clone(testing.allocator, .{ .string = "\x00\r\n" }));
+    defer result.deinit();
+    for ([_]Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+        var buffer: [32]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try selected.writeReply(&writer, result.value);
+        try writer.flush();
+        try testing.expectEqualStrings("$3\r\n\x00\r\n\r\n", writer.buffered());
+        try testing.expectEqualStrings("\x00\r\n", result.owned_object.?.value.string);
+    }
+}
