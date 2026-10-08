@@ -5,6 +5,38 @@ const ClientState = @import("../client_state.zig");
 const store = @import("../store.zig");
 const resp = @import("../resp.zig");
 const commander = @import("../commander.zig");
+const request_decoder = @import("../protocol/request_decoder.zig");
+
+pub const FileRole = enum { base, earlier_incremental, final_incremental };
+
+pub const ReplayPolicy = struct {
+    role: FileRole,
+    recover_truncated_tail: bool,
+    limits: request_decoder.Limits,
+
+    pub fn mayRecoverTail(self: ReplayPolicy) bool {
+        return self.role == .final_incremental and self.recover_truncated_tail;
+    }
+};
+
+pub const IncompleteTail = struct {
+    safe_offset: usize,
+    discarded_bytes: usize,
+};
+
+pub const ReplayOutcome = union(enum) {
+    complete: usize,
+    incomplete_tail: IncompleteTail,
+};
+
+pub const ReplayBytesFn = *const fn (
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    data_store: *store.Store,
+    client_state: *ClientState,
+    policy: ReplayPolicy,
+) anyerror!ReplayOutcome;
 
 pub const Error = error{
     TruncatedAof,

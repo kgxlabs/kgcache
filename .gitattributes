@@ -1,1 +1,3 @@
 * text=auto
+src/protocol/fixtures/*.resp -text
+src/protocol/fixtures/*.aof -text

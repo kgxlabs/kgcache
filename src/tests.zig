@@ -1,4 +1,21 @@
 test {
+    const testing = @import("std").testing;
+    const protocol = @import("protocol.zig");
+    testing.refAllDecls(@import("root.zig"));
+    testing.refAllDecls(protocol);
+    testing.refAllDecls(protocol.CommandFrame);
+    testing.refAllDecls(protocol.request_decoder);
+    testing.refAllDecls(protocol.request_decoder.Complete);
+    testing.refAllDecls(protocol.Resp);
+    testing.refAllDecls(protocol.Resp.VTable);
+    testing.refAllDecls(protocol.Resp2);
+    testing.refAllDecls(protocol.Resp3);
+    testing.refAllDecls(protocol.command_encoder);
+    const aof_loader = @import("persistence/aof_loader.zig");
+    testing.refAllDecls(aof_loader);
+    testing.refAllDecls(aof_loader.ReplayPolicy);
+    _ = @import("protocol/interface_tests.zig");
+    _ = @import("protocol/compatibility_tests.zig");
     _ = @import("arity.zig");
     _ = @import("resp.zig");
     _ = @import("commander_tests.zig");
