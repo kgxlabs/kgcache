@@ -53,6 +53,8 @@ const TestConnectionIo = struct {
     output_len: usize = 0,
     close_calls: usize = 0,
     fail_write: bool = false,
+    write_calls: usize = 0,
+    fail_after_writes: ?usize = null,
     vtable: std.Io.VTable = undefined,
 
     fn io(self: *@This()) std.Io {
@@ -76,6 +78,10 @@ const TestConnectionIo = struct {
     fn write(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (self.fail_write) return error.NetworkDown;
+        if (self.fail_after_writes) |limit| {
+            if (self.write_calls == limit) return error.NetworkDown;
+        }
+        self.write_calls += 1;
         var count: usize = 0;
         self.append(header);
         count += header.len;
@@ -310,4 +316,69 @@ test "an internal failure and failed error response report both sources" {
     try testing.expectEqual(2, events.len);
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
     try testing.expectEqual(error.NetworkDown, events[1].source.?);
+}
+
+test "complete commands in one read advance after replies and mapped errors" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{
+        "*1\r\n$4\r\nPING\r\n" ++
+            "*1\r\n$3\r\nGET\r\n" ++
+            "*2\r\n$4\r\nECHO\r\n$3\r\n\x00\r\n\r\n" ++
+            "*2\r\n$6\r\nSELECT\r\n$1\r\n9\r\n" ++
+            "*1\r\n$6\r\nDBSIZE\r\n",
+        "*2\r\n$4\r\nECHO\r\n$0\r\n\r\n",
+    } };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    mock.dbsize_result = 7;
+    var data_store = mock.store();
+
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    try testing.expectEqualStrings(
+        "+PONG\r\n-ERR wrong number of arguments\r\n$3\r\n\x00\r\n\r\n-ERR DB index is out of range\r\n:7\r\n$0\r\n\r\n",
+        fake_io.written(),
+    );
+    try testing.expectEqual(1, mock.dbsize_calls);
+    try testing.expectEqual(2, fake_io.next_request);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+}
+
+test "invalid later DEL elements prevent mutation and stop the connection" {
+    const testing = std.testing;
+    const invalid_elements = [_][]const u8{ ":42\r\n", "$-1\r\n", "*0\r\n", "+apple\r\n", "-ERR\r\n" };
+    for (invalid_elements) |element| {
+        var buffer: [128]u8 = undefined;
+        const request = try std.fmt.bufPrint(&buffer, "*3\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n{s}*1\r\n$6\r\nDBSIZE\r\n", .{element});
+        var fake_io: TestConnectionIo = .{ .requests = &.{ request, "*1\r\n$4\r\nPING\r\n" } };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        try testing.expectEqual(0, mock.remove_calls);
+        try testing.expectEqual(0, mock.dbsize_calls);
+        try testing.expectEqual(1, fake_io.next_request);
+        try testing.expect(std.mem.startsWith(u8, fake_io.written(), "-ERR protocol error:"));
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+    }
+}
+
+test "a partial reply failure stops before the next pipelined command" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{
+        .requests = &.{"*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n"},
+        .fail_after_writes = 1,
+    };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    try testing.expectEqualStrings("+", fake_io.written());
+    try testing.expectEqual(0, mock.dbsize_calls);
+    try testing.expectEqual(1, test_logger.recordedEvents().len);
+    try testing.expectEqual(error.NetworkDown, test_logger.recordedEvents()[0].source.?);
 }

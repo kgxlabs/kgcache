@@ -1,4 +1,4 @@
-const resp = @import("../resp.zig");
+const Reply = @import("../protocol/reply.zig").Reply;
 const store = @import("../store.zig");
 const std = @import("std");
 const object = @import("../object.zig");
@@ -27,25 +27,24 @@ pub const VTable = struct {
 };
 
 pub const Result = struct {
-    value: resp.RESPValue,
+    value: Reply,
     owned_object: ?object.Owned = null,
     owned_arena: ?*std.heap.ArenaAllocator = null,
 
-    pub fn borrowed(value: resp.RESPValue) Result {
+    pub fn borrowed(value: Reply) Result {
         return .{ .value = value };
     }
 
     pub fn owned(owned_value: object.Owned) !Result {
-        var object_value = owned_value;
-        errdefer object_value.deinit();
-
         return .{
-            .value = try object.toRESP(object_value.value),
-            .owned_object = object_value,
+            .value = switch (owned_value.value) {
+                .string => |bytes| .{ .blob_string = bytes },
+            },
+            .owned_object = owned_value,
         };
     }
 
-    pub fn inArena(value: resp.RESPValue, arena: *std.heap.ArenaAllocator) Result {
+    pub fn inArena(value: Reply, arena: *std.heap.ArenaAllocator) Result {
         return .{ .value = value, .owned_arena = arena };
     }
 

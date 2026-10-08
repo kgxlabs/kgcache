@@ -1,5 +1,4 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const Commander = @import("interface.zig");
 
 pub const Arity = @import("../arity.zig");
@@ -58,7 +57,7 @@ pub const Category = enum {
 
 pub const Factory = *const fn (
     allocator: std.mem.Allocator,
-    arguments: []resp.RESPValue,
+    arguments: []const []const u8,
 ) Commander.Error!Commander;
 
 pub const Definition = struct {

@@ -1,7 +1,5 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
-const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 const TestHelpers = @import("../tests/helpers.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
@@ -11,7 +9,7 @@ const PersistenceState = @import("../persistence_state.zig");
 const Ping = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Ping) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -23,8 +21,8 @@ fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientStat
     const self: *Ping = @ptrCast(@alignCast(ptr));
     if (self.arguments.len == 0) return Commander.Result.borrowed(.{ .simple_string = "PONG" });
 
-    const message = try command_arguments.bulkString(self.arguments[0]);
-    return Commander.Result.borrowed(.{ .bulk_string = message });
+    const message = self.arguments[0];
+    return Commander.Result.borrowed(.{ .blob_string = message });
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -34,8 +32,8 @@ fn deinit(ptr: *anyopaque) void {
 
 test "execute ping command" {
     const testing = std.testing;
-    var values = [_]resp.RESPValue{.{ .bulk_string = "PING" }};
-    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
+    const values = [_][]const u8{"PING"};
+    const command = try TestHelpers.initCommand(testing.allocator, .{ .name = values[0], .arguments = values[1..] });
     defer command.deinit();
 
     var default_storage = DefaultStorage.init(testing.io, testing.allocator);

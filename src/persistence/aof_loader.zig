@@ -3,7 +3,7 @@ const Manifest = @import("manifest.zig");
 const Config = @import("../config.zig");
 const ClientState = @import("../client_state.zig");
 const store = @import("../store.zig");
-const resp = @import("../resp.zig");
+const logging = @import("../logger.zig");
 const commander = @import("../commander.zig");
 const request_decoder = @import("../protocol/request_decoder.zig");
 
@@ -38,15 +38,44 @@ pub const ReplayBytesFn = *const fn (
     policy: ReplayPolicy,
 ) anyerror!ReplayOutcome;
 
+pub fn replayBytes(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    contents: []const u8,
+    data_store: *store.Store,
+    client_state: *ClientState,
+    policy: ReplayPolicy,
+) anyerror!ReplayOutcome {
+    var cursor: usize = 0;
+    var safe_offset: usize = 0;
+    while (cursor < contents.len) {
+        const outcome = try request_decoder.decode(contents[cursor..], allocator, policy.limits);
+        const consumed = switch (outcome) {
+            .incomplete => {
+                if (!policy.mayRecoverTail()) return error.TruncatedAof;
+                return .{ .incomplete_tail = .{ .safe_offset = safe_offset, .discarded_bytes = contents.len - safe_offset } };
+            },
+            .complete => |complete| blk: {
+                var decoded = complete;
+                defer decoded.deinit(allocator);
+                const command = try commander.init(allocator, decoded.frame);
+                defer command.deinit();
+                var result = try command.execute(io, data_store, client_state);
+                defer result.deinit();
+                if (result.value == .error_reply) return error.InvalidAofCommandResult;
+                break :blk decoded.consumed;
+            },
+        };
+        cursor = std.math.add(usize, cursor, consumed) catch return error.LengthOverflow;
+        safe_offset = cursor;
+    }
+    return .{ .complete = cursor };
+}
+
 pub const Error = error{
     TruncatedAof,
     MissingAofFile,
     InvalidAofCommandResult,
-};
-
-const ReplayResult = union(enum) {
-    complete,
-    truncated: usize,
 };
 
 pub const ReplayStats = struct {
@@ -57,7 +86,7 @@ pub const ReplayStats = struct {
     file_offset: u64 = 0,
 };
 
-pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config) !ReplayStats {
+pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, config: Config, logger: logging.Logger) !ReplayStats {
     const cwd = std.Io.Dir.cwd();
     const directory_path = try config.resolveAofDirectory(allocator);
     defer allocator.free(directory_path);
@@ -82,14 +111,14 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
     var stats: ReplayStats = .{};
 
     if (manifest.base) |base| {
-        stats.base_size = try replayFile(io, allocator, data_store, &client_state, config, dir, base.name, false);
+        stats.base_size = try replayFile(io, allocator, data_store, &client_state, config, logger, dir, base.name, .base);
     }
 
     // This is already in ascending order. `Manifest.parse` guarantees it otherwise it will throw `NonAscendingIncrSeq`
     for (manifest.incrs, 0..) |incr, index| {
         const is_last = index + 1 == manifest.incrs.len;
-        const size = try replayFile(io, allocator, data_store, &client_state, config, dir, incr.name, is_last);
-        stats.incr_bytes += size;
+        const size = try replayFile(io, allocator, data_store, &client_state, config, logger, dir, incr.name, if (is_last) .final_incremental else .earlier_incremental);
+        stats.incr_bytes = std.math.add(u64, stats.incr_bytes, size) catch return error.LengthOverflow;
         if (is_last) stats.file_offset = size;
     }
 
@@ -102,77 +131,33 @@ fn replayFile(
     data_store: *store.Store,
     client_state: *ClientState,
     config: Config,
+    logger: logging.Logger,
     dir: std.Io.Dir,
     filename: []const u8,
-    is_last: bool,
+    role: FileRole,
 ) !u64 {
     const contents = dir.readFileAlloc(io, filename, allocator, .unlimited) catch |err| switch (err) {
-        error.FileNotFound => return Error.MissingAofFile,
+        error.FileNotFound => return error.MissingAofFile,
         else => return err,
     };
     defer allocator.free(contents);
-    const result = try replayContents(
-        io,
-        allocator,
-        contents,
-        data_store,
-        client_state,
-    );
-
+    const policy: ReplayPolicy = .{ .role = role, .recover_truncated_tail = config.aof_load_truncated, .limits = request_decoder.aof_limits };
+    const result = try replayBytes(io, allocator, contents, data_store, client_state, policy);
     switch (result) {
-        .complete => return @intCast(contents.len),
-        .truncated => |safe_offset| {
-            if (!is_last or !config.aof_load_truncated) {
-                return Error.TruncatedAof;
-            }
-
-            const file = dir.openFile(
-                io,
-                filename,
-                .{ .mode = .read_write },
-            ) catch |err| switch (err) {
-                error.FileNotFound => return Error.MissingAofFile,
+        .complete => |size| return @intCast(size),
+        .incomplete_tail => |tail| {
+            if (!policy.mayRecoverTail()) return error.TruncatedAof;
+            const file = dir.openFile(io, filename, .{ .mode = .read_write }) catch |err| switch (err) {
+                error.FileNotFound => return error.MissingAofFile,
                 else => return err,
             };
             defer file.close(io);
-
-            // truncate the incomplete command from file
-            try file.setLength(io, @intCast(safe_offset));
-            return @intCast(safe_offset);
+            try file.setLength(io, @intCast(tail.safe_offset));
+            var buffer: [256]u8 = undefined;
+            const message = std.fmt.bufPrint(&buffer, "AOF recovery: truncated unfinished tail at offset {d}, discarded {d} bytes", .{ tail.safe_offset, tail.discarded_bytes }) catch unreachable;
+            logger.warn(message);
+            return @intCast(tail.safe_offset);
         },
-    }
-}
-
-fn replayContents(
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    contents: []const u8,
-    data_store: *store.Store,
-    client_state: *ClientState,
-) !ReplayResult {
-    var parser = resp.parser(contents);
-    while (true) {
-        // TODO: we are reaching to the implementation details here. refactor
-        const command_start = parser._pos;
-        const maybe_value = parser.next(allocator) catch |err| switch (err) {
-            error.Incomplete => {
-                return .{ .truncated = command_start };
-            },
-            else => return err,
-        };
-        const value = maybe_value orelse return .complete;
-        defer parser.deinit(allocator, value);
-
-        const c = try commander.init(allocator, value);
-        defer c.deinit();
-
-        var reply = try c.execute(io, data_store, client_state);
-        defer reply.deinit();
-
-        switch (reply.value) {
-            .simple_error => return Error.InvalidAofCommandResult,
-            else => {},
-        }
     }
 }
 
@@ -228,7 +213,7 @@ test "replay of a base and two incrs applies them in manifest order" {
             var mock = MockStore.init();
             mock.num_databases_result = 16;
             var data_store = mock.store();
-            _ = try replay(io, testing.allocator, &data_store, config);
+            _ = try replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger());
 
             try testing.expectEqual(3, mock.set_calls);
             try testing.expectEqualStrings("final", mock.last_set_value_copy[0..mock.last_set_value_len]);
@@ -250,7 +235,7 @@ test "replay honours SELECT across files" {
             var mock = MockStore.init();
             mock.num_databases_result = 16;
             var data_store = mock.store();
-            _ = try replay(io, testing.allocator, &data_store, config);
+            _ = try replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger());
 
             try testing.expectEqual(@as(?u32, 1), mock.last_set_db);
         }
@@ -270,13 +255,21 @@ test "a truncated final command is truncated away and the load succeeds" {
             var mock = MockStore.init();
             mock.num_databases_result = 16;
             var data_store = mock.store();
-            const stats = try replay(io, testing.allocator, &data_store, config);
+            var logger = logging.TestLogger.init();
+            const stats = try replay(io, testing.allocator, &data_store, config, logger.logger());
 
             const file = try dir.openFile(io, "appendonly.aof.1.incr", .{});
             defer file.close(io);
             try testing.expectEqual(@as(u64, good.len), try file.length(io));
             try testing.expectEqual(@as(u64, good.len), stats.incr_bytes);
+            try testing.expectEqual(@as(u64, good.len), stats.file_offset);
             try testing.expectEqual(1, mock.set_calls);
+            const events = logger.recordedEvents();
+            try testing.expectEqual(1, events.len);
+            try testing.expectEqual(logging.Logger.Level.warn, events[0].level.?);
+            var buffer: [256]u8 = undefined;
+            const expected = try std.fmt.bufPrint(&buffer, "AOF recovery: truncated unfinished tail at offset {d}, discarded {d} bytes", .{ good.len, truncated_set.len });
+            try testing.expectEqualStrings(expected, events[0].message());
         }
     }.run);
 }
@@ -291,7 +284,7 @@ test "a truncated final command fails the load when aof-load-truncated is no" {
             config.aof_load_truncated = false;
             var mock = MockStore.init();
             var data_store = mock.store();
-            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
+            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
         }
     }.run);
 }
@@ -309,7 +302,7 @@ test "truncation in the base file is fatal even with aof-load-truncated yes" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
-            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config));
+            try testing.expectError(Error.TruncatedAof, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
         }
     }.run);
 }
@@ -321,7 +314,7 @@ test "a manifest naming a missing file is fatal" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
-            try testing.expectError(Error.MissingAofFile, replay(io, testing.allocator, &data_store, config));
+            try testing.expectError(Error.MissingAofFile, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
         }
     }.run);
 }
@@ -337,7 +330,7 @@ test "an unknown command in the file is fatal" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
-            try testing.expectError(error.UnknownCommand, replay(io, testing.allocator, &data_store, config));
+            try testing.expectError(error.UnknownCommand, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
         }
     }.run);
 }
@@ -352,7 +345,7 @@ test "replay preserves manifest parse errors" {
 
             var mock = MockStore.init();
             var data_store = mock.store();
-            try testing.expectError(Manifest.Error.MalformedLine, replay(io, testing.allocator, &data_store, config));
+            try testing.expectError(Manifest.Error.MalformedLine, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
         }
     }.run);
 }
@@ -366,8 +359,88 @@ test "replay preserves a command source error" {
             var mock = MockStore.init();
             mock.set_result = error.TestReplayStoreFailure;
             var data_store = mock.store();
-            try testing.expectError(error.TestReplayStoreFailure, replay(io, testing.allocator, &data_store, config));
+            try testing.expectError(error.TestReplayStoreFailure, replay(io, testing.allocator, &data_store, config, logging.NoopLogger.logger()));
             try testing.expectEqual(@as(usize, 1), mock.set_calls);
         }
     }.run);
+}
+
+test "an unfinished earlier incremental is fatal and leaves every file intact" {
+    try withReplayDir("scratch-aof-replay-truncated-earlier", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeThreeFileManifest(io, dir);
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.base", .data = set_key_base });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.2.incr", .data = truncated_set });
+            try dir.writeFile(io, .{ .sub_path = "appendonly.aof.3.incr", .data = set_key_final });
+            var mock = MockStore.init();
+            var data_store = mock.store();
+            var logger = logging.TestLogger.init();
+
+            try testing.expectError(error.TruncatedAof, replay(io, testing.allocator, &data_store, config, logger.logger()));
+            const earlier = try dir.readFileAlloc(io, "appendonly.aof.2.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(earlier);
+            const final = try dir.readFileAlloc(io, "appendonly.aof.3.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(final);
+            try testing.expectEqualStrings(truncated_set, earlier);
+            try testing.expectEqualStrings(set_key_final, final);
+            try testing.expectEqual(1, mock.set_calls);
+            try testing.expectEqual(0, logger.recordedEvents().len);
+        }
+    }.run);
+}
+
+test "known bad final bulk terminators fail replay without repairing bytes" {
+    try withReplayDir("scratch-aof-replay-malformed-terminator", struct {
+        fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
+            try writeSingleIncrManifest(io, dir);
+            const bad_tails = [_][]const u8{
+                "*3\r\n$3\r\nDEL\r\n$3\r\nkey\r\n$1\r\nxX",
+                "*3\r\n$3\r\nDEL\r\n$3\r\nkey\r\n$1\r\nx\rX",
+            };
+            for (bad_tails) |tail| {
+                var buffer: [128]u8 = undefined;
+                const contents = try std.fmt.bufPrint(&buffer, "{s}{s}", .{ set_key_final, tail });
+                try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
+                var mock = MockStore.init();
+                var data_store = mock.store();
+                var logger = logging.TestLogger.init();
+
+                try testing.expectError(error.InvalidBulkTerminator, replay(io, testing.allocator, &data_store, config, logger.logger()));
+                const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+                defer testing.allocator.free(preserved);
+                try testing.expectEqualStrings(contents, preserved);
+                try testing.expectEqual(1, mock.set_calls);
+                try testing.expectEqual(0, mock.remove_calls);
+                try testing.expectEqual(0, logger.recordedEvents().len);
+            }
+        }
+    }.run);
+}
+
+test "byte replay reports the last successful offset without executing the tail" {
+    var mock = MockStore.init();
+    var data_store = mock.store();
+    var state = ClientState.init();
+    const policy: ReplayPolicy = .{ .role = .final_incremental, .recover_truncated_tail = true, .limits = request_decoder.aof_limits };
+    const result = try replayBytes(testing.io, testing.allocator, set_key_final ++ truncated_set, &data_store, &state, policy);
+    try testing.expectEqual(set_key_final.len, result.incomplete_tail.safe_offset);
+    try testing.expectEqual(truncated_set.len, result.incomplete_tail.discarded_bytes);
+    try testing.expectEqual(1, mock.set_calls);
+
+    try testing.expectError(error.ExpectedBulkString, replayBytes(testing.io, testing.allocator, "*3\r\n$3\r\nDEL\r\n$3\r\nkey\r\n:42\r\n", &data_store, &state, policy));
+    try testing.expectEqual(0, mock.remove_calls);
+}
+
+test "byte replay releases frames commands and aggregate replies on allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, replayWithCleanup, .{});
+}
+
+fn replayWithCleanup(allocator: std.mem.Allocator) !void {
+    var mock = MockStore.init();
+    var data_store = mock.store();
+    var state = ClientState.init();
+    const contents = set_key_final ++ "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nGET\r\n";
+    const result = try replayBytes(testing.io, allocator, contents, &data_store, &state, .{ .role = .base, .recover_truncated_tail = true, .limits = request_decoder.aof_limits });
+    try testing.expectEqual(contents.len, result.complete);
+    try testing.expectEqual(1, mock.set_calls);
 }

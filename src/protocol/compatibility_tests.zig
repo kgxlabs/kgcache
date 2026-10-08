@@ -1,5 +1,4 @@
 const std = @import("std");
-const legacy = @import("../resp.zig");
 const commander = @import("../commander.zig");
 const MockStore = @import("../store/mock_store.zig");
 const ClientState = @import("../client_state.zig");
@@ -20,26 +19,14 @@ const command_fixtures = [_]struct { request: []const u8, reply: []const u8 }{
     .{ .request = @embedFile("fixtures/command-getkeys.request.resp"), .reply = @embedFile("fixtures/command-getkeys.reply.resp") },
 };
 
-fn semanticReply(allocator: std.mem.Allocator, value: legacy.RESPValue) std.mem.Allocator.Error!protocol.Reply {
-    return switch (value) {
-        .simple_string => |text| .{ .simple_string = text },
-        .simple_error => |text| .{ .error_reply = text },
-        .integer => |number| .{ .integer = number },
-        .bulk_string => |maybe| if (maybe) |bytes| .{ .blob_string = bytes } else .{ .null_value = .bulk_string },
-        .array => |maybe| if (maybe) |items| blk: {
-            const replies = try allocator.alloc(protocol.Reply, items.len);
-            for (items, replies) |item, *reply| reply.* = try semanticReply(allocator, item);
-            break :blk .{ .array = replies };
-        } else .{ .null_value = .array },
-    };
-}
-
 test "captured command replies preserve legacy and semantic RESP2 bytes" {
     for (command_fixtures) |fixture| {
-        var parser = legacy.parser(fixture.request);
-        const request = try parser.parse(testing.allocator);
-        defer parser.deinit(testing.allocator, request);
-        const command = try commander.init(testing.allocator, request);
+        var decoded = switch (try protocol.request_decoder.decode(fixture.request, testing.allocator, protocol.request_decoder.aof_limits)) {
+            .complete => |complete| complete,
+            .incomplete => return error.TestUnexpectedResult,
+        };
+        defer decoded.deinit(testing.allocator);
+        const command = try commander.init(testing.allocator, decoded.frame);
         defer command.deinit();
         var mock = MockStore.init();
         mock.num_databases_result = 16;
@@ -47,17 +34,9 @@ test "captured command replies preserve legacy and semantic RESP2 bytes" {
         var state = ClientState.init();
         var result = try command.execute(testing.io, &data_store, &state);
         defer result.deinit();
-        const serializer = legacy.serializer();
-        const bytes = try serializer.serialize(testing.allocator, result.value);
-        defer serializer.deinit(testing.allocator, bytes);
-        try testing.expectEqualStrings(fixture.reply, bytes);
-
-        var arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena.deinit();
-        const value = try semanticReply(arena.allocator(), result.value);
         var buffer: [4096]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
-        try protocol.Resp2.resp().writeReply(&writer, value);
+        try state.resp.writeReply(&writer, result.value);
         try writer.flush();
         try testing.expectEqualStrings(fixture.reply, writer.buffered());
     }

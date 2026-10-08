@@ -1,5 +1,4 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 const Commander = @import("interface.zig");
 const TestHelpers = @import("../tests/helpers.zig");
@@ -7,7 +6,7 @@ const TestHelpers = @import("../tests/helpers.zig");
 const Echo = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Echo) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -21,11 +20,7 @@ const vtable = Commander.VTable{
 fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Echo = @ptrCast(@alignCast(ptr));
 
-    const value: resp.RESPValue = switch (self.arguments[0]) {
-        .bulk_string => |maybe_string| .{ .bulk_string = maybe_string orelse return Commander.Error.MalformedCommandRequest },
-        else => return Commander.Error.UnsupportedArgumentType,
-    };
-    return Commander.Result.borrowed(value);
+    return Commander.Result.borrowed(.{ .blob_string = self.arguments[0] });
 }
 
 fn deinit(ptr: *anyopaque) void {
@@ -35,28 +30,20 @@ fn deinit(ptr: *anyopaque) void {
 
 test "execute echo command" {
     const testing = std.testing;
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "ECHO" },
-        .{ .bulk_string = "hello" },
+    const values = [_][]const u8{
+        "ECHO",
+        "hello",
     };
 
-    var result = try TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values }));
+    var result = try TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .name = values[0], .arguments = values[1..] }));
     defer result.deinit();
     switch (result.value) {
-        .bulk_string => |maybe_actual| try testing.expectEqualStrings("hello", maybe_actual orelse return error.TestUnexpectedResult),
+        .blob_string => |actual| try testing.expectEqualStrings("hello", actual),
         else => return error.TestUnexpectedResult,
     }
 }
 
-test "reject unsupported argument type" {
-    const testing = std.testing;
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "ECHO" },
-        .{ .integer = 1 },
-    };
-
-    try testing.expectError(
-        error.UnsupportedArgumentType,
-        TestHelpers.executeWithMemoryStore(try TestHelpers.initCommand(testing.allocator, .{ .array = &values })),
-    );
+test "decoder rejects non-bulk ECHO arguments before execution" {
+    const decoder = @import("../protocol/request_decoder.zig");
+    try std.testing.expectError(error.ExpectedBulkString, decoder.decode("*2\r\n$4\r\nECHO\r\n:1\r\n", std.testing.allocator, decoder.aof_limits));
 }

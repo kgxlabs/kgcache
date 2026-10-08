@@ -209,6 +209,7 @@ pub fn prepareRecord(ptr: *anyopaque, event: Journal.WriteEvent) anyerror!Journa
 pub fn bgRewrite(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
     const started = try self.startBackgroundRewrite(storages, origin, false);
+
     return if (started) .started else .scheduled;
 }
 
@@ -394,9 +395,11 @@ pub fn dueForRewrite(ptr: *anyopaque, config: Config) anyerror!bool {
     const self: *AofBackend = @ptrCast(@alignCast(ptr));
 
     if (!config.append_only or config.auto_aof_rewrite_percentage == 0) return false;
+
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
+
         if (self._persistence_state.aofInProgress()) return false;
     }
 

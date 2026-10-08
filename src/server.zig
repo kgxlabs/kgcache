@@ -81,6 +81,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
 
     self._kgc = try persistence.KgcPersistence.init(io, allocator, &self._persistence_state, snapshot_path);
     self._kgc._logger = logger;
+
     if (config.append_only) {
         self._aof = try persistence.AofPersistence.init(io, allocator, &self._persistence_state, config);
         self._aof.?._logger = logger;
@@ -229,7 +230,7 @@ fn loadAof(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void {
     journal.beginLoading();
     defer journal.endLoading();
 
-    const stats = try persistence.AofLoader.replay(io, allocator, &self._store, self._config);
+    const stats = try persistence.AofLoader.replay(io, allocator, &self._store, self._config, self._logger);
 
     aof.finishLoading(stats.base_size, stats.incr_bytes, stats.file_offset);
 

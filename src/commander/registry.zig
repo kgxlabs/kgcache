@@ -1,5 +1,4 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const BgRewriteAof = @import("bgrewriteaof.zig");
 const BgSave = @import("bgsave.zig");
 const Command = @import("command.zig");
@@ -32,7 +31,7 @@ pub fn all() []const Definition {
 
 fn factoryFor(comptime T: type) Factory {
     return struct {
-        fn create(allocator: std.mem.Allocator, arguments: []resp.RESPValue) Commander.Error!Commander {
+        fn create(allocator: std.mem.Allocator, arguments: []const []const u8) Commander.Error!Commander {
             const implementation = try allocator.create(T);
             implementation.* = .{
                 .allocator = allocator,

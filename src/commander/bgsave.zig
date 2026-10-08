@@ -1,13 +1,11 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 const Commander = @import("interface.zig");
-const command_arguments = @import("arguments.zig");
 
 const BgSave = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *BgSave) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -21,7 +19,7 @@ fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, _: *Commander.C
     const self: *BgSave = @ptrCast(@alignCast(ptr));
 
     if (self.arguments.len == 1) {
-        const option = try command_arguments.bulkString(self.arguments[0]);
+        const option = self.arguments[0];
         if (!std.ascii.eqlIgnoreCase(option, "schedule")) return Commander.Error.Syntax;
     }
 

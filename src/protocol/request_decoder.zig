@@ -55,3 +55,7 @@ pub const DecodeFn = *const fn (
     allocator: std.mem.Allocator,
     limits: Limits,
 ) DecodeError!DecodeResult;
+
+pub fn decode(input: []const u8, allocator: std.mem.Allocator, limits: Limits) DecodeError!DecodeResult {
+    return @import("legacy_adapter.zig").decode(input, allocator, limits);
+}

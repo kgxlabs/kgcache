@@ -38,6 +38,16 @@ fn ParseResult(comptime T: type) type {
     };
 }
 
+pub const ParsedValue = ParseResult(RESPValue);
+
+pub fn parseValue(allocator: std.mem.Allocator, data: []const u8) ParseError!ParsedValue {
+    return parseRESP(allocator, data);
+}
+
+pub fn freeValue(allocator: std.mem.Allocator, value: RESPValue) void {
+    deinitValue(allocator, value);
+}
+
 // TODO: Refactor this with tagged unions instead of switch statement
 pub const Parser = struct {
     _pos: usize = 0,
@@ -52,9 +62,6 @@ pub const Parser = struct {
         return result.value;
     }
 
-    // AOF replay treats `Incomplete` as an unfinished command at the end of the file.
-    // It treats every other error as corrupted data.
-    // The parser also returns `Incomplete` when a bulk string ends with an invalid CRLF, because it cannot tell these two cases apart.
     pub fn next(self: *Self, allocator: std.mem.Allocator) RESPError!?RESPValue {
         if (self._pos >= self.data.len) return null;
         const result = try parseRESP(allocator, self.data[self._pos..]);
@@ -226,22 +233,14 @@ fn parseBulkstring(data: []const u8) RESPError!ParseResult(RESPValue) {
     }
 
     const len: usize = @intCast(parsed_size.value);
-
-    if (len < -1) {
-        return RESPError.MalformedSize;
-    }
-
-    if (data.len < pos + len + 2) {
-        return RESPError.Incomplete;
-    }
-
-    const str = data[pos .. pos + len];
-    // TODO: This could be redundant since we only took len size but just to be sure
-    if (str.len != len) return RESPError.ExceededSize;
-    pos += len;
-
-    if (!isToken(data[pos .. pos + 2], Tokens.CRLF)) return RESPError.Incomplete;
-    pos += 2;
+    const body_end = std.math.add(usize, pos, len) catch return RESPError.MalformedSize;
+    const end = std.math.add(usize, body_end, 2) catch return RESPError.MalformedSize;
+    if (data.len <= body_end) return RESPError.Incomplete;
+    if (data[body_end] != '\r') return RESPError.Malformed;
+    if (data.len < end) return RESPError.Incomplete;
+    if (data[body_end + 1] != '\n') return RESPError.Malformed;
+    const str = data[pos..body_end];
+    pos = end;
 
     return .{
         .value = .{
@@ -265,7 +264,7 @@ fn parseSize(data: []const u8, token: []const u8) RESPError!ParseResult(isize) {
 
     pos += end.? + 2;
 
-    if (len < -2) return RESPError.MalformedSize;
+    if (len < -1) return RESPError.MalformedSize;
 
     return .{
         .value = len,

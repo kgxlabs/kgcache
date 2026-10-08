@@ -2,7 +2,7 @@
 // research what is the idiomatic Zig way of doing this type of stuff
 const std = @import("std");
 const commander = @import("../commander.zig");
-const resp = @import("../resp.zig");
+const CommandFrame = @import("../protocol/command_frame.zig");
 const store = @import("../store.zig");
 const ClientState = @import("../client_state.zig");
 const DefaultStorage = @import("../storage/default_storage.zig");
@@ -25,8 +25,8 @@ pub fn executeWithMemoryStore(command: commander.Commander) anyerror!commander.C
     return command.execute(testing.io, &data_store, &client_state);
 }
 
-pub fn initCommand(allocator: std.mem.Allocator, value: resp.RESPValue) commander.Error!commander.Commander {
-    return commander.init(allocator, value);
+pub fn initCommand(allocator: std.mem.Allocator, frame: CommandFrame) commander.Error!commander.Commander {
+    return commander.init(allocator, frame);
 }
 
 pub const TestNetwork = struct {

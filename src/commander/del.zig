@@ -1,13 +1,11 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
-const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 
 const Del = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Del) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -28,7 +26,7 @@ fn execute(
 
     var removed: i64 = 0;
     for (self.arguments) |argument| {
-        const key = try command_arguments.bulkString(argument);
+        const key = argument;
         const result = try data_store.remove(key, client_state.db_index);
         if (result.outcome == .applied) removed += 1;
     }

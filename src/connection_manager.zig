@@ -49,7 +49,14 @@ pub fn init(
     data_store: *store.Store,
     connection_buffer_size: usize,
 ) ConnectionManager {
-    return initWithOptions(io, allocator, logger, data_store, connection_buffer_size, .{});
+    return initWithOptions(
+        io,
+        allocator,
+        logger,
+        data_store,
+        connection_buffer_size,
+        .{},
+    );
 }
 
 fn initWithOptions(
@@ -79,6 +86,7 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 
     const worker = try self._allocator.create(ClientWorker);
     errdefer self._allocator.destroy(worker);
+
     worker.* = .{ .stream = stream };
 
     var lock_tx = try self._lock.begin();

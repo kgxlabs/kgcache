@@ -7,3 +7,4 @@ pub const Resp = @import("protocol/interface.zig");
 pub const Resp2 = @import("protocol/resp2.zig");
 pub const Resp3 = @import("protocol/resp3.zig");
 pub const command_encoder = @import("protocol/resp_command_encoder.zig");
+pub const legacy_adapter = @import("protocol/legacy_adapter.zig");
