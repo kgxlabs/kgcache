@@ -51,6 +51,7 @@ pub fn replayBytes(
 
     while (cursor < contents.len) {
         const outcome = try request_decoder.decode(contents[cursor..], allocator, policy.limits);
+
         const consumed = switch (outcome) {
             .incomplete => {
                 if (!policy.mayRecoverTail()) return error.TruncatedAof;
@@ -126,7 +127,9 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
     for (manifest.incrs, 0..) |incr, index| {
         const is_last = index + 1 == manifest.incrs.len;
         const size = try replayFile(io, allocator, data_store, &client_state, config, logger, dir, incr.name, if (is_last) .final_incremental else .earlier_incremental);
+
         stats.incr_bytes = std.math.add(u64, stats.incr_bytes, size) catch return error.LengthOverflow;
+
         if (is_last) stats.file_offset = size;
     }
 
@@ -150,8 +153,19 @@ fn replayFile(
     };
     defer allocator.free(contents);
 
-    const policy: ReplayPolicy = .{ .role = role, .recover_truncated_tail = config.aof_load_truncated, .limits = request_decoder.aof_limits };
-    const result = try replayBytes(io, allocator, contents, data_store, client_state, policy);
+    const policy: ReplayPolicy = .{
+        .role = role,
+        .recover_truncated_tail = config.aof_load_truncated,
+        .limits = request_decoder.aof_limits,
+    };
+    const result = try replayBytes(
+        io,
+        allocator,
+        contents,
+        data_store,
+        client_state,
+        policy,
+    );
 
     switch (result) {
         .complete => |size| return @intCast(size),

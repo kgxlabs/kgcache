@@ -58,6 +58,7 @@ pub const DecodeFn = *const fn (
 
 pub fn decode(input: []const u8, allocator: std.mem.Allocator, limits: Limits) DecodeError!DecodeResult {
     var scanner: Scanner = .{ .input = input, .limits = limits };
+    // first phase: checking everything is valid before allocating
     const count = (try scanner.readLength('*')) orelse return .incomplete;
 
     if (count > limits.max_elements) return error.TooManyElements;
@@ -72,11 +73,12 @@ pub fn decode(input: []const u8, allocator: std.mem.Allocator, limits: Limits) D
 
     const consumed = scanner.offset;
 
+    // count - 1 because we exclude the directive name
     const arguments = try allocator.alloc([]const u8, count - 1);
     errdefer allocator.free(arguments);
 
+    // second phase, actually decoding
     scanner.offset = 0;
-
     _ = (try scanner.readLength('*')).?;
 
     const name = (try scanner.readBulk(arguments.len)).?;
