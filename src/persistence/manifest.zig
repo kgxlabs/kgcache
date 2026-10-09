@@ -220,25 +220,30 @@ fn dupeManifest(allocator: std.mem.Allocator, manifest: Manifest) !Manifest {
     return .{ .base = base, .incrs = try incrs.toOwnedSlice(allocator) };
 }
 
-test "manifest copying releases names on every allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, copyManifestWithAllocationFailures, .{});
+test "manifest reading releases owned entries on every allocation failure" {
+    try withScratchDir("scratch-manifest-read-allocation", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            var entries: [32]Entry = undefined;
+            for (&entries, 0..) |*entry, index| {
+                entry.* = .{ .name = "appendonly.aof.incr", .seq = @intCast(index + 2), .kind = .incr };
+            }
+            try write(io, std.testing.allocator, dir, "appendonly.aof.manifest", .{
+                .base = .{ .name = "appendonly.aof.base", .seq = 1, .kind = .base },
+                .incrs = &entries,
+            });
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, readWithAllocationFailures, .{ io, dir });
+        }
+    }.run);
 }
 
-fn copyManifestWithAllocationFailures(allocator: std.mem.Allocator) !void {
-    var entries: [32]Entry = undefined;
-    for (&entries, 0..) |*entry, index| {
-        entry.* = .{ .name = "appendonly.aof.incr", .seq = @intCast(index + 2), .kind = .incr };
-    }
-    const copied = try dupeManifest(allocator, .{
-        .base = .{ .name = "appendonly.aof.base", .seq = 1, .kind = .base },
-        .incrs = &entries,
-    });
-    defer copied.deinit(allocator);
-    try std.testing.expectEqualStrings("appendonly.aof.base", copied.base.?.name);
-    try std.testing.expectEqual(entries.len, copied.incrs.len);
-    for (copied.incrs, entries) |copy, original| {
-        try std.testing.expectEqualStrings(original.name, copy.name);
-        try std.testing.expectEqual(original.seq, copy.seq);
+fn readWithAllocationFailures(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !void {
+    const manifest = (try read(io, allocator, dir, "appendonly.aof.manifest")).?;
+    defer manifest.deinit(allocator);
+    try std.testing.expectEqualStrings("appendonly.aof.base", manifest.base.?.name);
+    try std.testing.expectEqual(32, manifest.incrs.len);
+    for (manifest.incrs, 0..) |incr, index| {
+        try std.testing.expectEqualStrings("appendonly.aof.incr", incr.name);
+        try std.testing.expectEqual(index + 2, incr.seq);
     }
 }
 

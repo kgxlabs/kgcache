@@ -53,8 +53,7 @@ const TestConnectionIo = struct {
     output_len: usize = 0,
     close_calls: usize = 0,
     fail_write: bool = false,
-    write_calls: usize = 0,
-    fail_after_writes: ?usize = null,
+    fail_after_bytes: ?usize = null,
     vtable: std.Io.VTable = undefined,
 
     fn io(self: *@This()) std.Io {
@@ -78,31 +77,34 @@ const TestConnectionIo = struct {
     fn write(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (self.fail_write) return error.NetworkDown;
-        if (self.fail_after_writes) |limit| {
-            if (self.write_calls == limit) return error.NetworkDown;
+        if (self.fail_after_bytes) |limit| {
+            if (self.output_len >= limit) return error.NetworkDown;
         }
-        self.write_calls += 1;
-        var count: usize = 0;
-        self.append(header);
-        count += header.len;
+        var count = self.append(header);
+        if (count != header.len) return count;
         for (data[0 .. data.len - 1]) |part| {
-            self.append(part);
-            count += part.len;
+            const byte_count = self.append(part);
+            count += byte_count;
+            if (byte_count != part.len) return count;
         }
         if (splat > 0) {
             const part = data[data.len - 1];
             for (0..splat) |_| {
-                self.append(part);
-                count += part.len;
+                const byte_count = self.append(part);
+                count += byte_count;
+                if (byte_count != part.len) return count;
             }
         }
         return count;
     }
 
-    fn append(self: *@This(), bytes: []const u8) void {
-        std.debug.assert(self.output_len + bytes.len <= self.output.len);
-        @memcpy(self.output[self.output_len..][0..bytes.len], bytes);
-        self.output_len += bytes.len;
+    fn append(self: *@This(), bytes: []const u8) usize {
+        const limit = self.fail_after_bytes orelse self.output.len;
+        const count = @min(bytes.len, limit - self.output_len);
+        std.debug.assert(self.output_len + count <= self.output.len);
+        @memcpy(self.output[self.output_len..][0..count], bytes[0..count]);
+        self.output_len += count;
+        return count;
     }
 
     fn close(ptr: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
@@ -367,18 +369,22 @@ test "invalid later DEL elements prevent mutation and stop the connection" {
 
 test "a partial reply failure stops before the next pipelined command" {
     const testing = std.testing;
-    var fake_io: TestConnectionIo = .{
-        .requests = &.{"*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n"},
-        .fail_after_writes = 1,
+    const cases = [_]struct { request: []const u8, expected: []const u8 }{
+        .{ .request = "*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "+PO" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nGET\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "*1\r" },
     };
-    var test_logger = logging.TestLogger.init();
-    var mock = store.MockStore.init();
-    var data_store = mock.store();
-
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
-
-    try testing.expectEqualStrings("+", fake_io.written());
-    try testing.expectEqual(0, mock.dbsize_calls);
-    try testing.expectEqual(1, test_logger.recordedEvents().len);
-    try testing.expectEqual(error.NetworkDown, test_logger.recordedEvents()[0].source.?);
+    for (cases) |case| {
+        var fake_io: TestConnectionIo = .{
+            .requests = &.{case.request},
+            .fail_after_bytes = case.expected.len,
+        };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+        try testing.expectEqualStrings(case.expected, fake_io.written());
+        try testing.expectEqual(0, mock.dbsize_calls);
+        try testing.expectEqual(1, test_logger.recordedEvents().len);
+        try testing.expectEqual(error.NetworkDown, test_logger.recordedEvents()[0].source.?);
+    }
 }

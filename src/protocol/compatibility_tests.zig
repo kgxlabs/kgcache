@@ -19,7 +19,7 @@ const command_fixtures = [_]struct { request: []const u8, reply: []const u8 }{
     .{ .request = @embedFile("fixtures/command-getkeys.request.resp"), .reply = @embedFile("fixtures/command-getkeys.reply.resp") },
 };
 
-test "captured command replies preserve legacy and semantic RESP2 bytes" {
+test "captured commands keep exact RESP2 replies" {
     for (command_fixtures) |fixture| {
         var decoded = switch (try protocol.request_decoder.decode(fixture.request, testing.allocator, protocol.request_decoder.aof_limits)) {
             .complete => |complete| complete,
@@ -43,6 +43,24 @@ test "captured command replies preserve legacy and semantic RESP2 bytes" {
 }
 
 test "captured AOF mutation bytes preserve SELECT tracking and binary arguments" {
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const Storage = @import("../storage/interface.zig");
+    const MemoryStore = @import("../store/mem_store.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const Kgc = @import("../persistence/kgc.zig");
+    const loader = @import("../persistence/aof_loader.zig");
+    var backends: [3]DefaultStorage = undefined;
+    var storages: [3]Storage = undefined;
+    for (&backends, &storages) |*backend, *storage| {
+        backend.* = DefaultStorage.init(testing.io, testing.allocator);
+        storage.* = backend.storage();
+    }
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try Kgc.init(testing.io, testing.allocator, &persistence_state, "compatibility.kgc");
+    var memory_store = MemoryStore.init(testing.allocator, &storages, kgc.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+    var state = ClientState.init();
     var encoder = AofEncoder.init();
     const cases = [_]struct { event: Journal.WriteEvent, expected: []const u8 }{
         .{ .event = .{ .put = .{ .db_index = 0, .key = "fruit", .value = .{ .string = "apple" }, .expires_at = null } }, .expected = @embedFile("fixtures/aof-first-set.aof") },
@@ -56,6 +74,25 @@ test "captured AOF mutation bytes preserve SELECT tracking and binary arguments"
         defer encoder.deinit(testing.allocator, encoded.bytes);
         try testing.expectEqualStrings(case.expected, encoded.bytes);
         encoder.commitDb(encoded.db_index);
+        const replayed = try loader.replayBytes(testing.io, testing.allocator, case.expected, &data_store, &state, .{
+            .role = .base,
+            .recover_truncated_tail = false,
+            .limits = protocol.request_decoder.aof_limits,
+        });
+        try testing.expectEqual(case.expected.len, replayed.complete);
+        try testing.expectEqual(encoded.db_index, state.db_index);
+        switch (case.event) {
+            .put => |put| {
+                var actual = try data_store.get(put.key, put.db_index);
+                defer if (actual) |*value| value.deinit();
+                if (put.expires_at != null) {
+                    try testing.expect(actual == null);
+                } else {
+                    try testing.expectEqualStrings(put.value.string, actual.?.value.string);
+                }
+            },
+            .remove => |remove| try testing.expect(try data_store.get(remove.key, remove.db_index) == null),
+        }
     }
 }
 

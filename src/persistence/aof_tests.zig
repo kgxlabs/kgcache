@@ -262,7 +262,7 @@ test "onWrite followed by flush puts the encoded command in the incr file" {
 
 test "prepared record is invisible until publish and abort keeps it invisible" {
     try withScratchDir("scratch-aof-prepare-record", struct {
-        fn run(io: std.Io, _: std.Io.Dir) !void {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
             const testing = std.testing;
 
             var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
@@ -275,19 +275,24 @@ test "prepared record is invisible until publish and abort keeps it invisible" {
             defer tx.end();
 
             var aborted = try j.prepareRecord(sampleEvent());
-            try testing.expectEqual(0, backend._buffer.items.len);
             aborted.abort();
-            try testing.expectEqual(0, backend._buffer.items.len);
+            try j.flush(0, .{});
+            const after_abort = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(after_abort);
+            try testing.expectEqualStrings("", after_abort);
 
             var published = try j.prepareRecord(sampleEvent());
             defer published.abort();
-            try testing.expectEqual(0, backend._buffer.items.len);
+            try j.flush(0, .{});
+            const before_publish = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(before_publish);
+            try testing.expectEqualStrings("", before_publish);
             published.publish();
             published.abort();
-            try testing.expectEqual(.published, published.state);
-
-            try testing.expect(std.mem.indexOf(u8, backend._buffer.items, "SELECT") != null);
-            try testing.expect(std.mem.indexOf(u8, backend._buffer.items, "SET") != null);
+            try j.flush(0, .{});
+            const contents = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
+            defer testing.allocator.free(contents);
+            try testing.expectEqualStrings("*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n", contents);
         }
     }.run);
 }

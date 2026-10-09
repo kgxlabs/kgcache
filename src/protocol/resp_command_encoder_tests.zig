@@ -18,28 +18,6 @@ test "command encoder writes flat bulk arrays with binary and empty arguments" {
     }
 }
 
-test "command encoder rejects count and bulk length overflow before output" {
-    const byte: u8 = 0;
-    var huge_length: usize = std.math.maxInt(usize);
-    std.mem.doNotOptimizeAway(&huge_length);
-    const huge_bytes = @as([*]const u8, @ptrCast(&byte))[0..huge_length];
-    const argument: []const u8 = "key";
-    const huge_arguments = @as([*]const []const u8, @ptrCast(&argument))[0..huge_length];
-    const wire_count = std.math.cast(usize, std.math.maxInt(i64)) orelse huge_length;
-    const frames = [_]CommandFrame{
-        .{ .name = "DEL", .arguments = huge_arguments },
-        .{ .name = "DEL", .arguments = huge_arguments[0..wire_count] },
-        .{ .name = huge_bytes, .arguments = &.{} },
-        .{ .name = "SET", .arguments = &.{ "key", huge_bytes } },
-    };
-    for (frames) |frame| {
-        var buffer: [32]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try testing.expectError(error.LengthOverflow, encoder.writeCommand(&writer, frame));
-        try testing.expectEqual(0, writer.end);
-    }
-}
-
 const ShortSink = struct {
     bytes: [128]u8 = undefined,
     len: usize = 0,

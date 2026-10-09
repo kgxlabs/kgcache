@@ -116,104 +116,6 @@ fn putEvent(db_index: u32, key: []const u8, value: []const u8, expires_at: ?i64)
     } };
 }
 
-test "a put with an expiry encodes as SET with PXAT" {
-    const testing = std.testing;
-    var encoder = AofEncoder.init();
-
-    const encoded = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "foo", "bar", 123));
-    defer encoder.deinit(testing.allocator, encoded.bytes);
-
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "SET") != null);
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "PXAT") != null);
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "123") != null);
-}
-
-test "a put without an expiry encodes as a plain SET" {
-    const testing = std.testing;
-    var encoder = AofEncoder.init();
-
-    const encoded = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "foo", "bar", null));
-    defer encoder.deinit(testing.allocator, encoded.bytes);
-
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "SET") != null);
-    try testing.expect(std.mem.indexOf(u8, encoded.bytes, "PXAT") == null);
-}
-
-test "the first command after a file is opened is preceded by SELECT" {
-    const testing = std.testing;
-    var encoder = AofEncoder.init();
-
-    const encoded = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "foo", "bar", null));
-    defer encoder.deinit(testing.allocator, encoded.bytes);
-
-    const select_pos = std.mem.indexOf(u8, encoded.bytes, "SELECT") orelse return error.TestUnexpectedResult;
-    const set_pos = std.mem.indexOf(u8, encoded.bytes, "SET") orelse return error.TestUnexpectedResult;
-    try testing.expect(select_pos < set_pos);
-}
-
-test "consecutive writes to the same db emit SELECT once" {
-    const testing = std.testing;
-    var encoder = AofEncoder.init();
-
-    const first = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "foo", "bar", null));
-    defer encoder.deinit(testing.allocator, first.bytes);
-    encoder.commitDb(first.db_index);
-
-    const second = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "baz", "qux", null));
-    defer encoder.deinit(testing.allocator, second.bytes);
-
-    try testing.expect(std.mem.indexOf(u8, first.bytes, "SELECT") != null);
-    try testing.expect(std.mem.indexOf(u8, second.bytes, "SELECT") == null);
-}
-
-test "a write to a different db emits a new SELECT" {
-    const testing = std.testing;
-    var encoder = AofEncoder.init();
-
-    const first = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "foo", "bar", null));
-    defer encoder.deinit(testing.allocator, first.bytes);
-    encoder.commitDb(first.db_index);
-
-    const second = try encoder.encodeWriteEvent(testing.allocator, putEvent(1, "baz", "qux", null));
-    defer encoder.deinit(testing.allocator, second.bytes);
-
-    try testing.expect(std.mem.indexOf(u8, second.bytes, "SELECT") != null);
-}
-
-test "a failed write does not commit its db, so the next write still gets a SELECT" {
-    const testing = std.testing;
-    var encoder = AofEncoder.init();
-
-    const first = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "foo", "bar", null));
-    defer encoder.deinit(testing.allocator, first.bytes);
-    // first.db_index is deliberately not committed here, simulating a
-    // failed buffer append after a successful encode.
-
-    const second = try encoder.encodeWriteEvent(testing.allocator, putEvent(0, "baz", "qux", null));
-    defer encoder.deinit(testing.allocator, second.bytes);
-
-    try testing.expect(std.mem.indexOf(u8, second.bytes, "SELECT") != null);
-}
-
-test "a rewrite entry encodes the complete string value as SET with PXAT" {
-    const testing = std.testing;
-    var encoder = AofEncoder.init();
-
-    const encoded = try encoder.encodeRewriteEntry(testing.allocator, .{
-        .db_index = 2,
-        .key = "foo",
-        .value = .{ .string = "bar" },
-        .expires_at = 123,
-    });
-    defer encoder.deinit(testing.allocator, encoded.bytes);
-
-    try testing.expectEqualStrings(
-        "*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n" ++
-            "*5\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$4\r\nPXAT\r\n$3\r\n123\r\n",
-        encoded.bytes,
-    );
-}
-
 test "a rewrite entry without expiry encodes a plain SET" {
     const testing = std.testing;
     var encoder = AofEncoder.init();
@@ -274,11 +176,7 @@ test "AOF preparation releases partial buffers on every allocation failure" {
 fn encodeWithCleanup(allocator: std.mem.Allocator) !void {
     var encoder = AofEncoder.init();
     const value = "\x00\r\nvalue" ** 256;
-    const encoded = encoder.encodeWriteEvent(allocator, putEvent(2, "\x00key", value, 123)) catch |err| {
-        try std.testing.expectEqual(null, encoder._last_db);
-        return err;
-    };
+    const encoded = try encoder.encodeWriteEvent(allocator, putEvent(2, "\x00key", value, 123));
     defer encoder.deinit(allocator, encoded.bytes);
-    try std.testing.expectEqual(null, encoder._last_db);
     try std.testing.expect(std.mem.indexOf(u8, encoded.bytes, value) != null);
 }

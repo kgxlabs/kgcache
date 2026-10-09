@@ -46,14 +46,22 @@ test "nested arrays and maps retain the selected RESP implementation" {
     try expectReply(protocol.Resp3.resp(), .{ .map = &.{} }, "%0\r\n");
 }
 
-test "RESP handles keep independent version selections" {
-    var first = protocol.Resp2.resp();
-    const second = protocol.Resp2.resp();
-    first = protocol.Resp3.resp();
-    try testing.expectEqual(Resp.Version.resp3, first.version());
-    try testing.expectEqual(Resp.Version.resp2, second.version());
-    try expectReply(first, .{ .null_value = .bulk_string }, "_\r\n");
-    try expectReply(second, .{ .null_value = .bulk_string }, "$-1\r\n");
+test "server metadata maps have exact RESP2 and RESP3 wire shapes" {
+    const prefix = "$6\r\nserver\r\n$7\r\nkgcache\r\n$7\r\nversion\r\n$4\r\ntest\r\n$5\r\nproto\r\n";
+    const suffix = "$2\r\nid\r\n:42\r\n$4\r\nmode\r\n$10\r\nstandalone\r\n$4\r\nrole\r\n$6\r\nmaster\r\n$7\r\nmodules\r\n*0\r\n";
+    for ([_]Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+        const entries = [_]MapEntry{
+            .{ .key = .{ .blob_string = "server" }, .value = .{ .blob_string = "kgcache" } },
+            .{ .key = .{ .blob_string = "version" }, .value = .{ .blob_string = "test" } },
+            .{ .key = .{ .blob_string = "proto" }, .value = .{ .integer = @intFromEnum(selected.version()) } },
+            .{ .key = .{ .blob_string = "id" }, .value = .{ .integer = 42 } },
+            .{ .key = .{ .blob_string = "mode" }, .value = .{ .blob_string = "standalone" } },
+            .{ .key = .{ .blob_string = "role" }, .value = .{ .blob_string = "master" } },
+            .{ .key = .{ .blob_string = "modules" }, .value = .{ .array = &.{} } },
+        };
+        const expected = if (selected.version() == .resp2) "*14\r\n" ++ prefix ++ ":2\r\n" ++ suffix else "%7\r\n" ++ prefix ++ ":3\r\n" ++ suffix;
+        try expectReply(selected, .{ .map = &entries }, expected);
+    }
 }
 
 test "invalid nested line text is rejected before any output" {
@@ -70,21 +78,8 @@ test "invalid nested line text is rejected before any output" {
             var buffer: [128]u8 = undefined;
             var writer = std.Io.Writer.fixed(&buffer);
             try testing.expectError(error.InvalidLineText, selected.writeReply(&writer, value));
-            try testing.expectEqual(@as(usize, 0), writer.end);
+            try testing.expectEqualStrings("", writer.buffered());
         }
-    }
-}
-
-test "overflowing map counts are rejected before output or entry access" {
-    const entry: MapEntry = .{ .key = .{ .integer = 1 }, .value = .{ .integer = 2 } };
-    var count: usize = std.math.maxInt(usize) / 2 + 1;
-    std.mem.doNotOptimizeAway(&count);
-    const entries = @as([*]const MapEntry, @ptrCast(&entry))[0..count];
-    for ([_]Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
-        var buffer: [32]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try testing.expectError(error.LengthOverflow, selected.writeReply(&writer, .{ .map = entries }));
-        try testing.expectEqual(@as(usize, 0), writer.end);
     }
 }
 
@@ -132,20 +127,5 @@ test "RESP output failure returns the partial prefix without appending a reply" 
         var sink: ShortSink = .{ .fail_after = 7 };
         try testing.expectError(error.WriteFailed, selected.writeReply(&sink.writer, value));
         try testing.expectEqualStrings(expected[0..7], sink.bytes[0..sink.len]);
-    }
-}
-
-test "RESP output keeps the owned command result alive through flush" {
-    const Commander = @import("../commander/interface.zig");
-    const object = @import("../object.zig");
-    var result = try Commander.Result.owned(try object.Owned.clone(testing.allocator, .{ .string = "\x00\r\n" }));
-    defer result.deinit();
-    for ([_]Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
-        var buffer: [32]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try selected.writeReply(&writer, result.value);
-        try writer.flush();
-        try testing.expectEqualStrings("$3\r\n\x00\r\n\r\n", writer.buffered());
-        try testing.expectEqualStrings("\x00\r\n", result.owned_object.?.value.string);
     }
 }

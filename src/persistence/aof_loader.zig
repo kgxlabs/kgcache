@@ -537,7 +537,7 @@ test "invalid commands and unrepresentable argument tables never repair a final 
         fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
             try writeSingleIncrManifest(io, dir);
             var count_buffer: [32]u8 = undefined;
-            const oversized_table = try std.fmt.bufPrint(&count_buffer, "*{d}\r\n", .{std.math.maxInt(usize) / @sizeOf([]const u8) + 2});
+            const oversized_table = try std.fmt.bufPrint(&count_buffer, "*{d}\r\n", .{std.math.maxInt(usize) / 2});
             const cases = [_]struct { bytes: []const u8, err: anyerror }{
                 .{ .bytes = "*1\r\n$7\r\nUNKNOWN\r\n", .err = error.UnknownCommand },
                 .{ .bytes = "*1\r\n$3\r\nSET\r\n", .err = error.WrongNumberArguments },
@@ -630,6 +630,7 @@ test "file read and recovery I/O failures preserve bytes and emit no recovery wa
 
         fn run(io: std.Io, dir: std.Io.Dir, config: Config) !void {
             const contents = set_key_final ++ truncated_set;
+            try writeSingleIncrManifest(io, dir);
             try dir.writeFile(io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
             for ([_]enum { open, read, repair_open, truncate }{ .open, .read, .repair_open, .truncate }) |stage| {
                 var vtable = io.vtable.*;
@@ -654,9 +655,8 @@ test "file read and recovery I/O failures preserve bytes and emit no recovery wa
                 const injected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
                 var mock = MockStore.init();
                 var data_store = mock.store();
-                var state = ClientState.init();
                 var logger = logging.TestLogger.init();
-                try testing.expectError(expected, replayFile(injected_io, testing.allocator, &data_store, &state, config, logger.logger(), dir, "appendonly.aof.1.incr", .final_incremental));
+                try testing.expectError(expected, replay(injected_io, testing.allocator, &data_store, config, logger.logger()));
                 const preserved = try dir.readFileAlloc(io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
                 defer testing.allocator.free(preserved);
                 try testing.expectEqualStrings(contents, preserved);

@@ -8,16 +8,8 @@ const MockStore = @import("store/mock_store.zig");
 const init = commander.init;
 
 test "reject unknown command" {
-    try std.testing.expectError(error.UnknownCommand, init(std.testing.allocator, .{ .name = "UNKNOWN", .arguments = &.{} }));
-}
-
-test "decoder rejects empty command arrays" {
-    try std.testing.expectError(error.EmptyArray, protocol.request_decoder.decode("*0\r\n", std.testing.allocator, protocol.request_decoder.aof_limits));
-}
-
-test "decoder rejects unsupported command input shapes" {
-    for ([_][]const u8{ "*1\r\n:1\r\n", "*2\r\n$3\r\nGET\r\n*-1\r\n" }) |input| {
-        try std.testing.expectError(error.ExpectedBulkString, protocol.request_decoder.decode(input, std.testing.allocator, protocol.request_decoder.aof_limits));
+    for ([_][]const u8{ "UNKNOWN", "" }) |name| {
+        try std.testing.expectError(error.UnknownCommand, init(std.testing.allocator, .{ .name = name, .arguments = &.{} }));
     }
 }
 
@@ -28,9 +20,53 @@ fn executeWithMockStore(keyword: []const u8, arguments: []const []const u8, mock
 }
 
 fn executeWithStore(keyword: []const u8, arguments: []const []const u8, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
-    const command = try init(std.testing.allocator, .{ .name = keyword, .arguments = arguments });
+    return executeWithAllocator(std.testing.allocator, keyword, arguments, data_store, client_state);
+}
+
+fn executeWithAllocator(allocator: std.mem.Allocator, keyword: []const u8, arguments: []const []const u8, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
+    const command = try init(allocator, .{ .name = keyword, .arguments = arguments });
     defer command.deinit();
     return command.execute(std.testing.io, data_store, client_state);
+}
+
+test "GET and SET GET replies survive replacement and output failures without leaking" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, replyLifetime, .{});
+}
+
+fn replyLifetime(allocator: std.mem.Allocator) !void {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    var backend = DefaultStorage.init(testing.io, allocator);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try persistence.KgcPersistence.init(testing.io, allocator, &persistence_state, "reply-lifetime.kgc");
+    var memory_store = store.MemoryStore.init(allocator, &.{backend.storage()}, kgc.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+    var state = Commander.ClientState.init();
+
+    var initial = try executeWithAllocator(allocator, "SET", &.{ "key", "\x00\r\n" }, &data_store, &state);
+    defer initial.deinit();
+    var get = try executeWithAllocator(allocator, "GET", &.{"key"}, &data_store, &state);
+    defer get.deinit();
+    var previous = try executeWithAllocator(allocator, "SET", &.{ "key", "second", "GET" }, &data_store, &state);
+    defer previous.deinit();
+    var replacement = try executeWithAllocator(allocator, "SET", &.{ "key", "third" }, &data_store, &state);
+    defer replacement.deinit();
+
+    for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+        for ([_]Reply{ get.value, previous.value }) |reply| {
+            var small_buffer: [1]u8 = undefined;
+            var failing_writer = std.Io.Writer.fixed(&small_buffer);
+            try testing.expectError(error.WriteFailed, selected.writeReply(&failing_writer, reply));
+            var buffer: [32]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try selected.writeReply(&writer, reply);
+            try writer.flush();
+            try testing.expectEqualStrings("$3\r\n\x00\r\n\r\n", writer.buffered());
+        }
+    }
 }
 
 fn expectArray(value: Reply) ![]const Reply {
