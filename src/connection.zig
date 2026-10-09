@@ -71,12 +71,19 @@ fn handleConnection(
     while (true) {
         if (stop_requested.load(.acquire)) return;
 
-        buffer.read_pos = 0;
-        buffer.write_pos = 0;
+        if (buffer.read_pos == buffer.write_pos) {
+            buffer.read_pos = 0;
+            buffer.write_pos = 0;
+        }
         buffer.assertValid();
 
         var connection_writer = connection.writer(io, &.{});
-        var data = [_][]u8{buffer.bytes};
+        if (buffer.write_pos == buffer.bytes.len) {
+            _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = "ERR protocol error: incomplete request" }, stop_requested);
+            return;
+        }
+
+        var data = [_][]u8{buffer.bytes[buffer.write_pos..]};
         const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| {
             if (stop_requested.load(.acquire)) return;
             switch (err) {
@@ -85,11 +92,12 @@ fn handleConnection(
             }
         };
 
-        buffer.write_pos = bytes_read;
-        buffer.assertValid();
-        if (buffer.write_pos == 0) return;
+        if (bytes_read == 0) return;
 
-        while (buffer.read_pos < buffer.write_pos) {
+        buffer.write_pos = std.math.add(usize, buffer.write_pos, bytes_read) catch return error.LengthOverflow;
+        buffer.assertValid();
+
+        pending: while (buffer.read_pos < buffer.write_pos) {
             const consumed = request: {
                 var gpa: std.heap.DebugAllocator(.{}) = .init;
                 defer _ = gpa.deinit();
@@ -107,11 +115,7 @@ fn handleConnection(
 
                 var decoded = switch (outcome) {
                     .complete => |complete| complete,
-                    // TODO: implement incremental framing for the requests
-                    .incomplete => {
-                        _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = "ERR protocol error: incomplete request" }, stop_requested);
-                        return;
-                    },
+                    .incomplete => break :pending,
                 };
                 defer decoded.deinit(allocator);
 

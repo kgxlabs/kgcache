@@ -49,6 +49,7 @@ test "buffer allocation failure is reported once without closing the borrowed st
 const TestConnectionIo = struct {
     requests: []const []const u8,
     next_request: usize = 0,
+    request_offset: usize = 0,
     output: [512]u8 = undefined,
     output_len: usize = 0,
     close_calls: usize = 0,
@@ -69,10 +70,15 @@ const TestConnectionIo = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (self.next_request == self.requests.len) return 0;
         const request = self.requests[self.next_request];
-        self.next_request += 1;
-        std.debug.assert(request.len <= data[0].len);
-        @memcpy(data[0][0..request.len], request);
-        return request.len;
+        std.debug.assert(data[0].len > 0);
+        const count = @min(request.len - self.request_offset, data[0].len);
+        @memcpy(data[0][0..count], request[self.request_offset..][0..count]);
+        self.request_offset += count;
+        if (self.request_offset == request.len) {
+            self.next_request += 1;
+            self.request_offset = 0;
+        }
+        return count;
     }
 
     fn write(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
@@ -348,6 +354,91 @@ test "complete commands in one read advance after replies and mapped errors" {
     try testing.expectEqual(1, mock.dbsize_calls);
     try testing.expectEqual(2, fake_io.next_request);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
+}
+
+test "fragmented commands finish at every split and unfinished EOF stays quiet" {
+    const testing = std.testing;
+    const cases = [_]struct { request: []const u8, reply: []const u8, stored_value: ?[]const u8 = null }{
+        .{ .request = "*1\r\n$4\r\nPING\r\n", .reply = "+PONG\r\n" },
+        .{ .request = "*2\r\n$4\r\nECHO\r\n$3\r\n\x00\r\n\r\n", .reply = "$3\r\n\x00\r\n\r\n" },
+        .{ .request = "*2\r\n$4\r\nECHO\r\n$0\r\n\r\n", .reply = "$0\r\n\r\n" },
+        .{ .request = "*3\r\n$3\r\nSET\r\n$0\r\n\r\n$5\r\na\x00\r\nb\r\n", .reply = "+OK\r\n", .stored_value = "a\x00\r\nb" },
+    };
+
+    for (cases) |case| {
+        for (1..case.request.len) |split| {
+            var mock = store.MockStore.init();
+            var data_store = mock.store();
+            var test_logger = logging.TestLogger.init();
+            var fake_io: TestConnectionIo = .{ .requests = &.{ case.request[0..split], case.request[split..], "*1\r\n$4\r\nPING\r\n" } };
+
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, case.request.len, &never_stop_requested);
+
+            var expected_buffer: [64]u8 = undefined;
+            const expected = try std.fmt.bufPrint(&expected_buffer, "{s}+PONG\r\n", .{case.reply});
+            try testing.expectEqualStrings(expected, fake_io.written());
+            if (case.stored_value) |value| {
+                try testing.expectEqual(1, mock.set_calls);
+                try testing.expectEqualStrings(value, mock.last_set_value_copy[0..mock.last_set_value_len]);
+            }
+            try testing.expectEqual(0, test_logger.recordedEvents().len);
+            try testing.expectEqual(0, fake_io.close_calls);
+
+            var unfinished_mock = store.MockStore.init();
+            var unfinished_store = unfinished_mock.store();
+            var unfinished_io: TestConnectionIo = .{ .requests = &.{case.request[0..split]} };
+            serve(unfinished_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &unfinished_store, testing.allocator, case.request.len, &never_stop_requested);
+
+            try testing.expectEqualStrings("", unfinished_io.written());
+            try testing.expectEqual(0, unfinished_mock.set_calls);
+            try testing.expectEqual(0, test_logger.recordedEvents().len);
+            try testing.expectEqual(0, unfinished_io.close_calls);
+        }
+    }
+}
+
+test "an unfinished request at fixed capacity ends cleanly" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n"} };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 14, &never_stop_requested);
+
+    try testing.expectEqualStrings("-ERR protocol error: incomplete request\r\n", fake_io.written());
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+    try testing.expectEqual(0, fake_io.close_calls);
+}
+
+test "a retained pipeline tail finishes without repeating earlier commands" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    var fake_io: TestConnectionIo = .{ .requests = &.{
+        "*1\r\n$4\r\nPING\r\n" ++
+            "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
+            "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n" ++
+            "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nban",
+        "ana\r\n*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n",
+    } };
+    var test_logger = logging.TestLogger.init();
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-retained-tail.kgc");
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 256, &never_stop_requested);
+
+    try testing.expectEqualStrings("+PONG\r\n+OK\r\n$5\r\napple\r\n+OK\r\n$6\r\nbanana\r\n", fake_io.written());
+    var stored = (try data_store.get("fruit", 0)).?;
+    defer stored.deinit();
+    try testing.expectEqualStrings("banana", stored.value.string);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+    try testing.expectEqual(0, fake_io.close_calls);
 }
 
 test "pipelined borrowed and owned replies finish through short writes" {

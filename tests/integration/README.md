@@ -2,7 +2,7 @@
 
 Run `zig build test-integration` to build kgcache and run the Zig integration runner. `zig build test` runs the unit suite. The runner calls suite files in `tests/integration/suites/`.
 
-The baseline suite checks PING, SET/GET/DEL, recovery after command errors, database isolation, invalid config startup, idle client shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
+The baseline suite checks PING, SET/GET/DEL, retained pipeline tails, recovery after command errors, database isolation, invalid config startup, idle client shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
 
 The PING cases check PONG without a message and exact bulk string replies for
 ordinary, empty, and binary messages containing NUL, CRLF, and a non-ASCII byte.
@@ -46,4 +46,8 @@ The process harness in `tests/integration/harness/` owns each child from start t
 
 The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.
 
-Current split-request and pipelined-request failures are tracked in [issue #160](https://github.com/kgxlabs/kgcache/issues/160).
+The retained-tail case sends three complete commands and an unfinished fourth,
+reads the first three replies, and checks the unchanged value from another
+connection. It then finishes the fourth command and checks the new value.
+Deterministic connection tests cover exact read splits, including binary and
+empty bodies.
