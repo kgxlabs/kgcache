@@ -95,8 +95,9 @@ Run the unit test suite:
 zig build test
 ```
 
-The tests cover RESP parsing, command dispatch, storage, expiration,
-snapshots, AOF loading, fsync policies, and AOF rewrites.
+The tests cover command decoding, RESP2 and RESP3 reply encoding, command
+dispatch, storage, expiration, snapshots, AOF loading and recovery, fsync
+policies, and AOF rewrites.
 
 See [Test organization](docs/TESTING.md) when adding or moving tests.
 
@@ -111,8 +112,9 @@ zig build test
 
 ## Current status and compatibility
 
-- Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, transactions, or RESP3.
-- The server processes one parsed request per connection read, into a per-connection buffer (1 KiB by default, configurable). Pipelining and requests split across reads are not supported.
+- TCP sessions use RESP2. HELLO negotiation and RESP3 sessions are not available.
+- Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, or transactions.
+- Complete requests in one read are processed in order. An incomplete request sends a protocol error and closes the connection, so requests split across reads are not supported. The per-connection read buffer is 1 KiB by default and is configurable.
 - `COMMAND` supports registry-based introspection. `COMMAND DOCS` and module filtering are not supported.
 - The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`. 
 

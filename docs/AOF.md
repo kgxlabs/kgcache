@@ -137,7 +137,8 @@ AOF data files that are not listed in the manifest.
 
 ## What is written
 
-AOF files use RESP commands, the same command format clients send:
+AOF files use flat RESP arrays of bulk strings, the same command format clients
+send. In readable form, records look like this:
 
 ```text
 SELECT 2
@@ -145,8 +146,9 @@ SET session:42 active PXAT 1788500000000
 DEL old-key
 ```
 
-Using commands keeps loading simple: kgcache reads each command and runs it
-through the normal command path.
+The command writer saves commands that rebuild applied changes, independently
+of reply encoding. Loading uses the shared request decoder and runs each command
+through the normal command path without writing new AOF records.
 
 Expiry times use the absolute `PXAT` form. A relative timeout such as
 `PX 5000` would start a new five-second timer on every restart. An absolute
@@ -200,10 +202,30 @@ remove old AOF files not listed in the manifest
 start serving requests
 ```
 
-If the final incremental file ends with half of a command,
-`aof-load-truncated yes` removes that incomplete command and continues.
-An incomplete base file or an earlier incremental file is always an error.
-Set `aof-load-truncated no` to make an incomplete final command an error too.
+Each file is read fully into memory before replay. The current file buffer
+coexists with the restored cache and command allocations, so extra reading
+memory grows with that file's size. The streaming fix is tracked in
+[#173](https://github.com/kgxlabs/kgcache/issues/173).
+
+Recovery distinguishes an unfinished command from malformed bytes:
+
+| File ending or failure | Startup behavior |
+| --- | --- |
+| Clean EOF after complete commands | Continue loading |
+| Unfinished final incremental command with `aof-load-truncated yes` | Truncate to the last successfully executed command, log a warning, and continue |
+| Unfinished base or earlier incremental file | Fail and preserve file bytes |
+| Unfinished final command with `aof-load-truncated no` | Fail and preserve file bytes |
+| Malformed bytes, invalid commands, or resource failures | Fail and preserve file bytes |
+
+If command 10 is unfinished after commands 1 through 9 succeed, recovery removes
+everything from the start of command 10 to EOF. It does not search for later
+commands. An invalid header or terminator is malformed even at EOF and never
+qualifies for tail recovery.
+
+A read, open, or truncation failure also fails startup. The recovery warning is
+logged only after truncation succeeds. The format has no checksum, so a damaged
+length that still describes an unfinished command can look like an interrupted
+write.
 
 ## Rewrite
 
