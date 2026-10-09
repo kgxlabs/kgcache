@@ -1,5 +1,4 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
@@ -10,7 +9,7 @@ const Config = @import("../config.zig");
 const Select = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Select) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -24,7 +23,7 @@ const vtable = Commander.VTable{
 fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) Commander.Error!Commander.Result {
     const self: *Select = @ptrCast(@alignCast(ptr));
 
-    const index = try command_arguments.bulkStringInt(u32, self.arguments[0]);
+    const index = try command_arguments.parseInt(u32, self.arguments[0]);
     if (index >= data_store.numDatabases()) {
         return error.DbIndexOutOfRange;
     }
@@ -40,11 +39,11 @@ fn deinit(ptr: *anyopaque) void {
 
 test "execute selects a valid database" {
     const testing = std.testing;
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "SELECT" },
-        .{ .bulk_string = "1" },
+    const values = [_][]const u8{
+        "SELECT",
+        "1",
     };
-    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
+    const command = try TestHelpers.initCommand(testing.allocator, .{ .name = values[0], .arguments = values[1..] });
     defer command.deinit();
 
     var mock_store = MockStore.init();
@@ -63,11 +62,11 @@ test "execute selects a valid database" {
 
 test "rejects an out-of-range database index" {
     const testing = std.testing;
-    var values = [_]resp.RESPValue{
-        .{ .bulk_string = "SELECT" },
-        .{ .bulk_string = "99" },
+    const values = [_][]const u8{
+        "SELECT",
+        "99",
     };
-    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
+    const command = try TestHelpers.initCommand(testing.allocator, .{ .name = values[0], .arguments = values[1..] });
     defer command.deinit();
 
     var mock_store = MockStore.init();

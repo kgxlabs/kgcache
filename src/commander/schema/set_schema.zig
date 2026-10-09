@@ -1,8 +1,6 @@
 const std = @import("std");
 const Interface = @import("interface.zig");
 const Request = @import("../request.zig");
-const resp = @import("../../resp.zig");
-const command_arguments = @import("../arguments.zig");
 const KGHelpers = @import("../../helpers.zig");
 const time = @import("../../time.zig");
 
@@ -69,7 +67,7 @@ const get_def = Interface.OptionDefinition{
     .repeatable = false,
 };
 
-pub fn apply(req: *Request.SetRequest, def: *const Interface.OptionDefinition, args: []const resp.RESPValue, now_ms: time.UnixMs) !usize {
+pub fn apply(req: *Request.SetRequest, def: *const Interface.OptionDefinition, args: []const []const u8, now_ms: time.UnixMs) !usize {
     if (KGHelpers.eqlStringIgnoreCase(def.keyword, nx_def.keyword)) {
         req.condition = .nx;
         return 1;
@@ -119,7 +117,7 @@ pub fn apply(req: *Request.SetRequest, def: *const Interface.OptionDefinition, a
     unreachable;
 }
 
-fn relativeExpiration(args: []const resp.RESPValue, now_ms: time.UnixMs, multiplier: i64) !time.UnixMs {
+fn relativeExpiration(args: []const []const u8, now_ms: time.UnixMs, multiplier: i64) !time.UnixMs {
     const value = try expirationArgument(args);
     if (value <= 0) return error.Syntax;
 
@@ -127,23 +125,23 @@ fn relativeExpiration(args: []const resp.RESPValue, now_ms: time.UnixMs, multipl
     return std.math.add(i64, now_ms, duration_ms) catch error.Syntax;
 }
 
-fn absoluteExpiration(args: []const resp.RESPValue, multiplier: i64) !time.UnixMs {
+fn absoluteExpiration(args: []const []const u8, multiplier: i64) !time.UnixMs {
     const value = try expirationArgument(args);
     if (value <= 0) return error.Syntax;
 
     return std.math.mul(i64, value, multiplier) catch error.Syntax;
 }
 
-fn expirationArgument(args: []const resp.RESPValue) !i64 {
+fn expirationArgument(args: []const []const u8) !i64 {
     if (args.len < 2) return error.Syntax;
-    return std.fmt.parseInt(i64, try command_arguments.bulkString(args[1]), 10);
+    return std.fmt.parseInt(i64, args[1], 10);
 }
 
 test "EX is normalized to an absolute millisecond timestamp" {
     var req = emptySetRequest();
-    var args = [_]resp.RESPValue{
-        .{ .bulk_string = "EX" },
-        .{ .bulk_string = "2" },
+    const args = [_][]const u8{
+        "EX",
+        "2",
     };
 
     _ = try apply(&req, &ex_def, &args, 1_000);
@@ -152,9 +150,9 @@ test "EX is normalized to an absolute millisecond timestamp" {
 
 test "PX is normalized to an absolute millisecond timestamp" {
     var req = emptySetRequest();
-    var args = [_]resp.RESPValue{
-        .{ .bulk_string = "PX" },
-        .{ .bulk_string = "25" },
+    const args = [_][]const u8{
+        "PX",
+        "25",
     };
 
     _ = try apply(&req, &px_def, &args, 1_000);

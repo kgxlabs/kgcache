@@ -1,13 +1,11 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
-const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 
 const Get = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Get) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -21,11 +19,11 @@ const vtable = Commander.VTable{
 fn execute(ptr: *anyopaque, _: std.Io, data_store: *store.Store, client_state: *Commander.ClientState) anyerror!Commander.Result {
     const self: *Get = @ptrCast(@alignCast(ptr));
 
-    const key = try command_arguments.bulkString(self.arguments[0]);
+    const key = self.arguments[0];
     const maybe_object = try data_store.get(key, client_state.db_index);
 
     if (maybe_object == null) {
-        return Commander.Result.borrowed(.{ .bulk_string = null });
+        return Commander.Result.borrowed(.{ .null_value = .bulk_string });
     }
 
     return try Commander.Result.owned(maybe_object.?);

@@ -53,6 +53,7 @@ const TestConnectionIo = struct {
     output_len: usize = 0,
     close_calls: usize = 0,
     fail_write: bool = false,
+    fail_after_bytes: ?usize = null,
     vtable: std.Io.VTable = undefined,
 
     fn io(self: *@This()) std.Io {
@@ -76,27 +77,34 @@ const TestConnectionIo = struct {
     fn write(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (self.fail_write) return error.NetworkDown;
-        var count: usize = 0;
-        self.append(header);
-        count += header.len;
+        if (self.fail_after_bytes) |limit| {
+            if (self.output_len >= limit) return error.NetworkDown;
+        }
+        var count = self.append(header);
+        if (count != header.len) return count;
         for (data[0 .. data.len - 1]) |part| {
-            self.append(part);
-            count += part.len;
+            const byte_count = self.append(part);
+            count += byte_count;
+            if (byte_count != part.len) return count;
         }
         if (splat > 0) {
             const part = data[data.len - 1];
             for (0..splat) |_| {
-                self.append(part);
-                count += part.len;
+                const byte_count = self.append(part);
+                count += byte_count;
+                if (byte_count != part.len) return count;
             }
         }
         return count;
     }
 
-    fn append(self: *@This(), bytes: []const u8) void {
-        std.debug.assert(self.output_len + bytes.len <= self.output.len);
-        @memcpy(self.output[self.output_len..][0..bytes.len], bytes);
-        self.output_len += bytes.len;
+    fn append(self: *@This(), bytes: []const u8) usize {
+        const limit = self.fail_after_bytes orelse self.output.len;
+        const count = @min(bytes.len, limit - self.output_len);
+        std.debug.assert(self.output_len + count <= self.output.len);
+        @memcpy(self.output[self.output_len..][0..count], bytes[0..count]);
+        self.output_len += count;
+        return count;
     }
 
     fn close(ptr: ?*anyopaque, handles: []const std.Io.net.Socket.Handle) void {
@@ -310,4 +318,73 @@ test "an internal failure and failed error response report both sources" {
     try testing.expectEqual(2, events.len);
     try testing.expectEqual(error.TestStorageSource, events[0].source.?);
     try testing.expectEqual(error.NetworkDown, events[1].source.?);
+}
+
+test "complete commands in one read advance after replies and mapped errors" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{
+        "*1\r\n$4\r\nPING\r\n" ++
+            "*1\r\n$3\r\nGET\r\n" ++
+            "*2\r\n$4\r\nECHO\r\n$3\r\n\x00\r\n\r\n" ++
+            "*2\r\n$6\r\nSELECT\r\n$1\r\n9\r\n" ++
+            "*1\r\n$6\r\nDBSIZE\r\n",
+        "*2\r\n$4\r\nECHO\r\n$0\r\n\r\n",
+    } };
+    var test_logger = logging.TestLogger.init();
+    var mock = store.MockStore.init();
+    mock.dbsize_result = 7;
+    var data_store = mock.store();
+
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    try testing.expectEqualStrings(
+        "+PONG\r\n-ERR wrong number of arguments\r\n$3\r\n\x00\r\n\r\n-ERR DB index is out of range\r\n:7\r\n$0\r\n\r\n",
+        fake_io.written(),
+    );
+    try testing.expectEqual(1, mock.dbsize_calls);
+    try testing.expectEqual(2, fake_io.next_request);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+}
+
+test "invalid later DEL elements prevent mutation and stop the connection" {
+    const testing = std.testing;
+    const invalid_elements = [_][]const u8{ ":42\r\n", "$-1\r\n", "*0\r\n", "+apple\r\n", "-ERR\r\n" };
+    for (invalid_elements) |element| {
+        var buffer: [128]u8 = undefined;
+        const request = try std.fmt.bufPrint(&buffer, "*3\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n{s}*1\r\n$6\r\nDBSIZE\r\n", .{element});
+        var fake_io: TestConnectionIo = .{ .requests = &.{ request, "*1\r\n$4\r\nPING\r\n" } };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        try testing.expectEqual(0, mock.remove_calls);
+        try testing.expectEqual(0, mock.dbsize_calls);
+        try testing.expectEqual(1, fake_io.next_request);
+        try testing.expect(std.mem.startsWith(u8, fake_io.written(), "-ERR protocol error:"));
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+    }
+}
+
+test "a partial reply failure stops before the next pipelined command" {
+    const testing = std.testing;
+    const cases = [_]struct { request: []const u8, expected: []const u8 }{
+        .{ .request = "*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "+PO" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nGET\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "*1\r" },
+    };
+    for (cases) |case| {
+        var fake_io: TestConnectionIo = .{
+            .requests = &.{case.request},
+            .fail_after_bytes = case.expected.len,
+        };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+        try testing.expectEqualStrings(case.expected, fake_io.written());
+        try testing.expectEqual(0, mock.dbsize_calls);
+        try testing.expectEqual(1, test_logger.recordedEvents().len);
+        try testing.expectEqual(error.NetworkDown, test_logger.recordedEvents()[0].source.?);
+    }
 }

@@ -1,5 +1,6 @@
 const std = @import("std");
-const resp = @import("resp.zig");
+const protocol = @import("protocol.zig");
+const request_decoder = protocol.request_decoder;
 const commander = @import("commander.zig");
 const ClientState = @import("client_state.zig");
 const store = @import("store.zig");
@@ -32,6 +33,11 @@ pub fn serve(
     };
 }
 
+const transition_limits: request_decoder.Limits = .{
+    .max_frame_bytes = std.math.maxInt(usize),
+    .max_elements = std.math.maxInt(usize),
+};
+
 fn handleConnection(
     io: std.Io,
     logger: logging.Logger,
@@ -41,15 +47,11 @@ fn handleConnection(
     stop_requested: *const std.atomic.Value(bool),
 ) !void {
     var client_state = ClientState.init();
-
     while (true) {
         if (stop_requested.load(.acquire)) return;
 
-        // TODO: use buffered writer
         var connection_writer = connection.writer(io, &.{});
         var data = [_][]u8{buf};
-
-        // TODO: We are directly doing syscall to OS which is expensive. Refactor this to use buffered reader
         const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| {
             if (stop_requested.load(.acquire)) return;
             switch (err) {
@@ -60,92 +62,114 @@ fn handleConnection(
 
         if (bytes_read == 0) return;
 
-        var gpa: std.heap.DebugAllocator(.{}) = .init;
-        defer _ = gpa.deinit();
-
-        const req_allocator = gpa.allocator();
-        const serializer = resp.serializer();
-
-        var parser = resp.parser(buf[0..bytes_read]);
-        // NOTE: There is a potential memory leak when error occurs.
-        // This is the scenario: error can happens when parsing Array type and there are some array items already allocated.
-        // We don't need to worry about that because we already errdefer it in parser implementation
-        const commands = parser.parse(req_allocator) catch |err| {
-            if (err == error.OutOfMemory) {
-                logger.err("connection: request parsing failed", err, @errorReturnTrace());
-                _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
-            } else {
-                _ = writeResponse(logger, &connection_writer, parseErrorResponse(err), stop_requested);
-            }
-            return;
-        };
-        defer parser.deinit(req_allocator, commands);
-
-        const c = commander.init(req_allocator, commands) catch |err| {
-            const response = initErrorResponse(err) orelse {
-                logger.err("connection: command initialization failed", err, @errorReturnTrace());
-                _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
-                return;
-            };
-            if (!writeResponse(logger, &connection_writer, response, stop_requested)) return;
-            continue;
-        };
-        defer c.deinit();
-
-        // TODO: There is a potential memory leak when error occurs.
-        // This is the scenario: error can happens when serializing a RESP value and there are some items already allocated.
-        // How do we handle that scenario to free the memory?
-
-        var result = c.execute(io, data_store, &client_state) catch |err| {
-            if (executeErrorResponse(err)) |response| {
-                if (!writeResponse(logger, &connection_writer, response, stop_requested)) return;
-                continue;
-            }
-
-            logger.err("connection: command execution failed", err, @errorReturnTrace());
-            _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
-            return;
-        };
-        defer result.deinit();
-
-        const serialized_result = serializer.serialize(req_allocator, result.value) catch |err| {
-            logger.err("connection: response serialization failed", err, @errorReturnTrace());
-            _ = writeResponse(logger, &connection_writer, internal_error_response, stop_requested);
-            return;
-        };
-
-        defer serializer.deinit(req_allocator, serialized_result);
-
-        // Write serialized string
-        if (!writeResponse(logger, &connection_writer, serialized_result, stop_requested)) return;
+        var cursor: usize = 0;
+        while (cursor < bytes_read) {
+            const consumed = handleRequest(io, logger, &connection_writer, data_store, &client_state, buf[cursor..bytes_read], stop_requested) orelse return;
+            cursor = std.math.add(usize, cursor, consumed) catch return error.LengthOverflow;
+        }
     }
 }
 
-const internal_error_response = "-ERR something went wrong\r\n";
+fn handleRequest(
+    io: std.Io,
+    logger: logging.Logger,
+    writer: *std.Io.net.Stream.Writer,
+    data_store: *store.Store,
+    client_state: *ClientState,
+    input: []const u8,
+    stop_requested: *const std.atomic.Value(bool),
+) ?usize {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
 
-fn parseErrorResponse(err: resp.ParseError) []const u8 {
+    const allocator = gpa.allocator();
+    const outcome = request_decoder.decode(input, allocator, transition_limits) catch |err| {
+        if (err == error.OutOfMemory) {
+            logger.err("connection: request parsing failed", err, @errorReturnTrace());
+            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
+        } else {
+            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
+        }
+        return null;
+    };
+
+    var decoded = switch (outcome) {
+        .complete => |complete| complete,
+        // TODO: implement incremental framing for the requests
+        .incomplete => {
+            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = "ERR protocol error: incomplete request" }, stop_requested);
+            return null;
+        },
+    };
+    defer decoded.deinit(allocator);
+
+    const command = commander.init(allocator, decoded.frame) catch |err| {
+        const message = initErrorResponse(err) orelse {
+            logger.err("connection: command initialization failed", err, @errorReturnTrace());
+            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
+            return null;
+        };
+
+        if (!writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested)) return null;
+
+        return decoded.consumed;
+    };
+    defer command.deinit();
+
+    var result = command.execute(io, data_store, client_state) catch |err| {
+        if (executeErrorResponse(err)) |message| {
+            if (!writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested)) return null;
+            return decoded.consumed;
+        }
+        logger.err("connection: command execution failed", err, @errorReturnTrace());
+        _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
+        return null;
+    };
+    defer result.deinit();
+
+    if (!writeResponse(logger, client_state.resp, writer, result.value, stop_requested)) return null;
+
+    return decoded.consumed;
+}
+
+const internal_error_message = "ERR something went wrong";
+
+fn parseErrorResponse(err: request_decoder.DecodeError) []const u8 {
     return switch (err) {
-        error.Incomplete => "-ERR protocol error: incomplete request\r\n",
-        error.MalformedSize => "-ERR protocol error: malformed size\r\n",
-        error.InvalidType => "-ERR protocol error: invalid RESP type\r\n",
-        error.IncorrectToken => "-ERR protocol error: incorrect token\r\n",
-        error.NotInteger => "-ERR protocol error: invalid integer\r\n",
-        error.Malformed => "-ERR protocol error: malformed request\r\n",
-        error.ExceededSize => "-ERR protocol error\r\n",
+        error.ExpectedArray, error.ExpectedBulkString => "ERR protocol error: invalid RESP type",
+        error.EmptyArray, error.InvalidArrayLength => "ERR protocol error: malformed request",
+        error.InvalidBulkLength, error.LengthOverflow => "ERR protocol error: malformed size",
+        error.InvalidLineEnding, error.InvalidBulkTerminator => "ERR protocol error: malformed request",
+        error.FrameTooLarge, error.TooManyElements, error.ArgumentTableTooLarge => "ERR protocol error: request limit exceeded",
         error.OutOfMemory => unreachable,
     };
 }
 
 fn writeResponse(
     logger: logging.Logger,
+    selected: protocol.Resp,
     writer: *std.Io.net.Stream.Writer,
-    bytes: []const u8,
+    value: protocol.Reply,
     stop_requested: *const std.atomic.Value(bool),
 ) bool {
-    writer.interface.writeAll(bytes) catch |err| {
-        if (!stop_requested.load(.acquire)) {
-            logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+    selected.writeReply(&writer.interface, value) catch |err| {
+        if (err == error.InvalidLineText or err == error.LengthOverflow) {
+            logger.err("connection: response encoding failed", err, @errorReturnTrace());
+            selected.writeReply(&writer.interface, .{ .error_reply = internal_error_message }) catch |write_err| {
+                if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse write_err, @errorReturnTrace());
+                return false;
+            };
+            writer.interface.flush() catch |flush_err| {
+                if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse flush_err, @errorReturnTrace());
+                return false;
+            };
+            return false;
         }
+        if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+        return false;
+    };
+    writer.interface.flush() catch |err| {
+        if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
         return false;
     };
     return true;
@@ -153,30 +177,30 @@ fn writeResponse(
 
 fn initErrorResponse(err: commander.Error) ?[]const u8 {
     return switch (err) {
-        error.UnknownCommand => "-ERR unknown command\r\n",
-        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
-        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
-        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
-        error.WrongNumberArguments => "-ERR wrong number of arguments\r\n",
+        error.UnknownCommand => "ERR unknown command",
+        error.UnsupportedKeyword => "ERR unsupported command keyword",
+        error.UnsupportedArgumentType => "ERR unsupported argument type",
+        error.MalformedCommandRequest => "ERR malformed command request",
+        error.WrongNumberArguments => "ERR wrong number of arguments",
         else => null,
     };
 }
 
 fn executeErrorResponse(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.UnknownCommand => "-ERR unknown command\r\n",
-        error.UnsupportedKeyword => "-ERR unsupported command keyword\r\n",
-        error.UnsupportedArgumentType => "-ERR unsupported argument type\r\n",
-        error.MalformedCommandRequest => "-ERR malformed command request\r\n",
-        error.WrongNumberArguments => "-ERR wrong number of arguments\r\n",
-        error.DbIndexOutOfRange => "-ERR DB index is out of range\r\n",
-        error.UnsupportedOption => "-ERR unsupported option\r\n",
-        error.Syntax => "-ERR syntax error\r\n",
-        error.SaveAlreadyInProgress => "-ERR save already in progress\r\n",
-        error.RewriteAlreadyInProgress => "-ERR rewrite already in progress\r\n",
-        error.UnsupportedCondition => "-ERR unsupported condition\r\n",
-        error.JournalWriteBlocked => "-ERR AOF write is blocked\r\n",
-        error.AofDisabled => "-ERR AOF is disabled\r\n",
+        error.UnknownCommand => "ERR unknown command",
+        error.UnsupportedKeyword => "ERR unsupported command keyword",
+        error.UnsupportedArgumentType => "ERR unsupported argument type",
+        error.MalformedCommandRequest => "ERR malformed command request",
+        error.WrongNumberArguments => "ERR wrong number of arguments",
+        error.DbIndexOutOfRange => "ERR DB index is out of range",
+        error.UnsupportedOption => "ERR unsupported option",
+        error.Syntax => "ERR syntax error",
+        error.SaveAlreadyInProgress => "ERR save already in progress",
+        error.RewriteAlreadyInProgress => "ERR rewrite already in progress",
+        error.UnsupportedCondition => "ERR unsupported condition",
+        error.JournalWriteBlocked => "ERR AOF write is blocked",
+        error.AofDisabled => "ERR AOF is disabled",
         else => null,
     };
 }

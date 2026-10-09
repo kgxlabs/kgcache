@@ -1,5 +1,4 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 const Commander = @import("interface.zig");
 const TestHelpers = @import("../tests/helpers.zig");
@@ -10,7 +9,7 @@ const time = @import("../time.zig");
 const Save = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Save) Commander {
     return .{ .ptr = self, .vtable = &vtable };

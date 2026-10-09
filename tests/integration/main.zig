@@ -9,6 +9,7 @@ const idle_clients_shutdown = @import("suites/idle_clients_shutdown.zig");
 const restart_same_port = @import("suites/restart_same_port.zig");
 const two_servers = @import("suites/two_servers.zig");
 const process_harness = @import("suites/process_harness.zig");
+const aof_recovery = @import("suites/aof_recovery.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
@@ -33,6 +34,7 @@ pub fn main(init: std.process.Init) !void {
     try select_isolation.run(init.io, init.gpa, executable_path, artifact_dir);
     try invalid_config.run(init.io, init.gpa, executable_path, artifact_dir);
     try configuration.run(init.io, init.gpa, executable_path, artifact_dir);
+    try aof_recovery.run(init.io, init.gpa, executable_path, artifact_dir);
     try idle_clients_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try restart_same_port.run(init.io, init.gpa, executable_path, artifact_dir);
     try two_servers.run(init.io, init.gpa, executable_path, artifact_dir);

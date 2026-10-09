@@ -1,7 +1,5 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
-const command_arguments = @import("arguments.zig");
 const Commander = @import("interface.zig");
 const Request = @import("request.zig");
 const Schema = @import("schema.zig");
@@ -10,7 +8,7 @@ const time = @import("../time.zig");
 const Set = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Set) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -35,13 +33,13 @@ fn execute(ptr: *anyopaque, io: std.Io, data_store: *store.Store, client_state: 
 
     const requested_prev_value = req.response != null and req.response.?.get;
     if (requested_prev_value or result.outcome == .not_applied) {
-        return Commander.Result.borrowed(.{ .bulk_string = null });
+        return Commander.Result.borrowed(.{ .null_value = .bulk_string });
     }
 
     return Commander.Result.borrowed(.{ .simple_string = "OK" });
 }
 
-fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) anyerror!Request.SetRequest {
+fn bind(argv: []const []const u8, now_ms: time.UnixMs) anyerror!Request.SetRequest {
     var pos: usize = 0;
     var req: Request.SetRequest = .{
         .key = "",
@@ -52,15 +50,15 @@ fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) anyerror!Request.SetRequest
         .keepttl = false,
     };
 
-    req.key = try command_arguments.bulkString(argv[pos]);
+    req.key = argv[pos];
     pos += 1;
 
-    req.value = try command_arguments.bulkString(argv[pos]);
+    req.value = argv[pos];
     pos += 1;
 
     while (pos < argv.len) {
         // Look up
-        const keyword = try command_arguments.bulkString(argv[pos]);
+        const keyword = argv[pos];
         const definition = Schema.Set.Options.get(keyword) orelse return Commander.Error.Syntax;
 
         // Validate , Consume and Apply
@@ -99,23 +97,10 @@ fn bind(argv: []resp.RESPValue, now_ms: time.UnixMs) anyerror!Request.SetRequest
 fn applyOption(
     req: *Request.SetRequest,
     definition: *const Schema.Interface.OptionDefinition,
-    args: []const resp.RESPValue,
+    args: []const []const u8,
     now_ms: time.UnixMs,
 ) anyerror!usize {
-    return Schema.Set.apply(req, definition, args, now_ms) catch |err| switch (err) {
-        error.Syntax,
-        error.InvalidCharacter,
-        error.Overflow,
-        error.MalformedCommandRequest,
-        error.UnsupportedArgumentType,
-        => error.UnsupportedOption,
-        else => err,
-    };
-}
-
-// NOTE: The caller must only provide arguments after "key" and "value"
-fn assertValidOptions(_: []resp.RESPValue) Commander.Error!void {
-    // option of the same group with repeatable `false` must never repeat
+    return Schema.Set.apply(req, definition, args, now_ms) catch return error.UnsupportedOption;
 }
 
 fn deinit(ptr: *anyopaque) void {

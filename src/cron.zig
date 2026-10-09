@@ -224,10 +224,12 @@ fn triggerRewriteIfDue(
             return;
         };
         defer tx.end();
+
         const due = aof.dueForRewrite(config) catch |err| {
             logger.err("cron: failed to check AOF rewrite eligibility", err, @errorReturnTrace());
             return;
         };
+
         if (!due) return;
     }
 

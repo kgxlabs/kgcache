@@ -1,13 +1,12 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
+const Reply = @import("../protocol/reply.zig").Reply;
 const store = @import("../store.zig");
-const command_arguments = @import("arguments.zig");
 const definition = @import("definition.zig");
 const registry = @import("registry.zig");
 const Commander = @import("interface.zig");
 
 const Command = @This();
-const Value = resp.RESPValue;
+const Value = Reply;
 
 const Subcommand = enum {
     count,
@@ -18,7 +17,7 @@ const Subcommand = enum {
 };
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *Command) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -30,7 +29,7 @@ fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientStat
     const self: *Command = @ptrCast(@alignCast(ptr));
     if (self.arguments.len == 0) return self.executeAll();
 
-    const name = try command_arguments.bulkString(self.arguments[0]);
+    const name = self.arguments[0];
 
     return self.executeSubcommand(try parseSubcommand(name));
 }
@@ -107,16 +106,16 @@ fn allInfo(allocator: std.mem.Allocator) Commander.Error!Value {
     return .{ .array = items };
 }
 
-fn info(allocator: std.mem.Allocator, names: []const Value) Commander.Error!Value {
+fn info(allocator: std.mem.Allocator, names: []const []const u8) Commander.Error!Value {
     if (names.len == 0) return allInfo(allocator);
 
     const items = try allocator.alloc(Value, names.len);
     for (names, 0..) |name, index| {
-        const command_name = try command_arguments.bulkString(name);
+        const command_name = name;
         items[index] = if (registry.find(command_name)) |item|
             try describe(allocator, item)
         else
-            .{ .array = null };
+            .{ .null_value = .array };
     }
     return .{ .array = items };
 }
@@ -127,13 +126,13 @@ const ListFilter = union(enum) {
     category: definition.Category,
 };
 
-fn list(allocator: std.mem.Allocator, args: []const Value) Commander.Error!Value {
+fn list(allocator: std.mem.Allocator, args: []const []const u8) Commander.Error!Value {
     var filter: ListFilter = .all;
     if (args.len != 0) {
         if (args.len != 3) return error.WrongNumberArguments;
-        if (!std.ascii.eqlIgnoreCase(try command_arguments.bulkString(args[0]), "FILTERBY")) return error.Syntax;
-        const kind = try command_arguments.bulkString(args[1]);
-        const value = try command_arguments.bulkString(args[2]);
+        if (!std.ascii.eqlIgnoreCase(args[0], "FILTERBY")) return error.Syntax;
+        const kind = args[1];
+        const value = args[2];
         if (std.ascii.eqlIgnoreCase(kind, "PATTERN")) {
             filter = .{ .pattern = value };
         } else if (std.ascii.eqlIgnoreCase(kind, "ACLCAT")) {
@@ -186,13 +185,12 @@ fn matchesPattern(pattern: []const u8, name: []const u8) bool {
     return pattern_index == pattern.len;
 }
 
-fn getKeys(allocator: std.mem.Allocator, args: []const Value, with_flags: bool) Commander.Error!Value {
+fn getKeys(allocator: std.mem.Allocator, args: []const []const u8, with_flags: bool) Commander.Error!Value {
     if (args.len == 0) return error.WrongNumberArguments;
-    const name = try command_arguments.bulkString(args[0]);
+    const name = args[0];
     const command_definition = registry.find(name) orelse return error.UnknownCommand;
     const command_args = args[1..];
     if (!command_definition.arity.accepts(command_args.len)) return error.WrongNumberArguments;
-    for (command_args) |arg| _ = try command_arguments.bulkString(arg);
 
     const range = switch (command_definition.keys) {
         .none => return error.Syntax,
@@ -206,7 +204,7 @@ fn getKeys(allocator: std.mem.Allocator, args: []const Value, with_flags: bool) 
     var keys: std.ArrayList(Value) = .empty;
     var index = range.first;
     while (index <= last) : (index += range.step) {
-        const key = command_args[index];
+        const key = bulk(command_args[index]);
         if (with_flags) {
             try keys.append(allocator, try array(allocator, &.{ key, flags }));
         } else {
@@ -216,10 +214,10 @@ fn getKeys(allocator: std.mem.Allocator, args: []const Value, with_flags: bool) 
     return .{ .array = try keys.toOwnedSlice(allocator) };
 }
 
-fn keyFlags(allocator: std.mem.Allocator, item: *const definition.Definition, args: []const Value) Commander.Error!Value {
+fn keyFlags(allocator: std.mem.Allocator, item: *const definition.Definition, args: []const []const u8) Commander.Error!Value {
     if (std.mem.eql(u8, item.name, "set")) {
         for (args[2..]) |arg| {
-            if (std.ascii.eqlIgnoreCase(try command_arguments.bulkString(arg), "GET")) {
+            if (std.ascii.eqlIgnoreCase(arg, "GET")) {
                 return array(allocator, &.{ bulk("RW"), bulk("access"), bulk("update") });
             }
         }
@@ -294,7 +292,7 @@ fn flagValues(allocator: std.mem.Allocator, flags: []const definition.KeyFlag, i
 }
 
 fn bulk(value: []const u8) Value {
-    return .{ .bulk_string = value };
+    return .{ .blob_string = value };
 }
 
 fn array(allocator: std.mem.Allocator, values: []const Value) std.mem.Allocator.Error!Value {

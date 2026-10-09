@@ -1,5 +1,4 @@
 const std = @import("std");
-const resp = @import("../resp.zig");
 const store = @import("../store.zig");
 const Commander = @import("interface.zig");
 const TestHelpers = @import("../tests/helpers.zig");
@@ -8,7 +7,7 @@ const MockStore = @import("../store/mock_store.zig");
 const DBSize = @This();
 
 allocator: std.mem.Allocator,
-arguments: []resp.RESPValue,
+arguments: []const []const u8,
 
 pub fn commander(self: *DBSize) Commander {
     return .{ .ptr = self, .vtable = &vtable };
@@ -29,8 +28,8 @@ fn deinit(ptr: *anyopaque) void {
 test "execute returns the store size" {
     const testing = std.testing;
 
-    var values = [_]resp.RESPValue{.{ .bulk_string = "DBSIZE" }};
-    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
+    const values = [_][]const u8{"DBSIZE"};
+    const command = try TestHelpers.initCommand(testing.allocator, .{ .name = values[0], .arguments = values[1..] });
 
     var result = try TestHelpers.executeWithMemoryStore(command);
     defer result.deinit();
@@ -40,8 +39,8 @@ test "execute returns the store size" {
 test "execute returns the current database size" {
     const testing = std.testing;
 
-    var values = [_]resp.RESPValue{.{ .bulk_string = "DBSIZE" }};
-    const command = try TestHelpers.initCommand(testing.allocator, .{ .array = &values });
+    const values = [_][]const u8{"DBSIZE"};
+    const command = try TestHelpers.initCommand(testing.allocator, .{ .name = values[0], .arguments = values[1..] });
     defer command.deinit();
 
     var mock_store = MockStore.init();

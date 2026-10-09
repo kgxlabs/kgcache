@@ -8,16 +8,26 @@ The intended boundary is that kgcache owns the cache protocol, command semantics
 
 ## Current implementation
 
-```text
-RESP client
-    │ TCP / RESP2
-    ▼
-┌─────────────────┐     ┌────────────────┐     ┌─────────────────────┐
-│ Command dispatch │ ──▶ │ Store interface │ ──▶ │ Default in-memory   │
-│ PING · GET · SET │     │ GET · SET · DEL │     │ StringHashMap + TTL │
-│ DEL · DBSIZE · … │     │ DBSIZE          │     │ expiration index    │
-└─────────────────┘     └────────────────┘     └─────────────────────┘
+```mermaid
+flowchart TD
+    Client[Client bytes] --> Decoder[Shared command decoder]
+    Decoder --> Frame[CommandFrame]
+    Frame --> Command[Dispatch and command handler]
+    Command --> Store[Store and storage backend]
+    Command --> Result[Commander.Result containing Reply]
+    Result --> Encode[ClientState.resp.writeReply]
+    Encode --> Socket[Socket writer and flush]
 ```
+
+Network requests and AOF replay share a decoder for nonempty flat arrays of
+non-null bulk strings. It returns a `CommandFrame` containing a name and byte
+arguments, alongside an exact consumed-byte count. Arguments exclude the command
+name. Their bodies borrow the input buffer; the caller owns their slice table.
+
+Commands return semantic `Reply` values. The connection reads `ClientState.resp`
+after execution and uses its selected vtable to encode the reply. Each client
+starts in RESP2. Both RESP2 and RESP3 encoders are implemented, but network
+negotiation is not available. AOF uses a separate command writer.
 
 The TCP server has three layers for client connections:
 
@@ -40,20 +50,22 @@ dispatch uses its command names and accepted argument counts. `COMMAND`
 introspection reads the same definitions for flags, categories, and key
 positions.
 
-Command handlers keep value-dependent validation and execution. The registry
-contains typed metadata only. Protocol response construction stays in the
-command and connection layers.
+Command handlers keep value-dependent validation and execution, and construct
+semantic replies. The registry contains typed metadata only. Wire encoding
+belongs to the selected Resp implementation.
 
 Any Store operation that returns storage-backed data copies it while the
-transaction is still locked. The command result owns this copy until RESP
-serialization finishes, then `Result.deinit` releases it. This keeps response
-bytes valid if another client mutates or removes the stored data.
+transaction is still locked. The command result owns this copy until reply
+encoding and writer flush finish, then `Result.deinit` releases it. This keeps
+response bytes valid if another client mutates or removes the stored data.
+Result and command cleanup finish before the frame's argument table is freed
+or input bytes are reused. Encoding holds no storage lock.
 
 Store mutations that can complete without changing data return
 `MutationResult(T)`. Its outcome is `applied` or `not_applied`, while its
 `value` holds any data requested from the operation. `SET` uses the value for
 the optional previous value, and `DEL` uses `void`. Each command converts this
-store result into the shared command `Result` sent through RESP.
+store result into a `Reply` held by `Commander.Result`.
 
 The application supervises `Server.run` and a SIGINT/SIGTERM waiter with
 `std.Io.Select`. The signal handler only records the signal and wakes the
@@ -141,9 +153,13 @@ and trace availability.
 │   ├── config.zig               # Config struct, defaults, and path helpers
 │   ├── config_parser.zig        # kgcache.conf parser
 │   ├── config/                  # Definitions, preparation, registry, builder, loader
-│   ├── resp.zig                 # RESP2 parser and serializer
-│   ├── commander.zig            # Command parsing and dispatch
+│   ├── client_state.zig         # Per-client database and selected Resp handle
+│   ├── protocol.zig             # Protocol types and module exports
+│   ├── protocol/                # Command decoding/writing and RESP2/RESP3 replies
+│   ├── resp.zig                 # Legacy parser/serializer outside live paths
+│   ├── commander.zig            # Command lookup and dispatch
 │   ├── commander/               # Individual commands, schemas, requests
+│   ├── codec/                   # Snapshot codecs and canonical AOF encoding
 │   ├── store/                   # Store abstraction, memory store, test mock
 │   ├── storage/                 # Storage abstraction and default backend
 │   ├── persistence/             # Snapshot (.kgc) and AOF backends, SAVE/BGSAVE

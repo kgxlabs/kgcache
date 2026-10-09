@@ -522,7 +522,7 @@ test "AOF rewrite reports progress until completion and replays writes" {
     var fresh_store = fresh_memory_store.store();
     defer fresh_store.deinit();
 
-    _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config);
+    _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config, @import("../logger.zig").NoopLogger.logger());
     const value = try fresh_store.get("foo", 0);
     try expectOwnedObjectString(value, "bar");
 }
@@ -588,7 +588,7 @@ test "concurrent AOF rewrite and writes replay to the final value" {
     var fresh_store = fresh_memory_store.store();
     defer fresh_store.deinit();
 
-    _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config);
+    _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config, @import("../logger.zig").NoopLogger.logger());
     try expectOwnedObjectString(try fresh_store.get("key", 0), last_value);
 }
 
@@ -731,7 +731,7 @@ test "AOF rewrite waits for active Storage work and preserves all databases" {
     var fresh_store = fresh_memory_store.store();
     defer fresh_store.deinit();
 
-    _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config);
+    _ = try persistence.AofLoader.replay(testing.io, testing.allocator, &fresh_store, config, @import("../logger.zig").NoopLogger.logger());
     try expectOwnedObjectString(try fresh_store.get("zero", 0), "first");
     try expectOwnedObjectString(try fresh_store.get("one", 1), "second");
 }

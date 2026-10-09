@@ -207,14 +207,44 @@ fn dupeManifest(allocator: std.mem.Allocator, manifest: Manifest) !Manifest {
     }
 
     for (manifest.incrs) |incr| {
+        const name = try allocator.dupe(u8, incr.name);
+        errdefer allocator.free(name);
+
         try incrs.append(allocator, .{
-            .name = try allocator.dupe(u8, incr.name),
+            .name = name,
             .seq = incr.seq,
             .kind = incr.kind,
         });
     }
 
     return .{ .base = base, .incrs = try incrs.toOwnedSlice(allocator) };
+}
+
+test "manifest reading releases owned entries on every allocation failure" {
+    try withScratchDir("scratch-manifest-read-allocation", struct {
+        fn run(io: std.Io, dir: std.Io.Dir) !void {
+            var entries: [32]Entry = undefined;
+            for (&entries, 0..) |*entry, index| {
+                entry.* = .{ .name = "appendonly.aof.incr", .seq = @intCast(index + 2), .kind = .incr };
+            }
+            try write(io, std.testing.allocator, dir, "appendonly.aof.manifest", .{
+                .base = .{ .name = "appendonly.aof.base", .seq = 1, .kind = .base },
+                .incrs = &entries,
+            });
+            try std.testing.checkAllAllocationFailures(std.testing.allocator, readWithAllocationFailures, .{ io, dir });
+        }
+    }.run);
+}
+
+fn readWithAllocationFailures(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !void {
+    const manifest = (try read(io, allocator, dir, "appendonly.aof.manifest")).?;
+    defer manifest.deinit(allocator);
+    try std.testing.expectEqualStrings("appendonly.aof.base", manifest.base.?.name);
+    try std.testing.expectEqual(32, manifest.incrs.len);
+    for (manifest.incrs, 0..) |incr, index| {
+        try std.testing.expectEqualStrings("appendonly.aof.incr", incr.name);
+        try std.testing.expectEqual(index + 2, incr.seq);
+    }
 }
 
 test "parse reads a manifest with a base and two incrs, in order" {
