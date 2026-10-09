@@ -54,6 +54,7 @@ const TestConnectionIo = struct {
     close_calls: usize = 0,
     fail_write: bool = false,
     fail_after_bytes: ?usize = null,
+    max_write_bytes: usize = std.math.maxInt(usize),
     vtable: std.Io.VTable = undefined,
 
     fn io(self: *@This()) std.Io {
@@ -80,17 +81,19 @@ const TestConnectionIo = struct {
         if (self.fail_after_bytes) |limit| {
             if (self.output_len >= limit) return error.NetworkDown;
         }
-        var count = self.append(header);
+        var remaining = self.max_write_bytes;
+        std.debug.assert(remaining > 0);
+        var count = self.append(header, &remaining);
         if (count != header.len) return count;
         for (data[0 .. data.len - 1]) |part| {
-            const byte_count = self.append(part);
+            const byte_count = self.append(part, &remaining);
             count += byte_count;
             if (byte_count != part.len) return count;
         }
         if (splat > 0) {
             const part = data[data.len - 1];
             for (0..splat) |_| {
-                const byte_count = self.append(part);
+                const byte_count = self.append(part, &remaining);
                 count += byte_count;
                 if (byte_count != part.len) return count;
             }
@@ -98,12 +101,13 @@ const TestConnectionIo = struct {
         return count;
     }
 
-    fn append(self: *@This(), bytes: []const u8) usize {
+    fn append(self: *@This(), bytes: []const u8, remaining: *usize) usize {
         const limit = self.fail_after_bytes orelse self.output.len;
-        const count = @min(bytes.len, limit - self.output_len);
+        const count = @min(bytes.len, limit - self.output_len, remaining.*);
         std.debug.assert(self.output_len + count <= self.output.len);
         @memcpy(self.output[self.output_len..][0..count], bytes[0..count]);
         self.output_len += count;
+        remaining.* -= count;
         return count;
     }
 
@@ -344,6 +348,45 @@ test "complete commands in one read advance after replies and mapped errors" {
     try testing.expectEqual(1, mock.dbsize_calls);
     try testing.expectEqual(2, fake_io.next_request);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
+}
+
+test "pipelined borrowed and owned replies finish through short writes" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    var fake_io: TestConnectionIo = .{
+        .requests = &.{
+            "*2\r\n$4\r\nECHO\r\n$3\r\n\x00\r\n\r\n" ++
+                "*2\r\n$4\r\nPING\r\n$3\r\n\x00\r\n\r\n" ++
+                "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\n\x00\r\n\r\n" ++
+                "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n" ++
+                "*4\r\n$3\r\nSET\r\n$3\r\nkey\r\n$4\r\nnext\r\n$3\r\nGET\r\n" ++
+                "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+            "*2\r\n$4\r\nECHO\r\n$0\r\n\r\n",
+        },
+        .max_write_bytes = 2,
+    };
+    var test_logger = logging.TestLogger.init();
+    var backend = DefaultStorage.init(testing.io, testing.allocator);
+    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-reply-lifetime.kgc");
+    var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+    var data_store = memory_store.store();
+    defer data_store.deinit();
+
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    try testing.expectEqualStrings(
+        "$3\r\n\x00\r\n\r\n$3\r\n\x00\r\n\r\n+OK\r\n" ++
+            "$3\r\n\x00\r\n\r\n$3\r\n\x00\r\n\r\n$4\r\nnext\r\n$0\r\n\r\n",
+        fake_io.written(),
+    );
+    var stored = (try data_store.get("key", 0)).?;
+    defer stored.deinit();
+    try testing.expectEqualStrings("next", stored.value.string);
+    try testing.expectEqual(0, test_logger.recordedEvents().len);
+    try testing.expectEqual(0, fake_io.close_calls);
 }
 
 test "invalid later DEL elements prevent mutation and stop the connection" {

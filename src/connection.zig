@@ -90,74 +90,84 @@ fn handleConnection(
         if (buffer.write_pos == 0) return;
 
         while (buffer.read_pos < buffer.write_pos) {
-            const consumed = handleRequest(io, logger, &connection_writer, data_store, &client_state, buffer.bytes[buffer.read_pos..buffer.write_pos], stop_requested) orelse return;
+            const consumed = request: {
+                var gpa: std.heap.DebugAllocator(.{}) = .init;
+                defer _ = gpa.deinit();
+
+                const allocator = gpa.allocator();
+                const outcome = request_decoder.decode(buffer.bytes[buffer.read_pos..buffer.write_pos], allocator, transition_limits) catch |err| {
+                    if (err == error.OutOfMemory) {
+                        logger.err("connection: request parsing failed", err, @errorReturnTrace());
+                        _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = internal_error_message }, stop_requested);
+                    } else {
+                        _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
+                    }
+                    return;
+                };
+
+                var decoded = switch (outcome) {
+                    .complete => |complete| complete,
+                    // TODO: implement incremental framing for the requests
+                    .incomplete => {
+                        _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = "ERR protocol error: incomplete request" }, stop_requested);
+                        return;
+                    },
+                };
+                defer decoded.deinit(allocator);
+
+                const successful = handleCompleteFrame(
+                    io,
+                    logger,
+                    &connection_writer,
+                    data_store,
+                    &client_state,
+                    allocator,
+                    decoded.frame,
+                    stop_requested,
+                );
+                if (!successful) return;
+
+                break :request decoded.consumed;
+            };
+
             buffer.read_pos = std.math.add(usize, buffer.read_pos, consumed) catch return error.LengthOverflow;
             buffer.assertValid();
         }
     }
 }
 
-fn handleRequest(
+fn handleCompleteFrame(
     io: std.Io,
     logger: logging.Logger,
     writer: *std.Io.net.Stream.Writer,
     data_store: *store.Store,
     client_state: *ClientState,
-    input: []const u8,
+    allocator: std.mem.Allocator,
+    frame: protocol.CommandFrame,
     stop_requested: *const std.atomic.Value(bool),
-) ?usize {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-
-    const allocator = gpa.allocator();
-    const outcome = request_decoder.decode(input, allocator, transition_limits) catch |err| {
-        if (err == error.OutOfMemory) {
-            logger.err("connection: request parsing failed", err, @errorReturnTrace());
-            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
-        } else {
-            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
-        }
-        return null;
-    };
-
-    var decoded = switch (outcome) {
-        .complete => |complete| complete,
-        // TODO: implement incremental framing for the requests
-        .incomplete => {
-            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = "ERR protocol error: incomplete request" }, stop_requested);
-            return null;
-        },
-    };
-    defer decoded.deinit(allocator);
-
-    const command = commander.init(allocator, decoded.frame) catch |err| {
+) bool {
+    const command = commander.init(allocator, frame) catch |err| {
         const message = initErrorResponse(err) orelse {
             logger.err("connection: command initialization failed", err, @errorReturnTrace());
             _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
-            return null;
+            return false;
         };
 
-        if (!writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested)) return null;
-
-        return decoded.consumed;
+        return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);
     };
     defer command.deinit();
 
     var result = command.execute(io, data_store, client_state) catch |err| {
         if (executeErrorResponse(err)) |message| {
-            if (!writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested)) return null;
-            return decoded.consumed;
+            return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);
         }
         logger.err("connection: command execution failed", err, @errorReturnTrace());
         _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
-        return null;
+        return false;
     };
     defer result.deinit();
 
-    const successful = writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
-    if (!successful) return null;
-
-    return decoded.consumed;
+    return writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
 }
 
 const internal_error_message = "ERR something went wrong";
