@@ -6,6 +6,27 @@ const ClientState = @import("client_state.zig");
 const store = @import("store.zig");
 const logging = @import("logger.zig");
 
+const InputBuffer = struct {
+    bytes: []u8,
+    read_pos: usize = 0,
+    write_pos: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
+        return .{ .bytes = try allocator.alloc(u8, capacity) };
+    }
+
+    fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
+        self.assertValid();
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+
+    fn assertValid(self: *const InputBuffer) void {
+        std.debug.assert(self.read_pos <= self.write_pos);
+        std.debug.assert(self.write_pos <= self.bytes.len);
+    }
+};
+
 /// Serves one client session using a borrowed stream.
 ///
 /// The caller owns the stream and must close it after this function returns.
@@ -22,13 +43,13 @@ pub fn serve(
 ) void {
     if (stop_requested.load(.acquire)) return;
 
-    const buf = con_allocator.alloc(u8, connection_buffer_size) catch |err| {
+    var buffer = InputBuffer.init(con_allocator, connection_buffer_size) catch |err| {
         logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
         return;
     };
-    defer con_allocator.free(buf);
+    defer buffer.deinit(con_allocator);
 
-    handleConnection(io, logger, connection, data_store, buf, stop_requested) catch |err| {
+    handleConnection(io, logger, connection, data_store, &buffer, stop_requested) catch |err| {
         logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
 }
@@ -43,15 +64,19 @@ fn handleConnection(
     logger: logging.Logger,
     connection: std.Io.net.Stream,
     data_store: *store.Store,
-    buf: []u8,
+    buffer: *InputBuffer,
     stop_requested: *const std.atomic.Value(bool),
 ) !void {
     var client_state = ClientState.init();
     while (true) {
         if (stop_requested.load(.acquire)) return;
 
+        buffer.read_pos = 0;
+        buffer.write_pos = 0;
+        buffer.assertValid();
+
         var connection_writer = connection.writer(io, &.{});
-        var data = [_][]u8{buf};
+        var data = [_][]u8{buffer.bytes};
         const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| {
             if (stop_requested.load(.acquire)) return;
             switch (err) {
@@ -60,12 +85,14 @@ fn handleConnection(
             }
         };
 
-        if (bytes_read == 0) return;
+        buffer.write_pos = bytes_read;
+        buffer.assertValid();
+        if (buffer.write_pos == 0) return;
 
-        var cursor: usize = 0;
-        while (cursor < bytes_read) {
-            const consumed = handleRequest(io, logger, &connection_writer, data_store, &client_state, buf[cursor..bytes_read], stop_requested) orelse return;
-            cursor = std.math.add(usize, cursor, consumed) catch return error.LengthOverflow;
+        while (buffer.read_pos < buffer.write_pos) {
+            const consumed = handleRequest(io, logger, &connection_writer, data_store, &client_state, buffer.bytes[buffer.read_pos..buffer.write_pos], stop_requested) orelse return;
+            buffer.read_pos = std.math.add(usize, buffer.read_pos, consumed) catch return error.LengthOverflow;
+            buffer.assertValid();
         }
     }
 }
@@ -127,7 +154,8 @@ fn handleRequest(
     };
     defer result.deinit();
 
-    if (!writeResponse(logger, client_state.resp, writer, result.value, stop_requested)) return null;
+    const successful = writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
+    if (!successful) return null;
 
     return decoded.consumed;
 }
@@ -155,23 +183,31 @@ fn writeResponse(
     selected.writeReply(&writer.interface, value) catch |err| {
         if (err == error.InvalidLineText or err == error.LengthOverflow) {
             logger.err("connection: response encoding failed", err, @errorReturnTrace());
+
             selected.writeReply(&writer.interface, .{ .error_reply = internal_error_message }) catch |write_err| {
                 if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse write_err, @errorReturnTrace());
                 return false;
             };
+
             writer.interface.flush() catch |flush_err| {
                 if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse flush_err, @errorReturnTrace());
                 return false;
             };
+
             return false;
         }
+
         if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+
         return false;
     };
+
     writer.interface.flush() catch |err| {
         if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+
         return false;
     };
+
     return true;
 }
 

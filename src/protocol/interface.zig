@@ -45,6 +45,7 @@ fn validateReply(value: Reply) EncodeError!void {
         .map => |entries| {
             const flattened_count = std.math.mul(usize, entries.len, 2) catch return error.LengthOverflow;
             try validateLength(flattened_count);
+
             for (entries) |entry| {
                 try validateReply(entry.key);
                 try validateReply(entry.value);
