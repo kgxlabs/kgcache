@@ -10,7 +10,7 @@ source to a boundary that can report it.
 | Boundary | Responsibility |
 | --- | --- |
 | Application | Report configuration, server creation, runtime, and shutdown failures. Return a nonzero process status. |
-| Connection | Send a fixed RESP error for expected client errors. Report internal failures once and send a generic RESP error when possible. Report response write failures. |
+| Connection | Send a fixed RESP error for expected client errors. Report internal failures once and send a generic RESP error when output is safe. Report unexpected read/write failures once with their original source. |
 | Cron | Report failed automatic work, then retry on a later tick when appropriate. A busy save or rewrite is an expected condition. |
 | Persistence child | Attempt to report a failed save or rewrite before exiting. Cron accounts for an ordinary failed exit without repeating that report. |
 | Server shutdown | Report failed child exits, wait failures, and result handling failures. Return the first shutdown error after completing remaining safe cleanup. |
@@ -19,6 +19,13 @@ A failed operation and a failed cleanup are separate errors, so each can have
 its own event. Repeated cron attempts are separate operations. A peer closing
 its connection, malformed client input, and expected command validation errors
 do not create internal error events.
+
+Peer resets and broken pipes end the session quietly. A reply write or flush
+failure ends the session without appending an error reply to partial output
+or executing a later command. Encoding validation checks the whole reply
+before output starts, so validation failures can produce a generic
+internal-error reply safely. Live reply, command, frame, and input owners are
+released on every exit. Earlier successful mutations remain applied.
 
 A write can change memory and publish its AOF record before the separate flush
 or sync fails. Publication itself cannot return an error. The connection

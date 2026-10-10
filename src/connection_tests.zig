@@ -58,6 +58,9 @@ const TestConnectionIo = struct {
     write_error: std.Io.net.Stream.Writer.Error = error.NetworkDown,
     fail_after_bytes: ?usize = null,
     max_write_bytes: usize = std.math.maxInt(usize),
+    pause_after_bytes: ?usize = null,
+    write_paused: std.Io.Event = .unset,
+    continue_write: std.Io.Event = .unset,
     stop_after_read: ?*std.atomic.Value(bool) = null,
     stop_during_write: ?*std.atomic.Value(bool) = null,
     vtable: std.Io.VTable = undefined,
@@ -95,6 +98,14 @@ const TestConnectionIo = struct {
         if (self.fail_after_bytes) |limit| {
             if (self.output_len >= limit) return self.write_error;
         }
+        if (self.pause_after_bytes) |limit| {
+            if (self.output_len >= limit and !self.continue_write.isSet()) {
+                self.write_paused.set(std.testing.io);
+                self.continue_write.waitTimeout(std.testing.io, .{
+                    .duration = .{ .raw = .fromSeconds(5), .clock = .awake },
+                }) catch return error.NetworkDown;
+            }
+        }
         if (self.stop_during_write) |flag| flag.store(true, .release);
         var remaining = self.max_write_bytes;
         std.debug.assert(remaining > 0);
@@ -117,7 +128,10 @@ const TestConnectionIo = struct {
     }
 
     fn append(self: *@This(), bytes: []const u8, remaining: *usize) usize {
-        const limit = self.fail_after_bytes orelse self.output.len;
+        var limit = self.fail_after_bytes orelse self.output.len;
+        if (!self.continue_write.isSet()) {
+            if (self.pause_after_bytes) |pause_limit| limit = @min(limit, pause_limit);
+        }
         const count = @min(bytes.len, limit - self.output_len, remaining.*);
         std.debug.assert(self.output_len + count <= self.output.len);
         @memcpy(self.output[self.output_len..][0..count], bytes[0..count]);
@@ -739,10 +753,85 @@ test "invalid later DEL elements prevent mutation and stop the connection" {
     }
 }
 
+test "a blocked reply keeps later mutations pending and permits another storage client" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    const Worker = struct {
+        fn run(fake_io: *TestConnectionIo, logger: logging.Logger, data_store: *store.Store) void {
+            serve(fake_io.io(), logger, TestConnectionStream, data_store, testing.allocator, 128, &never_stop_requested);
+        }
+
+        const TestConnectionStream: std.Io.net.Stream = .{ .socket = .{ .handle = 1, .address = undefined } };
+    };
+    const Observer = struct {
+        data_store: *store.Store,
+        done: std.Io.Event = .unset,
+        result: anyerror!bool = error.Unexpected,
+
+        fn run(self: *@This()) void {
+            defer self.done.set(testing.io);
+            self.result = result: {
+                var value = (self.data_store.get("fruit", 0) catch |err| break :result err) orelse break :result false;
+                defer value.deinit();
+                break :result std.mem.eql(u8, value.value.string, "apple");
+            };
+        }
+    };
+    const requests = [_][]const u8{
+        "*2\r\n$4\r\nECHO\r\n$5\r\napple\r\n",
+        "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n",
+    };
+    for (requests) |first_request| {
+        const request = try std.fmt.allocPrint(testing.allocator, "{s}*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n", .{first_request});
+        defer testing.allocator.free(request);
+        var fake_io: TestConnectionIo = .{ .requests = &.{request}, .max_write_bytes = 2, .pause_after_bytes = 6 };
+        var test_logger = logging.TestLogger.init();
+        var backend = DefaultStorage.init(testing.io, testing.allocator);
+        var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+        var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-blocked-reply.kgc");
+        var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+        var data_store = memory_store.store();
+        defer data_store.deinit();
+        _ = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
+
+        const worker = try std.Thread.spawn(.{}, Worker.run, .{ &fake_io, test_logger.logger(), &data_store });
+        var worker_joined = false;
+        defer {
+            fake_io.continue_write.set(testing.io);
+            if (!worker_joined) worker.join();
+        }
+        try fake_io.write_paused.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+        try testing.expectEqualStrings("$5\r\nap", fake_io.written());
+
+        var observer: Observer = .{ .data_store = &data_store };
+        const observer_thread = try std.Thread.spawn(.{}, Observer.run, .{&observer});
+        var observer_joined = false;
+        defer {
+            fake_io.continue_write.set(testing.io);
+            if (!observer_joined) observer_thread.join();
+        }
+        try observer.done.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+        observer_thread.join();
+        observer_joined = true;
+        try testing.expect(try observer.result);
+
+        fake_io.continue_write.set(testing.io);
+        worker.join();
+        worker_joined = true;
+        try testing.expectEqualStrings("$5\r\napple\r\n:1\r\n", fake_io.written());
+        try testing.expect((try data_store.get("fruit", 0)) == null);
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+        try testing.expectEqual(0, fake_io.close_calls);
+    }
+}
+
 test "a partial reply failure stops before the next pipelined command and logs only unexpected sources" {
     const testing = std.testing;
     const cases = [_]struct { request: []const u8, expected: []const u8 }{
         .{ .request = "*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "+PO" },
+        .{ .request = "*2\r\n$4\r\nECHO\r\n$5\r\napple\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "$5\r\nap" },
         .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nGET\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "*1\r" },
     };
     for (cases) |case| {

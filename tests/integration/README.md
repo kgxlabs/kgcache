@@ -60,3 +60,9 @@ after a successful SET/GET pipeline. They keep the socket open without sending
 the missing payload, require the earlier replies followed by the request-limit
 error and connection closure within the harness deadline, and check the earlier
 stored value from another connection.
+
+Connection unit tests also pause borrowed and owned replies to check command
+order and storage access while output waits. A manager test uses real TCP
+sockets with small buffers and a 1 MiB reply. It checks that another client
+responds and that shutdown wakes the blocked writer and an idle reader within
+five seconds. The process suite above verifies SIGTERM and child reaping.
