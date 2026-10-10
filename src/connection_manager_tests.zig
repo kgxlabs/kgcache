@@ -10,6 +10,54 @@ test "connection manager boundary compiles" {
     std.testing.refAllDecls(ClientWorker);
 }
 
+test "connection IDs and borrowed contexts stay stable as the collection grows" {
+    const testing = std.testing;
+    const worker_count = 16;
+    var network = TestHelpers.TestNetwork.init(testing.io, worker_count);
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+    defer manager.deinit() catch unreachable;
+
+    try manager.start(TestHelpers.TestNetwork.stream(1));
+    const first_context = &manager._workers.items[0].context;
+    for (2..worker_count + 1) |handle| {
+        try manager.start(TestHelpers.TestNetwork.stream(handle));
+    }
+    network.all_reads_started.waitUncancelable(testing.io);
+
+    var lock_tx = try manager._lock.begin();
+    defer lock_tx.end();
+    try testing.expect(&manager._workers.items[0].context == first_context);
+    for (manager._workers.items, 1..) |worker, expected_id| {
+        try testing.expectEqual(@as(u64, expected_id), worker.context.id);
+    }
+}
+
+test "connection IDs are never reused after finished workers are reaped" {
+    const testing = std.testing;
+    var network = TestHelpers.TestNetwork.init(testing.io, 0);
+    network.immediate_eof_handle = 1;
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+    defer manager.deinit() catch unreachable;
+
+    for (1..4) |expected_id| {
+        network.immediate_closed.reset();
+        try manager.start(TestHelpers.TestNetwork.stream(1));
+        network.immediate_closed.waitUncancelable(testing.io);
+        {
+            var lock_tx = try manager._lock.begin();
+            defer lock_tx.end();
+            try testing.expectEqual(@as(u64, expected_id), manager._workers.items[0].context.id);
+        }
+        try manager.reapFinished();
+        try testing.expectEqual(0, manager._workers.items.len);
+        try testing.expectEqual(expected_id, network.close_calls.load(.acquire));
+    }
+}
+
 test "deinit wakes an idle worker and closes its stream once" {
     const testing = std.testing;
     var network = TestHelpers.TestNetwork.init(testing.io, 1);

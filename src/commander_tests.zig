@@ -7,6 +7,41 @@ const store = @import("store.zig");
 const MockStore = @import("store/mock_store.zig");
 const init = commander.init;
 
+test "command handlers borrow their client's connection identity" {
+    const testing = std.testing;
+    const ConnectionContext = @import("connection_context.zig");
+    const IdentityCommand = struct {
+        expected_context: *const ConnectionContext,
+
+        fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, state: *Commander.ClientState) anyerror!Commander.Result {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const context = state.connection_context orelse return error.TestUnexpectedResult;
+            try testing.expect(context == self.expected_context);
+            return Commander.Result.borrowed(.{ .integer = @intCast(context.id) });
+        }
+
+        fn deinit(_: *anyopaque) void {}
+
+        const vtable: Commander.VTable = .{ .execute = execute, .deinit = deinit };
+    };
+    const contexts = [_]ConnectionContext{ .{ .id = 1 }, .{ .id = 2 } };
+    var mock = MockStore.init();
+    var data_store = mock.store();
+
+    for (&contexts) |*context| {
+        var implementation: IdentityCommand = .{ .expected_context = context };
+        const command: Commander = .{ .ptr = &implementation, .vtable = &IdentityCommand.vtable };
+        defer command.deinit();
+        var state = Commander.ClientState.initWithConnection(context);
+        var result = try command.execute(testing.io, &data_store, &state);
+        defer result.deinit();
+        try testing.expectEqual(@as(i64, @intCast(context.id)), result.value.integer);
+        try testing.expectEqual(@as(u32, 0), state.db_index);
+        try testing.expectEqual(protocol.Resp.Version.resp2, state.resp.version());
+    }
+    try testing.expectEqual(null, Commander.ClientState.init().connection_context);
+}
+
 test "reject unknown command" {
     for ([_][]const u8{ "UNKNOWN", "" }) |name| {
         try std.testing.expectError(error.UnknownCommand, init(std.testing.allocator, .{ .name = name, .arguments = &.{} }));

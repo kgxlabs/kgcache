@@ -1,11 +1,17 @@
 const protocol = @import("protocol.zig");
+const ConnectionContext = @import("connection_context.zig");
 const ClientState = @This();
 
 db_index: u32 = 0,
 resp: protocol.Resp = protocol.Resp2.resp(),
+connection_context: ?*const ConnectionContext = null,
 
 pub fn init() ClientState {
     return .{};
+}
+
+pub fn initWithConnection(context: *const ConnectionContext) ClientState {
+    return .{ .connection_context = context };
 }
 
 test "client state starts in RESP2 and keeps protocol selection per client" {

@@ -3,6 +3,7 @@ const protocol = @import("protocol.zig");
 const request_decoder = protocol.request_decoder;
 const commander = @import("commander.zig");
 const ClientState = @import("client_state.zig");
+const ConnectionContext = @import("connection_context.zig");
 const store = @import("store.zig");
 const logging = @import("logger.zig");
 
@@ -47,6 +48,7 @@ pub fn serve(
     io: std.Io,
     logger: logging.Logger,
     connection: std.Io.net.Stream,
+    context: *const ConnectionContext,
     data_store: *store.Store,
     con_allocator: std.mem.Allocator,
     connection_buffer_size: usize,
@@ -60,7 +62,7 @@ pub fn serve(
     };
     defer buffer.deinit(con_allocator);
 
-    handleConnection(io, logger, connection, data_store, con_allocator, &buffer, stop_requested) catch |err| {
+    handleConnection(io, logger, connection, context, data_store, con_allocator, &buffer, stop_requested) catch |err| {
         logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
 }
@@ -69,12 +71,13 @@ fn handleConnection(
     io: std.Io,
     logger: logging.Logger,
     connection: std.Io.net.Stream,
+    context: *const ConnectionContext,
     data_store: *store.Store,
     con_allocator: std.mem.Allocator,
     buffer: *InputBuffer,
     stop_requested: *const std.atomic.Value(bool),
 ) !void {
-    var client_state = ClientState.init();
+    var client_state = ClientState.initWithConnection(context);
     while (true) {
         if (stop_requested.load(.acquire)) return;
 
