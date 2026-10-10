@@ -9,7 +9,7 @@ pub fn sendAndExpect(io: std.Io, server: *support.ServerProcess, fd: std.posix.f
         sent += count;
     }
 
-    var reply: [32]u8 = undefined;
+    var reply: [128]u8 = undefined;
     std.debug.assert(expected.len <= reply.len);
     try server.readExact(fd, reply[0..expected.len]);
     if (!std.mem.eql(u8, reply[0..expected.len], expected)) {

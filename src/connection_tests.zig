@@ -401,7 +401,7 @@ test "fragmented commands finish at every split and unfinished EOF stays quiet" 
     }
 }
 
-test "unfinished EOF and malformed pipeline tails preserve earlier replies and stored data" {
+test "unfinished EOF and invalid pipeline tails preserve earlier replies and stored data" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const PersistenceState = @import("persistence_state.zig");
@@ -415,6 +415,8 @@ test "unfinished EOF and malformed pipeline tails preserve earlier replies and s
         .{ .tail = "*3\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n$5\r\nother\r" },
         .{ .tail = "*x\r\n" ++ later_delete, .reply = "-ERR protocol error: malformed request\r\n" },
         .{ .tail = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\rX" ++ later_delete, .reply = "-ERR protocol error: malformed request\r\n" },
+        .{ .tail = "*1025\r\n" ++ later_delete, .reply = "-ERR protocol error: request limit exceeded\r\n" },
+        .{ .tail = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$1048576\r\n", .reply = "-ERR protocol error: request limit exceeded\r\n" },
     };
 
     for (cases) |case| {
@@ -483,13 +485,11 @@ test "input byte limit accepts an exact frame and rejects a one-byte excess" {
         try testing.expectEqual(request.len, header.len + value_len + 2);
         @memset(request[header.len..][0..value_len], 'x');
         @memcpy(request[request.len - 2 ..], "\r\n");
+        const pipeline = try std.fmt.allocPrint(testing.allocator, "*1\r\n$4\r\nPING\r\n{s}*1\r\n$6\r\nDBSIZE\r\n", .{request});
+        defer testing.allocator.free(pipeline);
 
         for ([_]usize{ 1024, limit * 2 }) |initial_capacity| {
-            var fake_io: TestConnectionIo = .{ .requests = &.{
-                "*1\r\n$4\r\nPING\r\n",
-                request,
-                "*1\r\n$6\r\nDBSIZE\r\n",
-            } };
+            var fake_io: TestConnectionIo = .{ .requests = &.{pipeline} };
             var test_logger = logging.TestLogger.init();
             var mock = store.MockStore.init();
             mock.dbsize_result = 7;
@@ -509,6 +509,48 @@ test "input byte limit accepts an exact frame and rejects a one-byte excess" {
             try testing.expectEqual(0, test_logger.recordedEvents().len);
             try testing.expectEqual(0, fake_io.close_calls);
         }
+    }
+}
+
+test "element limit counts the command name and prevents oversized mutations" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    const limit = @import("protocol.zig").request_decoder.network_limits.max_elements;
+    const key_frame = "$5\r\nfruit\r\n";
+    const keys = key_frame ** limit;
+
+    for ([_]usize{ 0, 1 }) |excess| {
+        const count = limit + excess;
+        const request = try std.fmt.allocPrint(testing.allocator, "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
+            "*{d}\r\n$3\r\nDEL\r\n{s}*1\r\n$4\r\nPING\r\n", .{ count, keys[0 .. (count - 1) * key_frame.len] });
+        defer testing.allocator.free(request);
+        var fake_io: TestConnectionIo = .{ .requests = &.{request} };
+        var test_logger = logging.TestLogger.init();
+        var backend = DefaultStorage.init(testing.io, testing.allocator);
+        var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+        var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-element-limit.kgc");
+        var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+        var data_store = memory_store.store();
+        defer data_store.deinit();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 128, &never_stop_requested);
+
+        var stored = try data_store.get("fruit", 0);
+        defer if (stored) |*value| value.deinit();
+        if (excess == 0) {
+            try testing.expectEqualStrings("+OK\r\n:1\r\n+PONG\r\n", fake_io.written());
+            try testing.expect(stored == null);
+            try testing.expectEqual(0, try data_store.dbsize(0));
+        } else {
+            try testing.expectEqualStrings("+OK\r\n-ERR protocol error: request limit exceeded\r\n", fake_io.written());
+            try testing.expect(stored != null);
+            try testing.expectEqualStrings("apple", stored.?.value.string);
+            try testing.expectEqual(1, try data_store.dbsize(0));
+        }
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+        try testing.expectEqual(0, fake_io.close_calls);
     }
 }
 

@@ -2,6 +2,7 @@ const std = @import("std");
 const ping_smoke = @import("suites/ping_smoke.zig");
 const set_get = @import("suites/set_get.zig");
 const retained_pipeline_tail = @import("suites/retained_pipeline_tail.zig");
+const request_limits = @import("suites/request_limits.zig");
 const command_errors = @import("suites/command_errors.zig");
 const select_isolation = @import("suites/select_isolation.zig");
 const invalid_config = @import("suites/invalid_config.zig");
@@ -32,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     try ping_smoke.run(init.io, init.gpa, executable_path, artifact_dir);
     try set_get.run(init.io, init.gpa, executable_path, artifact_dir);
     try retained_pipeline_tail.run(init.io, init.gpa, executable_path, artifact_dir);
+    try request_limits.run(init.io, init.gpa, executable_path, artifact_dir);
     try command_errors.run(init.io, init.gpa, executable_path, artifact_dir);
     try select_isolation.run(init.io, init.gpa, executable_path, artifact_dir);
     try invalid_config.run(init.io, init.gpa, executable_path, artifact_dir);

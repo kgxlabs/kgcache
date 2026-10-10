@@ -114,7 +114,8 @@ zig build test
 
 - TCP sessions use RESP2. HELLO negotiation and RESP3 sessions are not available.
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, or transactions.
-- Complete requests are processed in order, including requests split across reads. The input buffer starts at 1 KiB by default and grows as needed up to 1 MiB. `connection-buffer-size` sets the initial capacity, clamped to that cap. Each encoded request must fit within 1 MiB; a pipeline can exceed that size overall. Requests that exceed the cap receive a protocol error and close the connection. EOF with an unfinished request closes quietly without executing it.
+- Complete requests are processed in order, including requests split across reads. The input buffer starts at 1 KiB by default and grows as needed up to 1 MiB. `connection-buffer-size` sets the initial capacity, clamped to that cap.
+- Each encoded request is limited to 1 MiB and 1,024 array elements, including the command name. Limits apply per command, so a pipeline can exceed them overall. Oversized declared sizes or counts receive a protocol error without waiting for the remaining payload, then the connection closes. EOF with a valid unfinished request closes quietly without executing it. See [TCP request limits](docs/CONFIGURATION.md#tcp-request-limits).
 - Command errors such as unknown commands or wrong argument counts allow later requests. Malformed RESP input receives a protocol error and ends the session. Reply write failures end the session before later commands execute. Earlier successful commands remain applied.
 - `COMMAND` supports registry-based introspection. `COMMAND DOCS` and module filtering are not supported.
 - The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`. 

@@ -36,6 +36,7 @@
 
 # Initial per-connection input capacity, in bytes. The buffer grows as needed
 # up to 1 MiB. Each encoded request must fit that cap; pipelines may exceed it.
+# Each command also has at most 1,024 elements, including the command name.
 # Configured values above 1 MiB remain accepted, with the allocation clamped.
 # Range: 1 to the maximum usize value for this build.
 # connection-buffer-size 1024

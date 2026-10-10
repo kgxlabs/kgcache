@@ -134,7 +134,7 @@ Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config pa
 | `aof-load-truncated` | `--aof-load-truncated yes` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
 | `bgsave-retry-delay-ms` | `--bgsave-retry-delay-ms 5000` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
 
-The input buffer grows as needed up to 1 MiB and retains its grown capacity until the connection ends. Each encoded request, including its RESP framing, must fit within that cap. A pipeline may exceed it overall because complete commands are processed between reads. Configured values above 1 MiB remain accepted, but the initial allocation is clamped to 1 MiB.
+The input buffer grows as needed up to 1 MiB and retains its grown capacity until the connection ends. Configured values above 1 MiB remain accepted, but the initial allocation is clamped to 1 MiB. See [TCP request limits](#tcp-request-limits) for the limits on individual commands.
 
 See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every directive documented inline.
 
@@ -155,6 +155,21 @@ All limits are inclusive. `usize` is the size of a machine word in the server bu
 | `auto-aof-rewrite-percentage` | 0 to 4294967295; `0` disables automatic rewrites |
 | `auto-aof-rewrite-min-size` | 0 to maximum `usize` |
 | `bgsave-retry-delay-ms` | 0 to 9223372036854775807; `0` means no retry delay |
+
+## TCP request limits
+
+| Limit | Value |
+| --- | --- |
+| Encoded command size | 1 MiB (1,048,576 bytes), including RESP headers, command name, bodies, and endings |
+| Array elements | 1,024, including the command name and all arguments |
+
+These limits apply to each command. A pipeline may exceed them overall because complete commands are processed between reads. Increasing `connection-buffer-size` changes the initial capacity; it does not raise either limit.
+
+An oversized command receives `-ERR protocol error: request limit exceeded\r\n`, then the connection closes. Declared sizes and counts that exceed the limits are rejected without waiting for their missing payload or allocating argument metadata. Earlier replies are preserved, and successful mutations remain applied.
+
+A command previously accepted with a larger fixed buffer may now be rejected if its encoded size exceeds 1 MiB or it contains more than 1,024 elements.
+
+The byte cap bounds retained input per connection. Growth may temporarily hold both old and new buffers. The element limit bounds argument metadata to at most 1,023 arguments per command. Replies, stored values, and other server memory have separate costs.
 
 ## Persistence paths
 
