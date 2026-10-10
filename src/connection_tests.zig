@@ -53,7 +53,9 @@ const TestConnectionIo = struct {
     output: [512]u8 = undefined,
     output_len: usize = 0,
     close_calls: usize = 0,
+    read_error: ?std.Io.net.Stream.Reader.Error = null,
     fail_write: bool = false,
+    write_error: std.Io.net.Stream.Writer.Error = error.NetworkDown,
     fail_after_bytes: ?usize = null,
     max_write_bytes: usize = std.math.maxInt(usize),
     stop_after_read: ?*std.atomic.Value(bool) = null,
@@ -70,7 +72,10 @@ const TestConnectionIo = struct {
 
     fn read(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        if (self.next_request == self.requests.len) return 0;
+        if (self.next_request == self.requests.len) {
+            if (self.read_error) |err| return err;
+            return 0;
+        }
         const request = self.requests[self.next_request];
         std.debug.assert(data[0].len > 0);
         const count = @min(request.len - self.request_offset, data[0].len);
@@ -86,9 +91,9 @@ const TestConnectionIo = struct {
 
     fn write(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        if (self.fail_write) return error.NetworkDown;
+        if (self.fail_write) return self.write_error;
         if (self.fail_after_bytes) |limit| {
-            if (self.output_len >= limit) return error.NetworkDown;
+            if (self.output_len >= limit) return self.write_error;
         }
         if (self.stop_during_write) |flag| flag.store(true, .release);
         var remaining = self.max_write_bytes;
@@ -300,38 +305,78 @@ test "an unknown command gets its fixed response and the connection continues" {
     try testing.expectEqual(0, test_logger.recordedEvents().len);
 }
 
-test "a response write source is reported once without closing the borrowed stream" {
+test "read failures preserve earlier replies and report only unexpected sources" {
     const testing = std.testing;
-    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$4\r\nPING\r\n"}, .fail_write = true };
-    var test_logger = logging.TestLogger.init();
-    var mock = store.MockStore.init();
-    var data_store = mock.store();
+    const cases = [_]struct { requests: []const []const u8, reply: []const u8 }{
+        .{ .requests = &.{}, .reply = "" },
+        .{
+            .requests = &.{"*1\r\n$4\r\nPING\r\n*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nban"},
+            .reply = "+PONG\r\n",
+        },
+    };
+    for (cases) |case| {
+        for ([_]std.Io.net.Stream.Reader.Error{ error.ConnectionResetByPeer, error.NetworkDown, error.Timeout }) |read_error| {
+            var fake_io: TestConnectionIo = .{ .requests = case.requests, .read_error = read_error };
+            var test_logger = logging.TestLogger.init();
+            var mock = store.MockStore.init();
+            var data_store = mock.store();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
-    try testing.expectEqualStrings("", fake_io.written());
-    try testing.expectEqual(0, fake_io.close_calls);
-    const events = test_logger.recordedEvents();
-    try testing.expectEqual(1, events.len);
-    try testing.expectEqual(error.NetworkDown, events[0].source.?);
+            try testing.expectEqualStrings(case.reply, fake_io.written());
+            try testing.expectEqual(0, mock.set_calls);
+            try testing.expectEqual(0, fake_io.close_calls);
+            const events = test_logger.recordedEvents();
+            try testing.expectEqual(@as(usize, if (read_error == error.ConnectionResetByPeer) 0 else 1), events.len);
+            if (events.len > 0) {
+                try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+                try testing.expectEqual(read_error, events[0].source.?);
+            }
+        }
+    }
 }
 
-test "an internal failure and failed error response report both sources" {
+test "an unexpected response write source is reported once without closing the borrowed stream" {
     const testing = std.testing;
-    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n"}, .fail_write = true };
-    var test_logger = logging.TestLogger.init();
-    var mock = store.MockStore.init();
-    mock.dbsize_result = error.TestStorageSource;
-    var data_store = mock.store();
+    for ([_]std.Io.net.Stream.Writer.Error{ error.NetworkDown, error.HostUnreachable }) |write_error| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$4\r\nPING\r\n"}, .fail_write = true, .write_error = write_error };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
 
-    try testing.expectEqualStrings("", fake_io.written());
-    try testing.expectEqual(0, fake_io.close_calls);
-    const events = test_logger.recordedEvents();
-    try testing.expectEqual(2, events.len);
-    try testing.expectEqual(error.TestStorageSource, events[0].source.?);
-    try testing.expectEqual(error.NetworkDown, events[1].source.?);
+        try testing.expectEqualStrings("", fake_io.written());
+        try testing.expectEqual(0, fake_io.close_calls);
+        const events = test_logger.recordedEvents();
+        try testing.expectEqual(1, events.len);
+        try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+        try testing.expectEqual(write_error, events[0].source.?);
+    }
+}
+
+test "an internal failure reports its source when its error response also fails" {
+    const testing = std.testing;
+    for ([_]std.Io.net.Stream.Writer.Error{ error.NetworkDown, error.ConnectionResetByPeer, error.SocketUnconnected }) |write_error| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n"}, .fail_write = true, .write_error = write_error };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        mock.dbsize_result = error.TestStorageSource;
+        var data_store = mock.store();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        try testing.expectEqualStrings("", fake_io.written());
+        try testing.expectEqual(0, fake_io.close_calls);
+        const events = test_logger.recordedEvents();
+        try testing.expectEqual(@as(usize, if (write_error == error.NetworkDown) 2 else 1), events.len);
+        try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+        try testing.expectEqual(error.TestStorageSource, events[0].source.?);
+        if (write_error == error.NetworkDown) {
+            try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[1].kind);
+            try testing.expectEqual(write_error, events[1].source.?);
+        }
+    }
 }
 
 test "complete commands in one read advance after replies and mapped errors" {
@@ -694,25 +739,33 @@ test "invalid later DEL elements prevent mutation and stop the connection" {
     }
 }
 
-test "a partial reply failure stops before the next pipelined command" {
+test "a partial reply failure stops before the next pipelined command and logs only unexpected sources" {
     const testing = std.testing;
     const cases = [_]struct { request: []const u8, expected: []const u8 }{
         .{ .request = "*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "+PO" },
         .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nGET\r\n*1\r\n$6\r\nDBSIZE\r\n", .expected = "*1\r" },
     };
     for (cases) |case| {
-        var fake_io: TestConnectionIo = .{
-            .requests = &.{case.request},
-            .fail_after_bytes = case.expected.len,
-        };
-        var test_logger = logging.TestLogger.init();
-        var mock = store.MockStore.init();
-        var data_store = mock.store();
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
-        try testing.expectEqualStrings(case.expected, fake_io.written());
-        try testing.expectEqual(0, mock.dbsize_calls);
-        try testing.expectEqual(1, test_logger.recordedEvents().len);
-        try testing.expectEqual(error.NetworkDown, test_logger.recordedEvents()[0].source.?);
+        for ([_]std.Io.net.Stream.Writer.Error{ error.NetworkDown, error.ConnectionResetByPeer, error.SocketUnconnected }) |write_error| {
+            var fake_io: TestConnectionIo = .{
+                .requests = &.{case.request},
+                .write_error = write_error,
+                .fail_after_bytes = case.expected.len,
+            };
+            var test_logger = logging.TestLogger.init();
+            var mock = store.MockStore.init();
+            var data_store = mock.store();
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+            try testing.expectEqualStrings(case.expected, fake_io.written());
+            try testing.expectEqual(0, mock.dbsize_calls);
+            try testing.expectEqual(0, fake_io.close_calls);
+            const events = test_logger.recordedEvents();
+            try testing.expectEqual(@as(usize, if (write_error == error.NetworkDown) 1 else 0), events.len);
+            if (events.len > 0) {
+                try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+                try testing.expectEqual(write_error, events[0].source.?);
+            }
+        }
     }
 }
 
@@ -751,7 +804,7 @@ test "stopping prevents a new command while a live reply finishes" {
     }
 }
 
-test "failed owned replies release their copies and stop later mutations" {
+test "failed owned replies release their copies and stop later mutations without logging peer disconnects" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const PersistenceState = @import("persistence_state.zig");
@@ -761,28 +814,33 @@ test "failed owned replies release their copies and stop later mutations" {
         .{ .request = "*4\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\r\n$3\r\nGET\r\n", .stored_value = "banana" },
     };
     for (cases) |case| {
-        var request_bytes: [96]u8 = undefined;
-        const request = try std.fmt.bufPrint(&request_bytes, "{s}*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n", .{case.request});
-        var fake_io: TestConnectionIo = .{ .requests = &.{request}, .fail_after_bytes = 6, .max_write_bytes = 2 };
-        var test_logger = logging.TestLogger.init();
-        var backend = DefaultStorage.init(testing.io, testing.allocator);
-        var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
-        var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-failed-owned-replies.kgc");
-        var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
-        var data_store = memory_store.store();
-        defer data_store.deinit();
-        var initial = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
-        if (initial.value) |*previous| previous.deinit();
+        for ([_]std.Io.net.Stream.Writer.Error{ error.NetworkDown, error.ConnectionResetByPeer, error.SocketUnconnected }) |write_error| {
+            var request_bytes: [96]u8 = undefined;
+            const request = try std.fmt.bufPrint(&request_bytes, "{s}*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n", .{case.request});
+            var fake_io: TestConnectionIo = .{ .requests = &.{request}, .write_error = write_error, .fail_after_bytes = 6, .max_write_bytes = 2 };
+            var test_logger = logging.TestLogger.init();
+            var backend = DefaultStorage.init(testing.io, testing.allocator);
+            var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+            var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-failed-owned-replies.kgc");
+            var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+            var data_store = memory_store.store();
+            defer data_store.deinit();
+            var initial = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
+            if (initial.value) |*previous| previous.deinit();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 80, &never_stop_requested);
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 80, &never_stop_requested);
 
-        try testing.expectEqualStrings("$5\r\nap", fake_io.written());
-        var stored = (try data_store.get("fruit", 0)).?;
-        defer stored.deinit();
-        try testing.expectEqualStrings(case.stored_value, stored.value.string);
-        try testing.expectEqual(0, fake_io.close_calls);
-        const events = test_logger.recordedEvents();
-        try testing.expectEqual(1, events.len);
-        try testing.expectEqual(error.NetworkDown, events[0].source.?);
+            try testing.expectEqualStrings("$5\r\nap", fake_io.written());
+            var stored = (try data_store.get("fruit", 0)).?;
+            defer stored.deinit();
+            try testing.expectEqualStrings(case.stored_value, stored.value.string);
+            try testing.expectEqual(0, fake_io.close_calls);
+            const events = test_logger.recordedEvents();
+            try testing.expectEqual(@as(usize, if (write_error == error.NetworkDown) 1 else 0), events.len);
+            if (events.len > 0) {
+                try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
+                try testing.expectEqual(write_error, events[0].source.?);
+            }
+        }
     }
 }

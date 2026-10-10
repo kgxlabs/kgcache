@@ -240,30 +240,44 @@ fn writeResponse(
             logger.err("connection: response encoding failed", err, @errorReturnTrace());
 
             selected.writeReply(&writer.interface, .{ .error_reply = internal_error_message }) catch |write_err| {
-                if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse write_err, @errorReturnTrace());
+                reportWriteFailure(logger, writer.err orelse write_err, @errorReturnTrace(), stop_requested);
                 return false;
             };
 
             writer.interface.flush() catch |flush_err| {
-                if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse flush_err, @errorReturnTrace());
+                reportWriteFailure(logger, writer.err orelse flush_err, @errorReturnTrace(), stop_requested);
                 return false;
             };
 
             return false;
         }
 
-        if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+        reportWriteFailure(logger, writer.err orelse err, @errorReturnTrace(), stop_requested);
 
         return false;
     };
 
     writer.interface.flush() catch |err| {
-        if (!stop_requested.load(.acquire)) logger.err("connection: response write failed", writer.err orelse err, @errorReturnTrace());
+        reportWriteFailure(logger, writer.err orelse err, @errorReturnTrace(), stop_requested);
 
         return false;
     };
 
     return true;
+}
+
+fn reportWriteFailure(
+    logger: logging.Logger,
+    source: anyerror,
+    trace: logging.Logger.ErrorTrace,
+    stop_requested: *const std.atomic.Value(bool),
+) void {
+    if (stop_requested.load(.acquire)) return;
+    switch (source) {
+        // The stream writer reports a socket broken pipe as SocketUnconnected.
+        error.ConnectionResetByPeer, error.SocketUnconnected => return,
+        else => logger.err("connection: response write failed", source, trace),
+    }
 }
 
 fn initErrorResponse(err: commander.Error) ?[]const u8 {
