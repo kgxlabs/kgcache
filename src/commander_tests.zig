@@ -388,6 +388,27 @@ test "COMMAND INFO reports command metadata and unknown names" {
     try testing.expect(std.mem.indexOf(u8, writer.written(), "*-1\r\n") != null);
 }
 
+test "COMMAND reports HELLO arity and connection metadata" {
+    const testing = std.testing;
+    var mock = MockStore.init();
+    var result = try executeWithMockStore("COMMAND", &.{ "INFO", "hElLo" }, &mock);
+    defer result.deinit();
+    const commands = try expectArray(result.value);
+    try testing.expectEqual(1, commands.len);
+    const fields = try expectArray(commands[0]);
+    try testing.expectEqual(10, fields.len);
+    try expectBulk(fields[0], "hello");
+    try testing.expectEqual(@as(i64, -1), fields[1].integer);
+    try expectBulkArray(fields[2], &.{"fast"});
+    for (fields[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
+    try expectBulkArray(fields[6], &.{ "@connection", "@fast" });
+    for (fields[7..10]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
+
+    var list = try executeWithMockStore("COMMAND", &.{ "LIST", "FILTERBY", "ACLCAT", "connection" }, &mock);
+    defer list.deinit();
+    try expectBulkArray(list.value, &.{ "command", "echo", "hello", "ping", "select" });
+}
+
 test "COMMAND GETKEYS extracts keys without changing them" {
     var mock_store = MockStore.init();
 

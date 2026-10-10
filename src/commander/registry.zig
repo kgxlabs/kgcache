@@ -6,6 +6,7 @@ const DBSize = @import("dbsize.zig");
 const Del = @import("del.zig");
 const Echo = @import("echo.zig");
 const Get = @import("get.zig");
+const Hello = @import("hello.zig");
 const Commander = @import("interface.zig");
 const Ping = @import("ping.zig");
 const Save = @import("save.zig");
@@ -112,6 +113,14 @@ const definitions = [_]Definition{
             },
         },
         .factory = factoryFor(Get),
+    },
+    .{
+        .name = "hello",
+        .arity = Arity.atLeast(0),
+        .flags = &.{.fast},
+        .categories = &.{ .connection, .fast },
+        .keys = .none,
+        .factory = factoryFor(Hello),
     },
     .{
         .name = "ping",
