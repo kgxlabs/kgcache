@@ -1,10 +1,10 @@
 const std = @import("std");
-const connection = @import("connection.zig");
-const ConnectionContext = @import("connection_context.zig");
-const Lock = @import("lock.zig");
-const logging = @import("logger.zig");
-const store = @import("store.zig");
-const TestHelpers = @import("tests/helpers.zig");
+const connection = @import("session.zig");
+const ConnectionContext = @import("context.zig");
+const Lock = @import("../lock.zig");
+const logging = @import("../logger.zig");
+const store = @import("../store.zig");
+const TestNetwork = @import("test_network.zig");
 
 const ConnectionManager = @This();
 // TODO: If this is too much, reduce it.
@@ -216,7 +216,7 @@ test "thread spawn failure consumes its ID and closes the stream once" {
         }
     }.spawn;
 
-    var network = TestHelpers.TestNetwork.init(testing.io, 1);
+    var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var manager = ConnectionManager.initWithOptions(
@@ -229,11 +229,11 @@ test "thread spawn failure consumes its ID and closes the stream once" {
     );
     errdefer manager.deinit() catch {};
 
-    try testing.expectError(error.ThreadQuotaExceeded, manager.start(TestHelpers.TestNetwork.stream(1)));
+    try testing.expectError(error.ThreadQuotaExceeded, manager.start(TestNetwork.stream(1)));
     try testing.expectEqual(1, network.close_calls.load(.acquire));
     try testing.expectEqual(0, manager._workers.items.len);
 
-    try manager.start(TestHelpers.TestNetwork.stream(2));
+    try manager.start(TestNetwork.stream(2));
     network.all_reads_started.waitUncancelable(testing.io);
     try testing.expectEqual(@as(u64, 2), manager._workers.items[0].context.id);
     try manager.deinit();
@@ -243,20 +243,20 @@ test "thread spawn failure consumes its ID and closes the stream once" {
 
 test "ID exhaustion rejects registration without wrapping or closing twice" {
     const testing = std.testing;
-    var network = TestHelpers.TestNetwork.init(testing.io, 1);
+    var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
     errdefer manager.deinit() catch {};
     manager._next_connection_id = std.math.maxInt(i64);
 
-    try manager.start(TestHelpers.TestNetwork.stream(1));
+    try manager.start(TestNetwork.stream(1));
     network.all_reads_started.waitUncancelable(testing.io);
     const worker = manager._workers.items[0];
     try testing.expectEqual(@as(u64, std.math.maxInt(i64)), worker.context.id);
 
     for (2..4) |handle| {
-        try testing.expectError(error.ConnectionIdExhausted, manager.start(TestHelpers.TestNetwork.stream(handle)));
+        try testing.expectError(error.ConnectionIdExhausted, manager.start(TestNetwork.stream(handle)));
     }
     try testing.expectEqual(@as(u64, std.math.maxInt(i64)) + 1, manager._next_connection_id);
     try testing.expectEqual(1, manager._workers.items.len);
@@ -271,14 +271,14 @@ test "ID exhaustion rejects registration without wrapping or closing twice" {
 test "worker and collection allocation failures close the consumed stream once" {
     const testing = std.testing;
     for (0..2) |fail_index| {
-        var network = TestHelpers.TestNetwork.init(testing.io, 0);
+        var network = TestNetwork.init(testing.io, 0);
         var mock = store.MockStore.init();
         var data_store = mock.store();
         var failing_allocator = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
         var manager = ConnectionManager.init(network.io(), failing_allocator.allocator(), logging.NoopLogger.logger(), &data_store, 1024);
         errdefer manager.deinit() catch {};
 
-        try testing.expectError(error.OutOfMemory, manager.start(TestHelpers.TestNetwork.stream(1)));
+        try testing.expectError(error.OutOfMemory, manager.start(TestNetwork.stream(1)));
         try testing.expectEqual(0, manager._workers.items.len);
         try testing.expectEqual(1, network.close_calls.load(.acquire));
         try manager.deinit();

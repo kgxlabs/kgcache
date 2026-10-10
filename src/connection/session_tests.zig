@@ -1,8 +1,8 @@
 const std = @import("std");
-const store = @import("store.zig");
-const logging = @import("logger.zig");
-const serve = @import("connection.zig").serve;
-const ConnectionContext = @import("connection_context.zig");
+const store = @import("../store.zig");
+const logging = @import("../logger.zig");
+const serve = @import("../connection.zig").serve;
+const ConnectionContext = @import("../connection.zig").ConnectionContext;
 
 const test_connection_context: ConnectionContext = .{ .id = 1 };
 const never_stop_requested: std.atomic.Value(bool) = .init(false);
@@ -155,10 +155,10 @@ const TestConnectionIo = struct {
 
 test "a Storage source crosses Store and Commander to the connection logger" {
     const testing = std.testing;
-    const Storage = @import("storage/interface.zig");
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const Storage = @import("../storage/interface.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n*1\r\n$4\r\nPING\r\n"} };
     var test_logger = logging.TestLogger.init();
 
@@ -217,9 +217,9 @@ test "argument count errors use ERR for every command and allow another request"
 
 test "commands preserve replies and database state through a connection" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
 
     var fake_io: TestConnectionIo = .{ .requests = &.{
         "*3\r\n$3\r\nsEt\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
@@ -466,9 +466,9 @@ test "fragmented commands finish at every split and unfinished EOF stays quiet" 
 
 test "unfinished EOF and invalid pipeline tails preserve earlier replies and stored data" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const prefix = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
         "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n";
     const later_delete = "*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n";
@@ -536,7 +536,7 @@ test "commands larger than initial capacity finish and allow later commands" {
 
 test "input byte limit accepts an exact frame and rejects a one-byte excess" {
     const testing = std.testing;
-    const limit = @import("protocol.zig").request_decoder.network_limits.max_frame_bytes;
+    const limit = @import("../protocol.zig").request_decoder.network_limits.max_frame_bytes;
     const prefix = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$";
     const overhead = prefix.len + std.fmt.count("{d}", .{limit}) + "\r\n\r\n".len;
 
@@ -577,10 +577,10 @@ test "input byte limit accepts an exact frame and rejects a one-byte excess" {
 
 test "element limit counts the command name and prevents oversized mutations" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
-    const limit = @import("protocol.zig").request_decoder.network_limits.max_elements;
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
+    const limit = @import("../protocol.zig").request_decoder.network_limits.max_elements;
     const key_frame = "$5\r\nfruit\r\n";
     const keys = key_frame ** limit;
 
@@ -619,9 +619,9 @@ test "element limit counts the command name and prevents oversized mutations" {
 
 test "growth allocation failure preserves earlier mutations and releases input" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const value = "banana" ** 24;
     const request = try std.fmt.allocPrint(testing.allocator, "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
         "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n${d}\r\n{s}\r\n" ++
@@ -663,9 +663,9 @@ test "growth allocation failure preserves earlier mutations and releases input" 
 
 test "a growing pipeline tail preserves earlier commands and supports reuse" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const large_value = "banana" ** 24;
     const first_request = try std.fmt.allocPrint(testing.allocator, "*1\r\n$4\r\nPING\r\n" ++
         "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
@@ -699,9 +699,9 @@ test "a growing pipeline tail preserves earlier commands and supports reuse" {
 
 test "pipelined borrowed and owned replies finish through short writes" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     var fake_io: TestConnectionIo = .{
         .requests = &.{
             "*2\r\n$4\r\nECHO\r\n$3\r\n\x00\r\n\r\n" ++
@@ -759,9 +759,9 @@ test "invalid later DEL elements prevent mutation and stop the connection" {
 
 test "a blocked reply keeps later mutations pending and permits another storage client" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const Worker = struct {
         fn run(fake_io: *TestConnectionIo, logger: logging.Logger, data_store: *store.Store) void {
             serve(fake_io.io(), logger, TestConnectionStream, &test_connection_context, data_store, testing.allocator, 128, &never_stop_requested);
@@ -864,9 +864,9 @@ test "a partial reply failure stops before the next pipelined command and logs o
 
 test "stopping prevents a new command while a live reply finishes" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     for ([_]enum { read, write }{ .read, .write }) |stop_during| {
         var stop_requested: std.atomic.Value(bool) = .init(false);
         var fake_io: TestConnectionIo = .{
@@ -899,9 +899,9 @@ test "stopping prevents a new command while a live reply finishes" {
 
 test "failed owned replies release their copies and stop later mutations without logging peer disconnects" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const cases = [_]struct { request: []const u8, stored_value: []const u8 }{
         .{ .request = "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n", .stored_value = "apple" },
         .{ .request = "*4\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\r\n$3\r\nGET\r\n", .stored_value = "banana" },

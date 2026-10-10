@@ -3,7 +3,7 @@ const store = @import("../store.zig");
 const std = @import("std");
 const object = @import("../object.zig");
 
-pub const ClientState = @import("../client_state.zig");
+pub const ClientState = @import("../connection.zig").ClientState;
 
 const Commander = @This();
 

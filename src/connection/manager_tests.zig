@@ -1,8 +1,8 @@
 const std = @import("std");
-const logging = @import("logger.zig");
-const store = @import("store.zig");
-const TestHelpers = @import("tests/helpers.zig");
-const ConnectionManager = @import("connection_manager.zig");
+const logging = @import("../logger.zig");
+const store = @import("../store.zig");
+const TestNetwork = @import("test_network.zig");
+const ConnectionManager = @import("../connection.zig").ConnectionManager;
 const ClientWorker = ConnectionManager.ClientWorker;
 
 test "connection manager boundary compiles" {
@@ -13,16 +13,16 @@ test "connection manager boundary compiles" {
 test "connection IDs and borrowed contexts stay stable as the collection grows" {
     const testing = std.testing;
     const worker_count = 16;
-    var network = TestHelpers.TestNetwork.init(testing.io, worker_count);
+    var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
     defer manager.deinit() catch unreachable;
 
-    try manager.start(TestHelpers.TestNetwork.stream(1));
+    try manager.start(TestNetwork.stream(1));
     const first_context = &manager._workers.items[0].context;
     for (2..worker_count + 1) |handle| {
-        try manager.start(TestHelpers.TestNetwork.stream(handle));
+        try manager.start(TestNetwork.stream(handle));
     }
     network.all_reads_started.waitUncancelable(testing.io);
 
@@ -36,7 +36,7 @@ test "connection IDs and borrowed contexts stay stable as the collection grows" 
 
 test "connection IDs are never reused after finished workers are reaped" {
     const testing = std.testing;
-    var network = TestHelpers.TestNetwork.init(testing.io, 0);
+    var network = TestNetwork.init(testing.io, 0);
     network.immediate_eof_handle = 1;
     var mock = store.MockStore.init();
     var data_store = mock.store();
@@ -45,7 +45,7 @@ test "connection IDs are never reused after finished workers are reaped" {
 
     for (1..4) |expected_id| {
         network.immediate_closed.reset();
-        try manager.start(TestHelpers.TestNetwork.stream(1));
+        try manager.start(TestNetwork.stream(1));
         network.immediate_closed.waitUncancelable(testing.io);
         {
             var lock_tx = try manager._lock.begin();
@@ -60,7 +60,7 @@ test "connection IDs are never reused after finished workers are reaped" {
 
 test "deinit wakes an idle worker and closes its stream once" {
     const testing = std.testing;
-    var network = TestHelpers.TestNetwork.init(testing.io, 1);
+    var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var manager = ConnectionManager.init(
@@ -72,7 +72,7 @@ test "deinit wakes an idle worker and closes its stream once" {
     );
     errdefer manager.deinit() catch {};
 
-    try manager.start(TestHelpers.TestNetwork.stream(1));
+    try manager.start(TestNetwork.stream(1));
     network.all_reads_started.waitUncancelable(testing.io);
     try manager.deinit();
     try manager.deinit();
@@ -84,7 +84,7 @@ test "deinit wakes an idle worker and closes its stream once" {
 test "deinit wakes every idle worker before any worker closes" {
     const testing = std.testing;
     const worker_count = 4;
-    var network = TestHelpers.TestNetwork.init(testing.io, worker_count);
+    var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var manager = ConnectionManager.init(
@@ -97,7 +97,7 @@ test "deinit wakes every idle worker before any worker closes" {
     errdefer manager.deinit() catch {};
 
     for (1..worker_count + 1) |handle| {
-        try manager.start(TestHelpers.TestNetwork.stream(handle));
+        try manager.start(TestNetwork.stream(handle));
     }
     network.all_reads_started.waitUncancelable(testing.io);
     try manager.deinit();
@@ -109,9 +109,9 @@ test "deinit wakes every idle worker before any worker closes" {
 
 test "deinit wakes a real blocked writer and idle reader before joining" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const Shutdown = struct {
         manager: *ConnectionManager,
         done: std.Io.Event = .unset,
@@ -210,7 +210,7 @@ test "deinit wakes a real blocked writer and idle reader before joining" {
 
 test "reapFinished reclaims a completed worker without closing an active worker" {
     const testing = std.testing;
-    var network = TestHelpers.TestNetwork.init(testing.io, 1);
+    var network = TestNetwork.init(testing.io, 1);
     network.immediate_eof_handle = @intCast(1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
@@ -223,9 +223,9 @@ test "reapFinished reclaims a completed worker without closing an active worker"
     );
     errdefer manager.deinit() catch {};
 
-    try manager.start(TestHelpers.TestNetwork.stream(1));
+    try manager.start(TestNetwork.stream(1));
     network.immediate_closed.waitUncancelable(testing.io);
-    try manager.start(TestHelpers.TestNetwork.stream(2));
+    try manager.start(TestNetwork.stream(2));
     network.all_reads_started.waitUncancelable(testing.io);
 
     try manager.reapFinished();

@@ -1,5 +1,5 @@
-const protocol = @import("protocol.zig");
-const ConnectionContext = @import("connection_context.zig");
+const protocol = @import("../protocol.zig");
+const ConnectionContext = @import("context.zig");
 const ClientState = @This();
 
 db_index: u32 = 0,

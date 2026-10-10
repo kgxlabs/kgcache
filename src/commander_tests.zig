@@ -9,7 +9,7 @@ const init = commander.init;
 
 test "command handlers borrow their client's connection identity" {
     const testing = std.testing;
-    const ConnectionContext = @import("connection_context.zig");
+    const ConnectionContext = @import("connection.zig").ConnectionContext;
     const IdentityCommand = struct {
         expected_context: *const ConnectionContext,
 
