@@ -147,7 +147,10 @@ pub fn deinit(self: *ConnectionManager) !void {
 
         for (self._workers.items) |worker| {
             if (worker.lifecycle != .stopping) continue;
-            worker.stream.shutdown(self._io, .recv) catch |err| switch (err) {
+            // NOTE: we need to shutdown both (receiving and send)
+            // receive: stop receiving clients bytes
+            // send: stop sending bytes to client
+            worker.stream.shutdown(self._io, .both) catch |err| switch (err) {
                 error.SocketUnconnected => {},
                 else => if (first_error == null) {
                     first_error = err;

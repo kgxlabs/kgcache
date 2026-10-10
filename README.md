@@ -114,7 +114,10 @@ zig build test
 
 - TCP sessions use RESP2. HELLO negotiation and RESP3 sessions are not available.
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, or transactions.
-- Complete requests in one read are processed in order. An incomplete request sends a protocol error and closes the connection, so requests split across reads are not supported. The per-connection read buffer is 1 KiB by default and is configurable.
+- Complete requests are processed in order, including requests split across reads. The input buffer starts at 1 KiB by default and grows as needed up to 1 MiB. `connection-buffer-size` sets the initial capacity, clamped to that cap.
+- Each encoded request is limited to 1 MiB and 1,024 array elements, including the command name. Limits apply per command, so a pipeline can exceed them overall. Oversized declared sizes or counts receive a protocol error without waiting for the remaining payload, then the connection closes. EOF with a valid unfinished request closes quietly without executing it. See [TCP request limits](docs/CONFIGURATION.md#tcp-request-limits).
+- Command errors such as unknown commands or wrong argument counts allow later requests. Malformed RESP input receives a protocol error and ends the session. Reply write or flush failures end the session without appending an error to partial output or executing later commands. Peer resets and broken pipes close quietly. Earlier successful commands remain applied.
+- Each reply finishes before the next command starts. A slow reader can pause its worker when socket send space fills. A completed socket write means the local system accepted the bytes; the client may not have read them yet. Shutdown wakes blocked reads and writes before joining workers.
 - `COMMAND` supports registry-based introspection. `COMMAND DOCS` and module filtering are not supported.
 - The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`. 
 

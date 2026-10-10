@@ -85,7 +85,8 @@ records the signal and wakes the application. Normal application code then
 cancels the blocked accept task, stops cron, and closes the listener.
 
 Connection workers are tracked by `ConnectionManager`. During shutdown, the
-manager wakes blocked client receives, joins every worker, and only then lets
+manager sets the stopping flag, shuts client sockets down in both directions
+to wake blocked reads and writes, and joins every worker. Only then does
 the server check for persistence children. This connection draining is
 separate from the signal handler and listener wake-up behavior.
 

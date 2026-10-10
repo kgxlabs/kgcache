@@ -2,7 +2,7 @@
 
 Run `zig build test-integration` to build kgcache and run the Zig integration runner. `zig build test` runs the unit suite. The runner calls suite files in `tests/integration/suites/`.
 
-The baseline suite checks PING, SET/GET/DEL, recovery after command errors, database isolation, invalid config startup, idle client shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
+The baseline suite checks PING, SET/GET/DEL, retained pipeline tails, request limits, recovery after command errors, database isolation, invalid config startup, slow readers, peer resets, idle reader and blocked writer shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
 
 The PING cases check PONG without a message and exact bulk string replies for
 ordinary, empty, and binary messages containing NUL, CRLF, and a non-ASCII byte.
@@ -46,4 +46,34 @@ The process harness in `tests/integration/harness/` owns each child from start t
 
 The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.
 
-Current split-request and pipelined-request failures are tracked in [issue #160](https://github.com/kgxlabs/kgcache/issues/160).
+The retained-tail case uses a small connection buffer and sends a pipeline
+larger than it, with three complete commands and an unfinished fourth that also
+exceeds the initial capacity. It reads the first three replies and checks the
+unchanged value from another connection.
+It then finishes the fourth command, checks the new value, and sends another
+pipeline on the same connection after growth.
+Deterministic connection tests cover exact read splits, including binary and
+empty bodies.
+
+The request-limit cases send an oversized array count or declared value size
+after a successful SET/GET pipeline. They keep the socket open without sending
+the missing payload, require the earlier replies followed by the request-limit
+error and connection closure within the harness deadline, and check the earlier
+stored value from another connection.
+
+The transport process cases seed a 16 MiB value through AOF replay, then request
+GET followed by DEL from a client with a small receive buffer. They read only
+the reply header and leave the body unread. Another client must still finish
+PING and DBSIZE, and the later DEL must remain pending. One case sends SIGTERM
+while the writer and observer remain open, requiring a clean exit within the
+existing five-second deadline. Another resets the slow client and an idle
+client, then checks that the observer still responds and the value remains.
+Both cases require no error-level log for expected transport termination.
+The existing harness captures failure logs and exit status, reaps the child,
+and fails if shutdown needs a forced kill.
+
+Connection unit tests pause borrowed and owned replies to check command order,
+owner cleanup, and storage access while output waits. A manager test uses real
+TCP sockets with small buffers and a 1 MiB reply to check reader and writer
+wakeup within five seconds. Scripted I/O checks unexpected source logging and
+that failed partial output has no appended error reply or later command.

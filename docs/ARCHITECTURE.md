@@ -75,12 +75,14 @@ server runtime failure reaches the same cleanup boundary and is reported as
 an error, while a requested signal shutdown is a normal exit.
 
 At shutdown, the accept loop and cron stop first. `ConnectionManager` then
-marks connection shutdown, wakes blocked receives with socket shutdown, and
-joins every worker. `Server` next waits for and reaps tracked snapshot and AOF
-children, then accounts for the save or finishes the rewrite. Only after that
-does it close AOF and release Store, Storage, persistence, and allocator-owned
-state. The logger owner keeps the logger alive through child completion and
-cleanup. A requested shutdown of an idle connection is cooperative and does
+sets the stopping flag and shuts client sockets down in both directions to
+wake blocked reads and writes. Sessions release their live reply, command,
+frame, and input owners before worker completion closes each stream once.
+The manager joins every worker. `Server` next waits for and reaps tracked
+snapshot and AOF children, then accounts for the save or finishes the rewrite.
+Only after that does it close AOF and release Store, Storage, persistence,
+and allocator-owned state. The logger owner keeps the logger alive through child completion and
+cleanup. A requested shutdown of a client connection is cooperative and does
 not produce an error event. The child wait has no deadline; see
 [Snapshots](SNAPSHOTS.md#reaping-why-it-cant-happen-inside-bgsave) and
 [AOF](AOF.md#shutdown).
