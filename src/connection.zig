@@ -65,11 +65,6 @@ pub fn serve(
     };
 }
 
-const transition_limits: request_decoder.Limits = .{
-    .max_frame_bytes = std.math.maxInt(usize),
-    .max_elements = std.math.maxInt(usize),
-};
-
 fn handleConnection(
     io: std.Io,
     logger: logging.Logger,
@@ -133,12 +128,28 @@ fn handleConnection(
                 defer _ = gpa.deinit();
 
                 const allocator = gpa.allocator();
-                const outcome = request_decoder.decode(buffer.bytes[buffer.read_pos..buffer.write_pos], allocator, transition_limits) catch |err| {
+                const outcome = request_decoder.decode(
+                    buffer.bytes[buffer.read_pos..buffer.write_pos],
+                    allocator,
+                    request_decoder.network_limits,
+                ) catch |err| {
                     if (err == error.OutOfMemory) {
                         logger.err("connection: request parsing failed", err, @errorReturnTrace());
-                        _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = internal_error_message }, stop_requested);
+                        _ = writeResponse(
+                            logger,
+                            client_state.resp,
+                            &connection_writer,
+                            .{ .error_reply = internal_error_message },
+                            stop_requested,
+                        );
                     } else {
-                        _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
+                        _ = writeResponse(
+                            logger,
+                            client_state.resp,
+                            &connection_writer,
+                            .{ .error_reply = parseErrorResponse(err) },
+                            stop_requested,
+                        );
                     }
                     return;
                 };
