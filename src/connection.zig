@@ -107,6 +107,8 @@ fn handleConnection(
         buffer.assertValid();
 
         pending: while (buffer.read_pos < buffer.write_pos) {
+            if (stop_requested.load(.acquire)) return;
+
             const consumed = request: {
                 var gpa: std.heap.DebugAllocator(.{}) = .init;
                 defer _ = gpa.deinit();

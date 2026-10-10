@@ -56,6 +56,8 @@ const TestConnectionIo = struct {
     fail_write: bool = false,
     fail_after_bytes: ?usize = null,
     max_write_bytes: usize = std.math.maxInt(usize),
+    stop_after_read: ?*std.atomic.Value(bool) = null,
+    stop_during_write: ?*std.atomic.Value(bool) = null,
     vtable: std.Io.VTable = undefined,
 
     fn io(self: *@This()) std.Io {
@@ -78,6 +80,7 @@ const TestConnectionIo = struct {
             self.next_request += 1;
             self.request_offset = 0;
         }
+        if (self.stop_after_read) |flag| flag.store(true, .release);
         return count;
     }
 
@@ -87,6 +90,7 @@ const TestConnectionIo = struct {
         if (self.fail_after_bytes) |limit| {
             if (self.output_len >= limit) return error.NetworkDown;
         }
+        if (self.stop_during_write) |flag| flag.store(true, .release);
         var remaining = self.max_write_bytes;
         std.debug.assert(remaining > 0);
         var count = self.append(header, &remaining);
@@ -133,7 +137,7 @@ test "a Storage source crosses Store and Commander to the connection logger" {
     const DefaultStorage = @import("storage/default_storage.zig");
     const PersistenceState = @import("persistence_state.zig");
     const persistence = @import("persistence.zig");
-    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n"} };
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n*1\r\n$4\r\nPING\r\n"} };
     var test_logger = logging.TestLogger.init();
 
     var backend = DefaultStorage.init(testing.io, testing.allocator);
@@ -397,18 +401,72 @@ test "fragmented commands finish at every split and unfinished EOF stays quiet" 
     }
 }
 
-test "an unfinished request at fixed capacity ends cleanly" {
+test "unfinished EOF and malformed pipeline tails preserve earlier replies and stored data" {
     const testing = std.testing;
-    var fake_io: TestConnectionIo = .{ .requests = &.{"*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n"} };
-    var test_logger = logging.TestLogger.init();
-    var mock = store.MockStore.init();
-    var data_store = mock.store();
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    const prefix = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
+        "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n";
+    const later_delete = "*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n";
+    const cases = [_]struct { tail: []const u8, reply: []const u8 = "" }{
+        .{ .tail = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nban" },
+        .{ .tail = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\r" },
+        .{ .tail = "*3\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n$5\r\nother\r" },
+        .{ .tail = "*x\r\n" ++ later_delete, .reply = "-ERR protocol error: malformed request\r\n" },
+        .{ .tail = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\rX" ++ later_delete, .reply = "-ERR protocol error: malformed request\r\n" },
+    };
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 14, &never_stop_requested);
+    for (cases) |case| {
+        var request_bytes: [128]u8 = undefined;
+        const request = try std.fmt.bufPrint(&request_bytes, "{s}{s}", .{ prefix, case.tail });
+        var fake_io: TestConnectionIo = .{ .requests = &.{request} };
+        var test_logger = logging.TestLogger.init();
+        var backend = DefaultStorage.init(testing.io, testing.allocator);
+        var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+        var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-unfinished-or-malformed-tail.kgc");
+        var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+        var data_store = memory_store.store();
+        defer data_store.deinit();
 
-    try testing.expectEqualStrings("-ERR protocol error: incomplete request\r\n", fake_io.written());
-    try testing.expectEqual(0, test_logger.recordedEvents().len);
-    try testing.expectEqual(0, fake_io.close_calls);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 36, &never_stop_requested);
+
+        var reply_bytes: [64]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&reply_bytes, "+OK\r\n$5\r\napple\r\n{s}", .{case.reply});
+        try testing.expectEqualStrings(expected, fake_io.written());
+        var stored = (try data_store.get("fruit", 0)).?;
+        defer stored.deinit();
+        try testing.expectEqualStrings("apple", stored.value.string);
+        try testing.expectEqual(1, try data_store.dbsize(0));
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+        try testing.expectEqual(0, fake_io.close_calls);
+    }
+}
+
+test "fixed capacity accepts a fitting frame and stops an oversized pipeline tail" {
+    const testing = std.testing;
+    const echo = "*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n";
+    const pipeline = "*1\r\n$4\r\nPING\r\n" ++ echo ++ "*1\r\n$6\r\nDBSIZE\r\n";
+    const cases = [_]struct { request: []const u8, capacity: usize, reply: []const u8, dbsize_calls: usize = 0 }{
+        .{ .request = echo, .capacity = 14, .reply = "-ERR protocol error: incomplete request\r\n" },
+        .{ .request = pipeline, .capacity = echo.len - 1, .reply = "+PONG\r\n-ERR protocol error: incomplete request\r\n" },
+        .{ .request = pipeline, .capacity = echo.len, .reply = "+PONG\r\n$1\r\nx\r\n:7\r\n", .dbsize_calls = 1 },
+    };
+
+    for (cases) |case| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{case.request} };
+        var test_logger = logging.TestLogger.init();
+        var mock = store.MockStore.init();
+        mock.dbsize_result = 7;
+        var data_store = mock.store();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, case.capacity, &never_stop_requested);
+
+        try testing.expectEqualStrings(case.reply, fake_io.written());
+        try testing.expectEqual(case.dbsize_calls, mock.dbsize_calls);
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+        try testing.expectEqual(0, fake_io.close_calls);
+    }
 }
 
 test "a retained pipeline tail finishes without repeating earlier commands" {
@@ -520,5 +578,76 @@ test "a partial reply failure stops before the next pipelined command" {
         try testing.expectEqual(0, mock.dbsize_calls);
         try testing.expectEqual(1, test_logger.recordedEvents().len);
         try testing.expectEqual(error.NetworkDown, test_logger.recordedEvents()[0].source.?);
+    }
+}
+
+test "stopping prevents a new command while a live reply finishes" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    for ([_]enum { read, write }{ .read, .write }) |stop_during| {
+        var stop_requested: std.atomic.Value(bool) = .init(false);
+        var fake_io: TestConnectionIo = .{
+            .requests = &.{"*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\r\n"},
+            .max_write_bytes = 2,
+            .stop_after_read = if (stop_during == .read) &stop_requested else null,
+            .stop_during_write = if (stop_during == .write) &stop_requested else null,
+        };
+        var test_logger = logging.TestLogger.init();
+        var backend = DefaultStorage.init(testing.io, testing.allocator);
+        var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+        var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-stop-between-commands.kgc");
+        var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+        var data_store = memory_store.store();
+        defer data_store.deinit();
+        var initial = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
+        if (initial.value) |*previous| previous.deinit();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 64, &stop_requested);
+
+        try testing.expect(stop_requested.load(.acquire));
+        try testing.expectEqualStrings(if (stop_during == .read) "" else "$5\r\napple\r\n", fake_io.written());
+        var stored = (try data_store.get("fruit", 0)).?;
+        defer stored.deinit();
+        try testing.expectEqualStrings("apple", stored.value.string);
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+        try testing.expectEqual(0, fake_io.close_calls);
+    }
+}
+
+test "failed owned replies release their copies and stop later mutations" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    const cases = [_]struct { request: []const u8, stored_value: []const u8 }{
+        .{ .request = "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n", .stored_value = "apple" },
+        .{ .request = "*4\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\r\n$3\r\nGET\r\n", .stored_value = "banana" },
+    };
+    for (cases) |case| {
+        var request_bytes: [96]u8 = undefined;
+        const request = try std.fmt.bufPrint(&request_bytes, "{s}*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n", .{case.request});
+        var fake_io: TestConnectionIo = .{ .requests = &.{request}, .fail_after_bytes = 6, .max_write_bytes = 2 };
+        var test_logger = logging.TestLogger.init();
+        var backend = DefaultStorage.init(testing.io, testing.allocator);
+        var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+        var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-failed-owned-replies.kgc");
+        var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+        var data_store = memory_store.store();
+        defer data_store.deinit();
+        var initial = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
+        if (initial.value) |*previous| previous.deinit();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 80, &never_stop_requested);
+
+        try testing.expectEqualStrings("$5\r\nap", fake_io.written());
+        var stored = (try data_store.get("fruit", 0)).?;
+        defer stored.deinit();
+        try testing.expectEqualStrings(case.stored_value, stored.value.string);
+        try testing.expectEqual(0, fake_io.close_calls);
+        const events = test_logger.recordedEvents();
+        try testing.expectEqual(1, events.len);
+        try testing.expectEqual(error.NetworkDown, events[0].source.?);
     }
 }

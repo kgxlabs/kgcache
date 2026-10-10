@@ -258,8 +258,8 @@ fn expectValue(server: *Server, key: []const u8, expected: []const u8) !void {
 const BgsaveClientIo = struct {
     base_io: std.Io,
     request_sent: std.atomic.Value(bool) = .init(false),
-    read_entered: std.Io.Event = .unset,
-    release_read: std.Io.Event = .unset,
+    write_entered: std.Io.Event = .unset,
+    release_write: std.Io.Event = .unset,
     shutdown_called: std.Io.Event = .unset,
     fail_shutdown: bool,
     vtable: std.Io.VTable = undefined,
@@ -286,19 +286,20 @@ const BgsaveClientIo = struct {
     ) std.Io.net.Stream.Reader.Error!usize {
         const self: *BgsaveClientIo = @ptrCast(@alignCast(userdata));
         if (self.request_sent.swap(true, .acq_rel)) return 0;
-        self.read_entered.set(self.base_io);
-        self.release_read.waitUncancelable(self.base_io);
         @memcpy(data[0][0..request.len], request);
         return request.len;
     }
 
     fn netWrite(
-        _: ?*anyopaque,
+        userdata: ?*anyopaque,
         _: std.Io.net.Socket.Handle,
         header: []const u8,
         data: []const []const u8,
         splat: usize,
     ) std.Io.net.Stream.Writer.Error!usize {
+        const self: *BgsaveClientIo = @ptrCast(@alignCast(userdata));
+        self.write_entered.set(self.base_io);
+        self.release_write.waitUncancelable(self.base_io);
         var bytes_written = header.len;
         for (data[0 .. data.len - 1]) |part| bytes_written += part.len;
         if (splat > 0) bytes_written += data[data.len - 1].len * splat;
@@ -312,7 +313,7 @@ const BgsaveClientIo = struct {
     ) std.Io.net.ShutdownError!void {
         const self: *BgsaveClientIo = @ptrCast(@alignCast(userdata));
         self.shutdown_called.set(self.base_io);
-        self.release_read.set(self.base_io);
+        self.release_write.set(self.base_io);
         if (self.fail_shutdown) return error.ConnectionAborted;
     }
 
@@ -553,16 +554,16 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
     server._kgc._fork = forkKgc;
 
     var client: BgsaveClientIo = .{ .base_io = testing.io, .fail_shutdown = fail_shutdown };
-    defer client.release_read.set(testing.io);
+    defer client.release_write.set(testing.io);
     server._connection_manager._io = client.io();
     try server._connection_manager.start(BgsaveClientIo.stream());
-    client.read_entered.waitUncancelable(testing.io);
+    client.write_entered.waitUncancelable(testing.io);
 
     var task: DestroyTask = .{ .server = server, .io = testing.io };
     const thread = try std.Thread.spawn(.{}, DestroyTask.run, .{&task});
     var joined = false;
     defer if (!joined) {
-        client.release_read.set(testing.io);
+        client.release_write.set(testing.io);
         gate.release();
         thread.join();
         server_destroyed = true;
