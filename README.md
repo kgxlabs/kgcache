@@ -114,7 +114,7 @@ zig build test
 
 - TCP sessions use RESP2. HELLO negotiation and RESP3 sessions are not available.
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, or transactions.
-- Complete requests are processed in order. Requests split across reads retain their unfinished bytes while free buffer space remains. Unfinished EOF closes quietly. The fixed per-connection buffer is 1 KiB by default and is configurable. If unfinished input exhausts remaining buffer space, the server sends a protocol error and closes the connection.
+- Complete requests are processed in order, including requests split across reads. Each request must fit the fixed per-connection buffer, which is 1 KiB by default and configurable. A pipeline can exceed that size overall. Requests that exceed the buffer capacity receive a protocol error and close the connection. EOF with an unfinished request closes quietly.
 - `COMMAND` supports registry-based introspection. `COMMAND DOCS` and module filtering are not supported.
 - The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`. 
 

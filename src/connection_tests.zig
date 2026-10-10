@@ -431,7 +431,7 @@ test "a retained pipeline tail finishes without repeating earlier commands" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 256, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 36, &never_stop_requested);
 
     try testing.expectEqualStrings("+PONG\r\n+OK\r\n$5\r\napple\r\n+OK\r\n$6\r\nbanana\r\n", fake_io.written());
     var stored = (try data_store.get("fruit", 0)).?;
@@ -466,7 +466,7 @@ test "pipelined borrowed and owned replies finish through short writes" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 48, &never_stop_requested);
 
     try testing.expectEqualStrings(
         "$3\r\n\x00\r\n\r\n$3\r\n\x00\r\n\r\n+OK\r\n" ++

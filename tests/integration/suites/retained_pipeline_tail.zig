@@ -4,7 +4,10 @@ const resp_client = @import("../harness/resp_client.zig");
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: retained pipeline tail started", .{});
-    const server = try support.ServerProcess.create(io, allocator, executable_path, .{ .artifact_dir = artifact_dir });
+    const server = try support.ServerProcess.create(io, allocator, executable_path, .{
+        .artifact_dir = artifact_dir,
+        .extra_config = "connection-buffer-size 36\n",
+    });
     defer server.destroy();
     errdefer server.failed = true;
 

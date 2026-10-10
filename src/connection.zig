@@ -77,6 +77,15 @@ fn handleConnection(
         }
         buffer.assertValid();
 
+        if (buffer.write_pos == buffer.bytes.len and buffer.read_pos > 0) {
+            // The previous frame scopes have released all input borrowers.
+            const pending_len = buffer.write_pos - buffer.read_pos;
+            @memmove(buffer.bytes[0..pending_len], buffer.bytes[buffer.read_pos..buffer.write_pos]);
+            buffer.read_pos = 0;
+            buffer.write_pos = pending_len;
+            buffer.assertValid();
+        }
+
         var connection_writer = connection.writer(io, &.{});
         if (buffer.write_pos == buffer.bytes.len) {
             _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = "ERR protocol error: incomplete request" }, stop_requested);
