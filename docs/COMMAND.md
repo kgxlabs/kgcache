@@ -25,6 +25,30 @@ string argument, returns that message as a bulk string.
 
 Returns the non-null bulk string argument unchanged.
 
+## `HELLO`
+
+`HELLO`
+
+Returns seven ordered metadata fields for the requesting connection as a flat
+key/value array in RESP2, without changing its database or protocol.
+
+| Field | Value |
+| --- | --- |
+| `server` | `kgcache` |
+| `version` | The kgcache package version used for this build |
+| `proto` | The connection's current protocol version, initially `2` |
+| `id` | The connection's positive integer ID, never reused within a server run |
+| `mode` | `standalone` |
+| `role` | `master` |
+| `modules` | An empty array |
+
+IDs may restart after a server restart. Explicit protocol versions and
+`AUTH`/`SETNAME` options currently return `ERR unsupported option` and leave
+the connection usable. TCP sessions currently use RESP2.
+
+`COMMAND INFO HELLO` reports arity `-1`, the `fast` flag, the `@connection`
+and `@fast` categories, and no keys.
+
 ## `SELECT`
 
 `SELECT <index>`

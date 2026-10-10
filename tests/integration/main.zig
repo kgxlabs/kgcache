@@ -1,5 +1,6 @@
 const std = @import("std");
 const ping_smoke = @import("suites/ping_smoke.zig");
+const hello_metadata = @import("suites/hello_metadata.zig");
 const set_get = @import("suites/set_get.zig");
 const retained_pipeline_tail = @import("suites/retained_pipeline_tail.zig");
 const request_limits = @import("suites/request_limits.zig");
@@ -32,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
 
     const artifact_dir = std.process.Environ.getPosix(init.minimal.environ, "KGCACHE_TEST_ARTIFACT_DIR");
     try ping_smoke.run(init.io, init.gpa, executable_path, artifact_dir);
+    try hello_metadata.run(init.io, init.gpa, executable_path, artifact_dir);
     try set_get.run(init.io, init.gpa, executable_path, artifact_dir);
     try retained_pipeline_tail.run(init.io, init.gpa, executable_path, artifact_dir);
     try request_limits.run(init.io, init.gpa, executable_path, artifact_dir);

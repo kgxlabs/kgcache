@@ -1,5 +1,3 @@
-//! Prepare values from static definitions; the builder applies them and owns state.
-
 const std = @import("std");
 const Config = @import("../config.zig");
 const directive_definition = @import("definition.zig");

@@ -147,15 +147,18 @@ and trace availability.
 ├── src/
 │   ├── main.zig                 # Entry point: load config, create/destroy Server
 │   ├── server.zig               # Owns the object graph; create/destroy/run
-│   ├── connection.zig           # One client session and request loop
-│   ├── connection_manager.zig   # Worker ownership, shutdown, joining, reaping
+│   ├── connection.zig           # Connection types and session entry point exports
+│   ├── connection/
+│   │   ├── client_state.zig     # Per-client database and selected Resp handle
+│   │   ├── context.zig          # Manager-owned connection identity
+│   │   ├── manager.zig          # Worker ownership, shutdown, joining, reaping
+│   │   └── session.zig          # One client session and request loop
 │   ├── cron.zig                 # Background housekeeping loop (tick schedule)
 │   ├── expiration.zig           # Active expiration round/batch policy
 │   ├── cli.zig                  # Process options and owned prepared config overrides
 │   ├── config.zig               # Config struct, defaults, and path helpers
 │   ├── config_parser.zig        # kgcache.conf parser
 │   ├── config/                  # Definitions, preparation, registry, builder, loader
-│   ├── client_state.zig         # Per-client database and selected Resp handle
 │   ├── protocol.zig             # Protocol types and module exports
 │   ├── protocol/                # Command decoding/writing and RESP2/RESP3 replies
 │   ├── resp.zig                 # Legacy parser/serializer outside live paths

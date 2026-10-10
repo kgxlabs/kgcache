@@ -1,8 +1,10 @@
 const std = @import("std");
-const store = @import("store.zig");
-const logging = @import("logger.zig");
-const serve = @import("connection.zig").serve;
+const store = @import("../store.zig");
+const logging = @import("../logger.zig");
+const serve = @import("../connection.zig").serve;
+const ConnectionContext = @import("../connection.zig").ConnectionContext;
 
+const test_connection_context: ConnectionContext = .{ .id = 1 };
 const never_stop_requested: std.atomic.Value(bool) = .init(false);
 
 test "buffer allocation failure is reported once without closing the borrowed stream" {
@@ -33,6 +35,7 @@ test "buffer allocation failure is reported once without closing the borrowed st
         io,
         test_logger.logger(),
         .{ .socket = .{ .handle = 1, .address = undefined } },
+        &test_connection_context,
         &unused_store,
         failing_allocator.allocator(),
         1024,
@@ -152,10 +155,10 @@ const TestConnectionIo = struct {
 
 test "a Storage source crosses Store and Commander to the connection logger" {
     const testing = std.testing;
-    const Storage = @import("storage/interface.zig");
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const Storage = @import("../storage/interface.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\nDBSIZE\r\n*1\r\n$4\r\nPING\r\n"} };
     var test_logger = logging.TestLogger.init();
 
@@ -174,7 +177,7 @@ test "a Storage source crosses Store and Commander to the connection logger" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("-ERR something went wrong\r\n", fake_io.written());
     try testing.expectEqual(0, fake_io.close_calls);
@@ -205,7 +208,7 @@ test "argument count errors use ERR for every command and allow another request"
         var mock = store.MockStore.init();
         var data_store = mock.store();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
         try testing.expectEqualStrings("-ERR wrong number of arguments\r\n+PONG\r\n", fake_io.written());
         try testing.expectEqual(0, test_logger.recordedEvents().len);
@@ -214,9 +217,9 @@ test "argument count errors use ERR for every command and allow another request"
 
 test "commands preserve replies and database state through a connection" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
 
     var fake_io: TestConnectionIo = .{ .requests = &.{
         "*3\r\n$3\r\nsEt\r\n$3\r\nkey\r\n$5\r\nvalue\r\n",
@@ -259,6 +262,7 @@ test "commands preserve replies and database state through a connection" {
         fake_io.io(),
         test_logger.logger(),
         .{ .socket = .{ .handle = 1, .address = undefined } },
+        &test_connection_context,
         &data_store,
         testing.allocator,
         1024,
@@ -295,7 +299,7 @@ test "a malformed protocol request gets its fixed response without an error even
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("-ERR protocol error: invalid RESP type\r\n", fake_io.written());
     try testing.expectEqual(0, fake_io.close_calls);
@@ -312,7 +316,7 @@ test "an unknown command gets its fixed response and the connection continues" {
     var mock = store.MockStore.init();
     var data_store = mock.store();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings("-ERR unknown command\r\n+PONG\r\n", fake_io.written());
     try testing.expectEqual(2, fake_io.next_request);
@@ -335,7 +339,7 @@ test "read failures preserve earlier replies and report only unexpected sources"
             var mock = store.MockStore.init();
             var data_store = mock.store();
 
-            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
             try testing.expectEqualStrings(case.reply, fake_io.written());
             try testing.expectEqual(0, mock.set_calls);
@@ -358,7 +362,7 @@ test "an unexpected response write source is reported once without closing the b
         var mock = store.MockStore.init();
         var data_store = mock.store();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
         try testing.expectEqualStrings("", fake_io.written());
         try testing.expectEqual(0, fake_io.close_calls);
@@ -378,7 +382,7 @@ test "an internal failure reports its source when its error response also fails"
         mock.dbsize_result = error.TestStorageSource;
         var data_store = mock.store();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
         try testing.expectEqualStrings("", fake_io.written());
         try testing.expectEqual(0, fake_io.close_calls);
@@ -408,7 +412,7 @@ test "complete commands in one read advance after replies and mapped errors" {
     mock.dbsize_result = 7;
     var data_store = mock.store();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
     try testing.expectEqualStrings(
         "+PONG\r\n-ERR wrong number of arguments\r\n$3\r\n\x00\r\n\r\n-ERR DB index is out of range\r\n:7\r\n$0\r\n\r\n",
@@ -435,7 +439,7 @@ test "fragmented commands finish at every split and unfinished EOF stays quiet" 
             var test_logger = logging.TestLogger.init();
             var fake_io: TestConnectionIo = .{ .requests = &.{ case.request[0..split], case.request[split..], "*1\r\n$4\r\nPING\r\n" } };
 
-            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, case.request.len, &never_stop_requested);
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, case.request.len, &never_stop_requested);
 
             var expected_buffer: [64]u8 = undefined;
             const expected = try std.fmt.bufPrint(&expected_buffer, "{s}+PONG\r\n", .{case.reply});
@@ -450,7 +454,7 @@ test "fragmented commands finish at every split and unfinished EOF stays quiet" 
             var unfinished_mock = store.MockStore.init();
             var unfinished_store = unfinished_mock.store();
             var unfinished_io: TestConnectionIo = .{ .requests = &.{case.request[0..split]} };
-            serve(unfinished_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &unfinished_store, testing.allocator, case.request.len, &never_stop_requested);
+            serve(unfinished_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &unfinished_store, testing.allocator, case.request.len, &never_stop_requested);
 
             try testing.expectEqualStrings("", unfinished_io.written());
             try testing.expectEqual(0, unfinished_mock.set_calls);
@@ -462,9 +466,9 @@ test "fragmented commands finish at every split and unfinished EOF stays quiet" 
 
 test "unfinished EOF and invalid pipeline tails preserve earlier replies and stored data" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const prefix = "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
         "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n";
     const later_delete = "*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n";
@@ -490,7 +494,7 @@ test "unfinished EOF and invalid pipeline tails preserve earlier replies and sto
         var data_store = memory_store.store();
         defer data_store.deinit();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 36, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 36, &never_stop_requested);
 
         var reply_bytes: [64]u8 = undefined;
         const expected = try std.fmt.bufPrint(&reply_bytes, "+OK\r\n$5\r\napple\r\n{s}", .{case.reply});
@@ -521,7 +525,7 @@ test "commands larger than initial capacity finish and allow later commands" {
         mock.dbsize_result = 7;
         var data_store = mock.store();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, case.capacity, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, case.capacity, &never_stop_requested);
 
         try testing.expectEqualStrings(case.reply, fake_io.written());
         try testing.expectEqual(case.dbsize_calls, mock.dbsize_calls);
@@ -532,7 +536,7 @@ test "commands larger than initial capacity finish and allow later commands" {
 
 test "input byte limit accepts an exact frame and rejects a one-byte excess" {
     const testing = std.testing;
-    const limit = @import("protocol.zig").request_decoder.network_limits.max_frame_bytes;
+    const limit = @import("../protocol.zig").request_decoder.network_limits.max_frame_bytes;
     const prefix = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$";
     const overhead = prefix.len + std.fmt.count("{d}", .{limit}) + "\r\n\r\n".len;
 
@@ -554,7 +558,7 @@ test "input byte limit accepts an exact frame and rejects a one-byte excess" {
             mock.dbsize_result = 7;
             var data_store = mock.store();
 
-            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, initial_capacity, &never_stop_requested);
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, initial_capacity, &never_stop_requested);
 
             if (excess == 0) {
                 try testing.expectEqualStrings("+PONG\r\n+OK\r\n:7\r\n", fake_io.written());
@@ -573,10 +577,10 @@ test "input byte limit accepts an exact frame and rejects a one-byte excess" {
 
 test "element limit counts the command name and prevents oversized mutations" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
-    const limit = @import("protocol.zig").request_decoder.network_limits.max_elements;
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
+    const limit = @import("../protocol.zig").request_decoder.network_limits.max_elements;
     const key_frame = "$5\r\nfruit\r\n";
     const keys = key_frame ** limit;
 
@@ -594,7 +598,7 @@ test "element limit counts the command name and prevents oversized mutations" {
         var data_store = memory_store.store();
         defer data_store.deinit();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 128, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 128, &never_stop_requested);
 
         var stored = try data_store.get("fruit", 0);
         defer if (stored) |*value| value.deinit();
@@ -615,9 +619,9 @@ test "element limit counts the command name and prevents oversized mutations" {
 
 test "growth allocation failure preserves earlier mutations and releases input" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const value = "banana" ** 24;
     const request = try std.fmt.allocPrint(testing.allocator, "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
         "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n${d}\r\n{s}\r\n" ++
@@ -641,7 +645,7 @@ test "growth allocation failure preserves earlier mutations and releases input" 
         var data_store = memory_store.store();
         defer data_store.deinit();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, failing_allocator.allocator(), 40, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, failing_allocator.allocator(), 40, &never_stop_requested);
 
         const expected = if (fail_error_reply) "+OK\r\n" else "+OK\r\n-ERR something went wrong\r\n";
         try testing.expectEqualStrings(expected, fake_io.written());
@@ -659,9 +663,9 @@ test "growth allocation failure preserves earlier mutations and releases input" 
 
 test "a growing pipeline tail preserves earlier commands and supports reuse" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const large_value = "banana" ** 24;
     const first_request = try std.fmt.allocPrint(testing.allocator, "*1\r\n$4\r\nPING\r\n" ++
         "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
@@ -681,7 +685,7 @@ test "a growing pipeline tail preserves earlier commands and supports reuse" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 36, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 36, &never_stop_requested);
 
     const expected = try std.fmt.allocPrint(testing.allocator, "+PONG\r\n+OK\r\n$5\r\napple\r\n+OK\r\n${d}\r\n{s}\r\n+OK\r\n$4\r\nplum\r\n", .{ large_value.len, large_value });
     defer testing.allocator.free(expected);
@@ -695,9 +699,9 @@ test "a growing pipeline tail preserves earlier commands and supports reuse" {
 
 test "pipelined borrowed and owned replies finish through short writes" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     var fake_io: TestConnectionIo = .{
         .requests = &.{
             "*2\r\n$4\r\nECHO\r\n$3\r\n\x00\r\n\r\n" ++
@@ -718,7 +722,7 @@ test "pipelined borrowed and owned replies finish through short writes" {
     var data_store = memory_store.store();
     defer data_store.deinit();
 
-    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 48, &never_stop_requested);
+    serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 48, &never_stop_requested);
 
     try testing.expectEqualStrings(
         "$3\r\n\x00\r\n\r\n$3\r\n\x00\r\n\r\n+OK\r\n" ++
@@ -743,7 +747,7 @@ test "invalid later DEL elements prevent mutation and stop the connection" {
         var mock = store.MockStore.init();
         var data_store = mock.store();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
         try testing.expectEqual(0, mock.remove_calls);
         try testing.expectEqual(0, mock.dbsize_calls);
@@ -755,12 +759,12 @@ test "invalid later DEL elements prevent mutation and stop the connection" {
 
 test "a blocked reply keeps later mutations pending and permits another storage client" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const Worker = struct {
         fn run(fake_io: *TestConnectionIo, logger: logging.Logger, data_store: *store.Store) void {
-            serve(fake_io.io(), logger, TestConnectionStream, data_store, testing.allocator, 128, &never_stop_requested);
+            serve(fake_io.io(), logger, TestConnectionStream, &test_connection_context, data_store, testing.allocator, 128, &never_stop_requested);
         }
 
         const TestConnectionStream: std.Io.net.Stream = .{ .socket = .{ .handle = 1, .address = undefined } };
@@ -844,7 +848,7 @@ test "a partial reply failure stops before the next pipelined command and logs o
             var test_logger = logging.TestLogger.init();
             var mock = store.MockStore.init();
             var data_store = mock.store();
-            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 1024, &never_stop_requested);
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
             try testing.expectEqualStrings(case.expected, fake_io.written());
             try testing.expectEqual(0, mock.dbsize_calls);
             try testing.expectEqual(0, fake_io.close_calls);
@@ -860,9 +864,9 @@ test "a partial reply failure stops before the next pipelined command and logs o
 
 test "stopping prevents a new command while a live reply finishes" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     for ([_]enum { read, write }{ .read, .write }) |stop_during| {
         var stop_requested: std.atomic.Value(bool) = .init(false);
         var fake_io: TestConnectionIo = .{
@@ -881,7 +885,7 @@ test "stopping prevents a new command while a live reply finishes" {
         var initial = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
         if (initial.value) |*previous| previous.deinit();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 64, &stop_requested);
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 64, &stop_requested);
 
         try testing.expect(stop_requested.load(.acquire));
         try testing.expectEqualStrings(if (stop_during == .read) "" else "$5\r\napple\r\n", fake_io.written());
@@ -895,9 +899,9 @@ test "stopping prevents a new command while a live reply finishes" {
 
 test "failed owned replies release their copies and stop later mutations without logging peer disconnects" {
     const testing = std.testing;
-    const DefaultStorage = @import("storage/default_storage.zig");
-    const PersistenceState = @import("persistence_state.zig");
-    const persistence = @import("persistence.zig");
+    const DefaultStorage = @import("../storage/default_storage.zig");
+    const PersistenceState = @import("../persistence_state.zig");
+    const persistence = @import("../persistence.zig");
     const cases = [_]struct { request: []const u8, stored_value: []const u8 }{
         .{ .request = "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n", .stored_value = "apple" },
         .{ .request = "*4\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nbanana\r\n$3\r\nGET\r\n", .stored_value = "banana" },
@@ -917,7 +921,7 @@ test "failed owned replies release their copies and stop later mutations without
             var initial = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
             if (initial.value) |*previous| previous.deinit();
 
-            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 80, &never_stop_requested);
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 80, &never_stop_requested);
 
             try testing.expectEqualStrings("$5\r\nap", fake_io.written());
             var stored = (try data_store.get("fruit", 0)).?;

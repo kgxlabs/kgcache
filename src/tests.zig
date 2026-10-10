@@ -1,6 +1,7 @@
 test {
     const testing = @import("std").testing;
     const protocol = @import("protocol.zig");
+    const connection = @import("connection.zig");
     testing.refAllDecls(@import("root.zig"));
     testing.refAllDecls(protocol);
     testing.refAllDecls(protocol.CommandFrame);
@@ -11,7 +12,8 @@ test {
     testing.refAllDecls(protocol.Resp2);
     testing.refAllDecls(protocol.Resp3);
     testing.refAllDecls(protocol.command_encoder);
-    testing.refAllDecls(@import("client_state.zig"));
+    testing.refAllDecls(connection);
+    testing.refAllDecls(connection.ClientState);
     const aof_loader = @import("persistence/aof_loader.zig");
     testing.refAllDecls(aof_loader);
     testing.refAllDecls(aof_loader.ReplayPolicy);
@@ -21,6 +23,7 @@ test {
     _ = @import("protocol/request_decoder_tests.zig");
     _ = @import("arity.zig");
     _ = @import("commander_tests.zig");
+    _ = @import("commander/hello_tests.zig");
     _ = @import("commander/echo.zig");
     _ = @import("commander/ping.zig");
     _ = @import("commander/dbsize.zig");
@@ -34,9 +37,8 @@ test {
     _ = @import("object.zig");
     _ = @import("expiration.zig");
     _ = @import("cron.zig");
-    _ = @import("connection_tests.zig");
-    _ = @import("connection_manager.zig");
-    _ = @import("connection_manager_tests.zig");
+    _ = @import("connection/session_tests.zig");
+    _ = @import("connection/manager_tests.zig");
     _ = @import("logger/test_logger.zig");
     _ = @import("config.zig");
     _ = @import("config/definition.zig");

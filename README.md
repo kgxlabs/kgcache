@@ -112,7 +112,7 @@ zig build test
 
 ## Current status and compatibility
 
-- TCP sessions use RESP2. HELLO negotiation and RESP3 sessions are not available.
+- TCP sessions use RESP2. Bare `HELLO` reports server and connection metadata. Protocol negotiation and RESP3 sessions are not available.
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, or transactions.
 - Complete requests are processed in order, including requests split across reads. The input buffer starts at 1 KiB by default and grows as needed up to 1 MiB. `connection-buffer-size` sets the initial capacity, clamped to that cap.
 - Each encoded request is limited to 1 MiB and 1,024 array elements, including the command name. Limits apply per command, so a pipeline can exceed them overall. Oversized declared sizes or counts receive a protocol error without waiting for the remaining payload, then the connection closes. EOF with a valid unfinished request closes quietly without executing it. See [TCP request limits](docs/CONFIGURATION.md#tcp-request-limits).
