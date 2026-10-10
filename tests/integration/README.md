@@ -47,8 +47,10 @@ The process harness in `tests/integration/harness/` owns each child from start t
 The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.
 
 The retained-tail case uses a small connection buffer and sends a pipeline
-larger than it, with three complete commands and an unfinished fourth. It reads
-the first three replies and checks the unchanged value from another connection.
-It then finishes the fourth command and checks the new value.
+larger than it, with three complete commands and an unfinished fourth that also
+exceeds the initial capacity. It reads the first three replies and checks the
+unchanged value from another connection.
+It then finishes the fourth command, checks the new value, and sends another
+pipeline on the same connection after growth.
 Deterministic connection tests cover exact read splits, including binary and
 empty bodies.

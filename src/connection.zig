@@ -12,7 +12,18 @@ const InputBuffer = struct {
     write_pos: usize = 0,
 
     fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
-        return .{ .bytes = try allocator.alloc(u8, capacity) };
+        return .{ .bytes = try allocator.alloc(u8, @min(capacity, request_decoder.network_limits.max_frame_bytes)) };
+    }
+
+    fn grow(self: *InputBuffer, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{FrameTooLarge})!void {
+        self.assertValid();
+        const max_capacity = request_decoder.network_limits.max_frame_bytes;
+        if (self.bytes.len >= max_capacity) return error.FrameTooLarge;
+
+        const doubled = std.math.mul(usize, @max(self.bytes.len, 1), 2) catch max_capacity;
+        const new_capacity = @min(doubled, max_capacity);
+        self.bytes = try allocator.realloc(self.bytes, new_capacity);
+        self.assertValid();
     }
 
     fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
@@ -49,7 +60,7 @@ pub fn serve(
     };
     defer buffer.deinit(con_allocator);
 
-    handleConnection(io, logger, connection, data_store, &buffer, stop_requested) catch |err| {
+    handleConnection(io, logger, connection, data_store, con_allocator, &buffer, stop_requested) catch |err| {
         logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
 }
@@ -64,6 +75,7 @@ fn handleConnection(
     logger: logging.Logger,
     connection: std.Io.net.Stream,
     data_store: *store.Store,
+    con_allocator: std.mem.Allocator,
     buffer: *InputBuffer,
     stop_requested: *const std.atomic.Value(bool),
 ) !void {
@@ -88,8 +100,15 @@ fn handleConnection(
 
         var connection_writer = connection.writer(io, &.{});
         if (buffer.write_pos == buffer.bytes.len) {
-            _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = "ERR protocol error: incomplete request" }, stop_requested);
-            return;
+            buffer.grow(con_allocator) catch |err| {
+                if (err == error.OutOfMemory) {
+                    logger.err("connection: input buffer growth failed", err, @errorReturnTrace());
+                    _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = internal_error_message }, stop_requested);
+                } else {
+                    _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
+                }
+                return;
+            };
         }
 
         var data = [_][]u8{buffer.bytes[buffer.write_pos..]};

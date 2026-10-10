@@ -115,7 +115,7 @@ Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config pa
 | `bind` | `--bind 127.0.0.1` | `127.0.0.1` | IPv4 address the TCP server binds to |
 | `port` | `--port 7000` | `6379` | TCP port; `0` asks the OS to select an available port |
 | `reuse-address` | `--reuse-address yes` | `yes` | Sets `SO_REUSEADDR` on the listening socket (`yes`/`no`) |
-| `connection-buffer-size` | `--connection-buffer-size 2048` | `1024` | Per-connection read buffer size, in bytes |
+| `connection-buffer-size` | `--connection-buffer-size 2048` | `1024` | Initial per-connection input capacity, in bytes, clamped to 1 MiB |
 | `databases` | `--databases 4` | `16` | Number of selectable databases (`SELECT 0` .. `databases - 1`) |
 | `dir` | `--dir 'data files'` | `.` | Shared directory for snapshots and the AOF directory |
 | `dbfilename` | `--dbfilename state.kgc` | `dump.kgc` | Snapshot filename within `dir`, loaded on startup and written by `SAVE`/`BGSAVE` |
@@ -133,6 +133,8 @@ Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config pa
 | `auto-aof-rewrite-min-size` | `--auto-aof-rewrite-min-size 67108864` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
 | `aof-load-truncated` | `--aof-load-truncated yes` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
 | `bgsave-retry-delay-ms` | `--bgsave-retry-delay-ms 5000` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
+
+The input buffer grows as needed up to 1 MiB and retains its grown capacity until the connection ends. Each encoded request, including its RESP framing, must fit within that cap. A pipeline may exceed it overall because complete commands are processed between reads. Configured values above 1 MiB remain accepted, but the initial allocation is clamped to 1 MiB.
 
 See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every directive documented inline.
 

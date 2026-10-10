@@ -20,12 +20,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         const prefix = "*1\r\n$4\r\nPING\r\n" ++
             "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
             "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n" ++
-            "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nban";
+            "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$20\r\nban";
         try resp_client.sendAndExpect(io, server, client.socket.handle, prefix, "+PONG\r\n+OK\r\n$5\r\napple\r\n");
         try resp_client.sendAndExpect(io, server, observer.socket.handle, "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n", "$5\r\napple\r\n");
 
-        try resp_client.sendAndExpect(io, server, client.socket.handle, "ana\r\n", "+OK\r\n");
-        try resp_client.sendAndExpect(io, server, observer.socket.handle, "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n", "$6\r\nbanana\r\n");
+        try resp_client.sendAndExpect(io, server, client.socket.handle, "ana banana banana\r\n", "+OK\r\n");
+        try resp_client.sendAndExpect(io, server, observer.socket.handle, "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n", "$20\r\nbanana banana banana\r\n");
+        try resp_client.sendAndExpect(io, server, client.socket.handle, "*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n", "+PONG\r\n:1\r\n");
     }
 
     try server.stop();

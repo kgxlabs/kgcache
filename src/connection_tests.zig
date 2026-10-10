@@ -443,13 +443,13 @@ test "unfinished EOF and malformed pipeline tails preserve earlier replies and s
     }
 }
 
-test "fixed capacity accepts a fitting frame and stops an oversized pipeline tail" {
+test "commands larger than initial capacity finish and allow later commands" {
     const testing = std.testing;
     const echo = "*2\r\n$4\r\nECHO\r\n$1\r\nx\r\n";
     const pipeline = "*1\r\n$4\r\nPING\r\n" ++ echo ++ "*1\r\n$6\r\nDBSIZE\r\n";
     const cases = [_]struct { request: []const u8, capacity: usize, reply: []const u8, dbsize_calls: usize = 0 }{
-        .{ .request = echo, .capacity = 14, .reply = "-ERR protocol error: incomplete request\r\n" },
-        .{ .request = pipeline, .capacity = echo.len - 1, .reply = "+PONG\r\n-ERR protocol error: incomplete request\r\n" },
+        .{ .request = echo, .capacity = 14, .reply = "$1\r\nx\r\n" },
+        .{ .request = pipeline, .capacity = echo.len - 1, .reply = "+PONG\r\n$1\r\nx\r\n:7\r\n", .dbsize_calls = 1 },
         .{ .request = pipeline, .capacity = echo.len, .reply = "+PONG\r\n$1\r\nx\r\n:7\r\n", .dbsize_calls = 1 },
     };
 
@@ -469,18 +469,109 @@ test "fixed capacity accepts a fitting frame and stops an oversized pipeline tai
     }
 }
 
-test "a retained pipeline tail finishes without repeating earlier commands" {
+test "input byte limit accepts an exact frame and rejects a one-byte excess" {
+    const testing = std.testing;
+    const limit = @import("protocol.zig").request_decoder.network_limits.max_frame_bytes;
+    const prefix = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$";
+    const overhead = prefix.len + std.fmt.count("{d}", .{limit}) + "\r\n\r\n".len;
+
+    for ([_]usize{ 0, 1 }) |excess| {
+        const value_len = limit - overhead + excess;
+        const request = try testing.allocator.alloc(u8, limit + excess);
+        defer testing.allocator.free(request);
+        const header = try std.fmt.bufPrint(request, prefix ++ "{d}\r\n", .{value_len});
+        try testing.expectEqual(request.len, header.len + value_len + 2);
+        @memset(request[header.len..][0..value_len], 'x');
+        @memcpy(request[request.len - 2 ..], "\r\n");
+
+        for ([_]usize{ 1024, limit * 2 }) |initial_capacity| {
+            var fake_io: TestConnectionIo = .{ .requests = &.{
+                "*1\r\n$4\r\nPING\r\n",
+                request,
+                "*1\r\n$6\r\nDBSIZE\r\n",
+            } };
+            var test_logger = logging.TestLogger.init();
+            var mock = store.MockStore.init();
+            mock.dbsize_result = 7;
+            var data_store = mock.store();
+
+            serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, initial_capacity, &never_stop_requested);
+
+            if (excess == 0) {
+                try testing.expectEqualStrings("+PONG\r\n+OK\r\n:7\r\n", fake_io.written());
+                try testing.expectEqual(1, mock.set_calls);
+                try testing.expectEqual(1, mock.dbsize_calls);
+            } else {
+                try testing.expectEqualStrings("+PONG\r\n-ERR protocol error: request limit exceeded\r\n", fake_io.written());
+                try testing.expectEqual(0, mock.set_calls);
+                try testing.expectEqual(0, mock.dbsize_calls);
+            }
+            try testing.expectEqual(0, test_logger.recordedEvents().len);
+            try testing.expectEqual(0, fake_io.close_calls);
+        }
+    }
+}
+
+test "growth allocation failure preserves earlier mutations and releases input" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
     const PersistenceState = @import("persistence_state.zig");
     const persistence = @import("persistence.zig");
-    var fake_io: TestConnectionIo = .{ .requests = &.{
-        "*1\r\n$4\r\nPING\r\n" ++
-            "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
-            "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n" ++
-            "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$6\r\nban",
-        "ana\r\n*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n",
-    } };
+    const value = "banana" ** 24;
+    const request = try std.fmt.allocPrint(testing.allocator, "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
+        "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n${d}\r\n{s}\r\n" ++
+        "*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n", .{ value.len, value });
+    defer testing.allocator.free(request);
+
+    for ([_]bool{ false, true }) |fail_error_reply| {
+        var fake_io: TestConnectionIo = .{
+            .requests = &.{request},
+            .fail_after_bytes = if (fail_error_reply) 5 else null,
+        };
+        var failing_allocator = testing.FailingAllocator.init(testing.allocator, .{
+            .fail_index = 1,
+            .resize_fail_index = 0,
+        });
+        var test_logger = logging.TestLogger.init();
+        var backend = DefaultStorage.init(testing.io, testing.allocator);
+        var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+        var kgc = try persistence.KgcPersistence.init(testing.io, testing.allocator, &persistence_state, "connection-growth-failure.kgc");
+        var memory_store = store.MemoryStore.init(testing.allocator, &.{backend.storage()}, kgc.snapshot(), null);
+        var data_store = memory_store.store();
+        defer data_store.deinit();
+
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, failing_allocator.allocator(), 40, &never_stop_requested);
+
+        const expected = if (fail_error_reply) "+OK\r\n" else "+OK\r\n-ERR something went wrong\r\n";
+        try testing.expectEqualStrings(expected, fake_io.written());
+        var stored = (try data_store.get("fruit", 0)).?;
+        defer stored.deinit();
+        try testing.expectEqualStrings("apple", stored.value.string);
+        try testing.expectEqual(1, try data_store.dbsize(0));
+        const events = test_logger.recordedEvents();
+        try testing.expectEqual(@as(usize, if (fail_error_reply) 2 else 1), events.len);
+        try testing.expectEqual(error.OutOfMemory, events[0].source.?);
+        if (fail_error_reply) try testing.expectEqual(error.NetworkDown, events[1].source.?);
+        try testing.expectEqual(0, fake_io.close_calls);
+    }
+}
+
+test "a growing pipeline tail preserves earlier commands and supports reuse" {
+    const testing = std.testing;
+    const DefaultStorage = @import("storage/default_storage.zig");
+    const PersistenceState = @import("persistence_state.zig");
+    const persistence = @import("persistence.zig");
+    const large_value = "banana" ** 24;
+    const first_request = try std.fmt.allocPrint(testing.allocator, "*1\r\n$4\r\nPING\r\n" ++
+        "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$5\r\napple\r\n" ++
+        "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n" ++
+        "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n${d}\r\n{s}", .{ large_value.len, large_value[0..17] });
+    defer testing.allocator.free(first_request);
+    const remainder = try std.fmt.allocPrint(testing.allocator, "{s}\r\n*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n" ++
+        "*3\r\n$3\r\nSET\r\n$5\r\nfruit\r\n$4\r\nplum\r\n" ++
+        "*2\r\n$3\r\nGET\r\n$5\r\nfruit\r\n", .{large_value[17..]});
+    defer testing.allocator.free(remainder);
+    var fake_io: TestConnectionIo = .{ .requests = &.{ first_request, remainder } };
     var test_logger = logging.TestLogger.init();
     var backend = DefaultStorage.init(testing.io, testing.allocator);
     var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
@@ -491,10 +582,12 @@ test "a retained pipeline tail finishes without repeating earlier commands" {
 
     serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &data_store, testing.allocator, 36, &never_stop_requested);
 
-    try testing.expectEqualStrings("+PONG\r\n+OK\r\n$5\r\napple\r\n+OK\r\n$6\r\nbanana\r\n", fake_io.written());
+    const expected = try std.fmt.allocPrint(testing.allocator, "+PONG\r\n+OK\r\n$5\r\napple\r\n+OK\r\n${d}\r\n{s}\r\n+OK\r\n$4\r\nplum\r\n", .{ large_value.len, large_value });
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, fake_io.written());
     var stored = (try data_store.get("fruit", 0)).?;
     defer stored.deinit();
-    try testing.expectEqualStrings("banana", stored.value.string);
+    try testing.expectEqualStrings("plum", stored.value.string);
     try testing.expectEqual(0, test_logger.recordedEvents().len);
     try testing.expectEqual(0, fake_io.close_calls);
 }
