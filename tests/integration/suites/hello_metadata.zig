@@ -59,14 +59,14 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             "*1\r\n*10\r\n$5\r\nhello\r\n:-1\r\n*1\r\n$4\r\nfast\r\n:0\r\n:0\r\n:0\r\n" ++
                 "*2\r\n$11\r\n@connection\r\n$5\r\n@fast\r\n*0\r\n*0\r\n*0\r\n",
         );
-        try resp_client.sendAndExpect(io, server, first.socket.handle, "*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n", ":12\r\n");
+        try resp_client.sendAndExpect(io, server, first.socket.handle, "*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n", ":13\r\n");
     }
 
     try server.stop();
     std.log.info("integration: HELLO negotiation passed", .{});
 }
 
-fn expectedMetadata(buffer: []u8, id: u64, version: u8) ![]const u8 {
+pub fn expectedMetadata(buffer: []u8, id: u64, version: u8) ![]const u8 {
     return std.fmt.bufPrint(
         buffer,
         "{s}$6\r\nserver\r\n$7\r\nkgcache\r\n$7\r\nversion\r\n${d}\r\n{s}\r\n" ++

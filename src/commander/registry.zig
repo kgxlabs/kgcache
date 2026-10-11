@@ -1,6 +1,7 @@
 const std = @import("std");
 const BgRewriteAof = @import("bgrewriteaof.zig");
 const BgSave = @import("bgsave.zig");
+const Client = @import("client.zig");
 const Command = @import("command.zig");
 const DBSize = @import("dbsize.zig");
 const Del = @import("del.zig");
@@ -59,6 +60,14 @@ const definitions = [_]Definition{
         .categories = &.{ .admin, .slow, .dangerous },
         .keys = .none,
         .factory = factoryFor(BgSave),
+    },
+    .{
+        .name = "client",
+        .arity = Arity.atLeast(1),
+        .flags = &.{.fast},
+        .categories = &.{ .connection, .fast },
+        .keys = .none,
+        .factory = Client.init,
     },
     .{
         .name = "command",

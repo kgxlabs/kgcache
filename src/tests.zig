@@ -24,6 +24,7 @@ test {
     _ = @import("arity.zig");
     _ = @import("commander_tests.zig");
     _ = @import("commander/hello_tests.zig");
+    _ = @import("commander/client_tests.zig");
     _ = @import("commander/echo.zig");
     _ = @import("commander/ping.zig");
     _ = @import("commander/dbsize.zig");

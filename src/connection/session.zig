@@ -290,6 +290,7 @@ fn initErrorResponse(err: commander.Error) ?[]const u8 {
         error.UnsupportedArgumentType => "ERR unsupported argument type",
         error.MalformedCommandRequest => "ERR malformed command request",
         error.WrongNumberArguments => "ERR wrong number of arguments",
+        error.UnsupportedOption => "ERR unsupported option",
         else => null,
     };
 }

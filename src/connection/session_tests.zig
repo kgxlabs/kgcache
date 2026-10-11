@@ -200,6 +200,8 @@ test "argument count errors use ERR for every command and allow another request"
         "*1\r\n$6\r\nSELECT\r\n",
         "*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n",
         "*3\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n$1\r\nx\r\n",
+        "*1\r\n$6\r\nCLIENT\r\n",
+        "*3\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$1\r\nx\r\n",
     };
 
     for (requests) |request| {
@@ -211,6 +213,24 @@ test "argument count errors use ERR for every command and allow another request"
         serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 1024, &never_stop_requested);
 
         try testing.expectEqualStrings("-ERR wrong number of arguments\r\n+PONG\r\n", fake_io.written());
+        try testing.expectEqual(0, test_logger.recordedEvents().len);
+    }
+}
+
+test "unsupported CLIENT forms use mapped initialization errors and keep the session usable" {
+    const testing = std.testing;
+    const requests = [_][]const u8{
+        "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n",
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$4\r\ntest\r\n",
+        "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n",
+    };
+    for (requests) |request| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{ request, "*1\r\n$4\r\nPING\r\n" } };
+        var test_logger = logging.TestLogger.init();
+        var unused_store: store.Store = undefined;
+        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &unused_store, testing.allocator, 1024, &never_stop_requested);
+        try testing.expectEqualStrings("-ERR unsupported option\r\n+PONG\r\n", fake_io.written());
+        try testing.expectEqual(0, fake_io.close_calls);
         try testing.expectEqual(0, test_logger.recordedEvents().len);
     }
 }

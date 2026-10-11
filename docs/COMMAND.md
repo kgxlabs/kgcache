@@ -55,6 +55,33 @@ the current mode and leave the connection usable.
 `COMMAND INFO HELLO` reports arity `-1`, the `fast` flag, the `@connection`
 and `@fast` categories, and no keys.
 
+## `CLIENT`
+
+`CLIENT INFO`
+
+Returns one space-separated row with a trailing LF. RESP2 sends a bulk string;
+RESP3 sends a `txt:` verbatim string. Identity, peer/local endpoints, descriptor,
+age, and idle time come from the requesting connection's owned snapshot.
+IPv6 endpoints use `[address]:port`. Age and idle use whole monotonic seconds,
+with negative durations clamped to zero.
+
+The field order is `id`, `addr`, `laddr`, `fd`, `age`, `idle`, `db`, `cmd`,
+`resp`, `lib-name`, `lib-ver`, `tot-net-in`, `tot-net-out`, `tot-cmds`, then
+`name`, `sub`, `psub`, `ssub`, `watch`, `multi`, `multi-mem`, and `redir`.
+The fixed indicators are an empty `name`, zero subscription/watch counts,
+`multi=-1`, `multi-mem=0`, and `redir=-1`.
+
+At this checkpoint, `db=0`, `resp=2`, `cmd=NULL`, and zero byte/command totals
+are registration defaults. They do not yet track command activity or changes
+made through HELLO or SELECT. Both library labels are empty.
+Idle currently equals age because report activity stays at registration time.
+
+Bare `CLIENT` and extra INFO arguments return `ERR wrong number of arguments`.
+Unknown subcommands, including `SETINFO` and `LIST`, return `ERR unsupported
+option`. These errors leave the connection usable. `COMMAND INFO CLIENT`
+reports container arity `-2`, the `fast` flag, `@connection` and `@fast`
+categories, and no keys. INFO itself accepts exactly one subcommand argument.
+
 ## `SELECT`
 
 `SELECT <index>`

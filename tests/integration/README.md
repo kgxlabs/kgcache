@@ -16,6 +16,11 @@ the error, then send PING on the same TCP connection and require PONG. They also
 check that invalid SET requests leave the stored value intact and that binary
 option bytes do not appear in the error response.
 
+The CLIENT INFO cases check RESP2 bulk and RESP3 `txt:` verbatim replies,
+the 22 fields in order, endpoint formatting, fixed indicators, empty labels,
+and identity agreement with HELLO on two connections. They pipeline invalid
+CLIENT forms with PING in both modes to check mapped errors and recovery.
+
 The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
 and `appendfilename` with a real process. They check the first and last valid
 database indices and reject the next index. Snapshot cases call `SAVE`, then

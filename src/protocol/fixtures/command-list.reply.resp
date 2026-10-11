@@ -1,8 +1,10 @@
-*12
+*13
 $12
 bgrewriteaof
 $6
 bgsave
+$6
+client
 $7
 command
 $6
