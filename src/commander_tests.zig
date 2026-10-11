@@ -104,6 +104,44 @@ fn replyLifetime(allocator: std.mem.Allocator) !void {
     }
 }
 
+test "one owned verbatim Result survives output failures through flush" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, verbatimResultLifetime, .{});
+}
+
+fn verbatimResultLifetime(allocator: std.mem.Allocator) !void {
+    const testing = std.testing;
+    var source = [_]u8{ 'x', '\n' };
+    var result = owned: {
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+        const text = try arena.allocator().dupe(u8, &source);
+        break :owned Commander.Result.inArena(.{ .verbatim = text }, arena);
+    };
+    defer result.deinit();
+    @memset(&source, 'z');
+    try testing.expect(result.owned_arena != null);
+    try testing.expectEqualStrings("x\n", result.value.verbatim);
+
+    for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+        var small_buffer: [1]u8 = undefined;
+        var failing_writer = std.Io.Writer.fixed(&small_buffer);
+        try testing.expectError(error.WriteFailed, selected.writeReply(&failing_writer, result.value));
+
+        var buffer: [32]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try selected.writeReply(&writer, result.value);
+        try writer.flush();
+        const expected = if (selected.version() == .resp2) "$2\r\nx\n\r\n" else "=6\r\ntxt:x\n\r\n";
+        try testing.expectEqualStrings(expected, writer.buffered());
+        try testing.expect(result.owned_arena != null);
+        try testing.expectEqualStrings("x\n", result.value.verbatim);
+    }
+}
+
 fn expectArray(value: Reply) ![]const Reply {
     return switch (value) {
         .array => |items| items,

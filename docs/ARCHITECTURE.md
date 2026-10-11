@@ -29,6 +29,12 @@ after execution and uses its selected vtable to encode the reply. Each client
 starts in RESP2 and can select RESP2 or RESP3 through HELLO. AOF uses a separate
 command writer.
 
+Semantic `verbatim` replies encode as bulk text in RESP2 and `txt:`
+verbatim strings in RESP3. The RESP3 length includes the four prefix bytes.
+Reply lengths are checked before output, including nested values. Handlers
+keep dynamically built text in one owned `Commander.Result` through encoding
+and writer flush.
+
 The TCP server has three layers for client connections:
 
 1. `Server` owns the listener, accepts client streams, and owns the shared
