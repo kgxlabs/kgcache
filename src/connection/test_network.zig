@@ -1,4 +1,5 @@
 const std = @import("std");
+const ConnectionContext = @import("context.zig");
 const TestNetwork = @This();
 
 base_io: std.Io,
@@ -40,6 +41,25 @@ pub fn io(self: *TestNetwork) std.Io {
 
 pub fn stream(handle: usize) std.Io.net.Stream {
     return .{ .socket = .{ .handle = @intCast(handle), .address = .{ .ip4 = .loopback(@intCast(10000 + handle)) } } };
+}
+
+pub fn identityContext(id: u64) ConnectionContext {
+    const Provider = struct {
+        var marker: u8 = 0;
+        const context_vtable: ConnectionContext.VTable = .{
+            .snapshot_current = snapshotCurrent,
+            .record_read = recordTransfer,
+            .record_write = recordTransfer,
+        };
+
+        fn snapshotCurrent(_: *anyopaque, _: std.Io, _: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
+            unreachable;
+        }
+
+        fn recordTransfer(_: *anyopaque, _: u64, _: std.Io.Timestamp) void {}
+    };
+
+    return .{ .id = id, .ptr = &Provider.marker, .vtable = &Provider.context_vtable };
 }
 
 pub fn localEndpoint(io_backend: std.Io, handle: std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress {

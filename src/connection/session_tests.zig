@@ -5,8 +5,9 @@ const serve = @import("../connection.zig").serve;
 const ConnectionContext = @import("../connection.zig").ConnectionContext;
 const ClientWorker = @import("manager.zig").ClientWorker;
 const ConnectionReport = @import("report.zig");
+const TestNetwork = @import("test_network.zig");
 
-const test_connection_context: ConnectionContext = .{ .id = 1 };
+const test_connection_context = TestNetwork.identityContext(1);
 const never_stop_requested: std.atomic.Value(bool) = .init(false);
 
 test "buffer allocation failure is reported once without closing the borrowed stream" {
@@ -173,11 +174,11 @@ const TestConnectionIo = struct {
     }
 };
 
-fn testWorker(registered_at: std.Io.Timestamp) ClientWorker {
+fn initTestWorker(worker: *ClientWorker, registered_at: std.Io.Timestamp) void {
     const peer: std.Io.net.IpAddress = .{ .ip4 = .loopback(40000) };
-    return .{
+    worker.* = .{
         .stream = .{ .socket = .{ .handle = 1, .address = peer } },
-        .context = .{ .id = 1 },
+        .context = worker.connectionContext(1),
         .peer_endpoint = peer,
         .local_endpoint = .{ .ip4 = .loopback(6379) },
         .descriptor = 1,
@@ -198,8 +199,8 @@ test "fragmented and retained input counts each received byte once through short
             .max_write_bytes = 2,
             .zero_writes = 3,
         };
-        var worker = testWorker(.fromNanoseconds(100));
-        worker.context.reports = worker.reportAccess();
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
         var mock = store.MockStore.init();
         var data_store = mock.store();
         var logger = logging.TestLogger.init();
@@ -227,8 +228,8 @@ test "INFO snapshots include received pipeline tails and exclude their current r
         .transport_time_ns = 9_400_000_000,
         .time_step_ns = 700_000_000,
     };
-    var worker = testWorker(.fromNanoseconds(0));
-    worker.context.reports = worker.reportAccess();
+    var worker: ClientWorker = undefined;
+    initTestWorker(&worker, .fromNanoseconds(0));
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var logger = logging.TestLogger.init();
@@ -256,8 +257,8 @@ test "EOF and failed reads leave activity at the last successful transfer" {
                 .requests = if (receive_prefix) &.{"*1\r\n"} else &.{},
                 .read_error = read_error,
             };
-            var worker = testWorker(.fromNanoseconds(100));
-            worker.context.reports = worker.reportAccess();
+            var worker: ClientWorker = undefined;
+            initTestWorker(&worker, .fromNanoseconds(100));
             var mock = store.MockStore.init();
             var data_store = mock.store();
             var logger = logging.TestLogger.init();
@@ -288,8 +289,8 @@ test "failed writes retain successful prefixes and ignore zero writes and failur
                 .max_write_bytes = 1,
                 .zero_writes = 2,
             };
-            var worker = testWorker(.fromNanoseconds(100));
-            worker.context.reports = worker.reportAccess();
+            var worker: ClientWorker = undefined;
+            initTestWorker(&worker, .fromNanoseconds(100));
             var mock = store.MockStore.init();
             var data_store = mock.store();
             var logger = logging.TestLogger.init();
@@ -316,8 +317,8 @@ test "failed writes retain successful prefixes and ignore zero writes and failur
 test "network byte totals saturate before INFO formatting and after its output" {
     const testing = std.testing;
     var fake_io: TestConnectionIo = .{ .requests = &.{"*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n"}, .max_write_bytes = 2 };
-    var worker = testWorker(.fromNanoseconds(100));
-    worker.context.reports = worker.reportAccess();
+    var worker: ClientWorker = undefined;
+    initTestWorker(&worker, .fromNanoseconds(100));
     const max = std.math.maxInt(u64);
     worker.report._values.total_net_in = max - 1;
     worker.report._values.total_net_out = max - 1;
@@ -995,8 +996,8 @@ test "a blocked reply keeps later mutations pending and permits another storage 
         const request = try std.fmt.allocPrint(testing.allocator, "{s}*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n", .{first_request});
         defer testing.allocator.free(request);
         var fake_io: TestConnectionIo = .{ .requests = &.{request}, .max_write_bytes = 2, .pause_after_bytes = 6 };
-        var connection_worker = testWorker(.fromNanoseconds(100));
-        connection_worker.context.reports = connection_worker.reportAccess();
+        var connection_worker: ClientWorker = undefined;
+        initTestWorker(&connection_worker, .fromNanoseconds(100));
         var test_logger = logging.TestLogger.init();
         var backend = DefaultStorage.init(testing.io, testing.allocator);
         var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
@@ -1090,8 +1091,8 @@ test "stopping prevents a new command while a live reply finishes" {
             .stop_after_read = if (stop_during == .read) &stop_requested else null,
             .stop_during_write = if (stop_during == .write) &stop_requested else null,
         };
-        var worker = testWorker(.fromNanoseconds(100));
-        worker.context.reports = worker.reportAccess();
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
         var test_logger = logging.TestLogger.init();
         var backend = DefaultStorage.init(testing.io, testing.allocator);
         var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });

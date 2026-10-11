@@ -40,7 +40,7 @@ fn execute(ptr: *anyopaque, io: std.Io, _: *store.Store, state: *Commander.Clien
     return Commander.Result.inArena(.{ .verbatim = text }, arena);
 }
 
-fn formatReport(allocator: std.mem.Allocator, snapshot: connection.ReportAccess.Snapshot) std.mem.Allocator.Error![]u8 {
+fn formatReport(allocator: std.mem.Allocator, snapshot: connection.ConnectionContext.Snapshot) std.mem.Allocator.Error![]u8 {
     const values = snapshot.report.values;
     return std.fmt.allocPrint(
         allocator,

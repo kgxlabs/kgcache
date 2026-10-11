@@ -4,10 +4,11 @@ const commander = @import("../commander.zig");
 const connection = @import("../connection.zig");
 const protocol = @import("../protocol.zig");
 const MockStore = @import("../store/mock_store.zig");
+const TestNetwork = @import("../connection/test_network.zig");
 const testing = std.testing;
 
 test "HELLO reports the caller's metadata in the current protocol" {
-    const context: connection.ConnectionContext = .{ .id = std.math.maxInt(i64) };
+    const context = TestNetwork.identityContext(std.math.maxInt(i64));
     var mock = MockStore.init();
     var data_store = mock.store();
     for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
@@ -32,7 +33,7 @@ test "HELLO reports the caller's metadata in the current protocol" {
 }
 
 test "HELLO switches repeatedly and versionless requests keep the selected handle" {
-    const context: connection.ConnectionContext = .{ .id = 42 };
+    const context = TestNetwork.identityContext(42);
     var state = connection.ClientState.initWithConnection(&context);
     state.db_index = 7;
     var mock = MockStore.init();
@@ -68,7 +69,7 @@ test "HELLO metadata allocation failures release owners and preserve the prior h
 }
 
 fn metadataAllocation(allocator: std.mem.Allocator, current: protocol.Resp, arguments: []const []const u8, selected: protocol.Resp) !void {
-    const context: connection.ConnectionContext = .{ .id = 42 };
+    const context = TestNetwork.identityContext(42);
     var state = connection.ClientState.initWithConnection(&context);
     state.db_index = 2;
     state.resp = current;
@@ -89,7 +90,7 @@ fn metadataAllocation(allocator: std.mem.Allocator, current: protocol.Resp, argu
 }
 
 test "invalid HELLO requests preserve state and are rejected before metadata allocation" {
-    const context: connection.ConnectionContext = .{ .id = 42 };
+    const context = TestNetwork.identityContext(42);
     var mock = MockStore.init();
     var data_store = mock.store();
     const cases = [_]struct { arguments: []const []const u8, err: anyerror }{

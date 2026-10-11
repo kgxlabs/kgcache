@@ -2,7 +2,6 @@ const std = @import("std");
 const connection = @import("session.zig");
 const ConnectionContext = @import("context.zig");
 const ConnectionReport = @import("report.zig");
-const ReportAccess = @import("report_access.zig");
 const socket_metadata = @import("socket_metadata.zig");
 const Lock = @import("../lock.zig");
 const logging = @import("../logger.zig");
@@ -39,11 +38,11 @@ pub const ClientWorker = struct {
     thread: ?std.Thread = null,
     lifecycle: Lifecycle = .starting,
 
-    pub fn reportAccess(self: *ClientWorker) ReportAccess {
-        return .{ .ptr = self, .vtable = &report_vtable };
+    pub fn connectionContext(self: *ClientWorker, id: u64) ConnectionContext {
+        return .{ .id = id, .ptr = self, .vtable = &context_vtable };
     }
 
-    const report_vtable: ReportAccess.VTable = .{
+    const context_vtable: ConnectionContext.VTable = .{
         .snapshot_current = snapshotCurrent,
         .record_read = recordRead,
         .record_write = recordWrite,
@@ -59,7 +58,7 @@ pub const ClientWorker = struct {
         self.report.recordWrite(byte_count, at);
     }
 
-    fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ReportAccess.Error!ReportAccess.Snapshot {
+    fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
         const self: *ClientWorker = @ptrCast(@alignCast(ptr));
         const sampled_at = std.Io.Clock.awake.now(io);
 
@@ -146,7 +145,7 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     const registered_at = std.Io.Clock.awake.now(self._io);
     worker.* = .{
         .stream = stream,
-        .context = .{ .id = self._next_connection_id, .reports = worker.reportAccess() },
+        .context = worker.connectionContext(self._next_connection_id),
         .peer_endpoint = stream.socket.address,
         .local_endpoint = local_endpoint,
         .descriptor = stream.socket.handle,

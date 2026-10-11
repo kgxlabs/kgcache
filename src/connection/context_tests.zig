@@ -8,7 +8,7 @@ test "session state exposes current snapshots through a borrowed report provider
         report: connection.ConnectionReport,
         calls: usize = 0,
 
-        const vtable: connection.ReportAccess.VTable = .{
+        const vtable: connection.ConnectionContext.VTable = .{
             .snapshot_current = snapshotCurrent,
             .record_read = recordRead,
             .record_write = recordWrite,
@@ -24,7 +24,7 @@ test "session state exposes current snapshots through a borrowed report provider
             self.report.recordWrite(count, at);
         }
 
-        fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ReportAccess.Error!connection.ReportAccess.Snapshot {
+        fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.Snapshot {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.calls += 1;
             const sampled_at = std.Io.Clock.awake.now(io);
@@ -48,7 +48,8 @@ test "session state exposes current snapshots through a borrowed report provider
     provider.report.recordDispatch("client|info");
     const context: connection.ConnectionContext = .{
         .id = 42,
-        .reports = .{ .ptr = &provider, .vtable = &Provider.vtable },
+        .ptr = &provider,
+        .vtable = &Provider.vtable,
     };
     const state = connection.ClientState.initWithConnection(&context);
     var request_arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -74,11 +75,4 @@ test "session state exposes current snapshots through a borrowed report provider
     try testing.expectEqual(2, network.awake_samples.load(.acquire));
     tx = provider.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
     tx.end();
-}
-
-test "identity-only contexts reject snapshot access without allocation" {
-    const context: connection.ConnectionContext = .{ .id = 42 };
-    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    try testing.expectError(error.MissingReportAccess, context.snapshotCurrent(testing.io, failing.allocator()));
-    try testing.expectEqual(0, failing.alloc_index);
 }

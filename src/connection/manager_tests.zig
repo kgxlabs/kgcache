@@ -34,7 +34,7 @@ test "connection IDs and borrowed contexts stay stable as the collection grows" 
     try testing.expect(&manager._workers.items[0].report == first_report);
     for (manager._workers.items, 1..) |worker, expected_id| {
         try testing.expectEqual(@as(u64, expected_id), worker.context.id);
-        try testing.expect(worker.context.reports.?.ptr == @as(*anyopaque, worker));
+        try testing.expect(worker.context.ptr == @as(*anyopaque, worker));
         var snapshot = try worker.context.snapshotCurrent(manager._io, testing.allocator);
         defer snapshot.deinit();
         try testing.expectEqual(worker.context.id, snapshot.id);

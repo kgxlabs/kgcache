@@ -24,7 +24,8 @@ test "command handlers borrow their client's connection identity" {
 
         const vtable: Commander.VTable = .{ .execute = execute, .deinit = deinit };
     };
-    const contexts = [_]ConnectionContext{ .{ .id = 1 }, .{ .id = 2 } };
+    const TestNetwork = @import("connection/test_network.zig");
+    const contexts = [_]ConnectionContext{ TestNetwork.identityContext(1), TestNetwork.identityContext(2) };
     var mock = MockStore.init();
     var data_store = mock.store();
 

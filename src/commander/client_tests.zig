@@ -32,10 +32,10 @@ const Provider = struct {
             .total_net_out = 400,
             .total_cmds = 8,
         };
-        return .{ .id = 42, .reports = .{ .ptr = self, .vtable = &vtable } };
+        return .{ .id = 42, .ptr = self, .vtable = &vtable };
     }
 
-    const vtable: connection.ReportAccess.VTable = .{
+    const vtable: connection.ConnectionContext.VTable = .{
         .snapshot_current = snapshotCurrent,
         .record_read = recordRead,
         .record_write = recordWrite,
@@ -51,7 +51,7 @@ const Provider = struct {
         self.report.recordWrite(count, at);
     }
 
-    fn snapshotCurrent(ptr: *anyopaque, _: std.Io, allocator: std.mem.Allocator) connection.ReportAccess.Error!connection.ReportAccess.Snapshot {
+    fn snapshotCurrent(ptr: *anyopaque, _: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.Snapshot {
         const self: *Provider = @ptrCast(@alignCast(ptr));
         self.calls += 1;
         return .{
@@ -166,9 +166,6 @@ test "CLIENT INFO requires connection snapshot access" {
     defer command.deinit();
     var state = connection.ClientState.init();
     try testing.expectError(error.MissingConnectionContext, command.execute(testing.io, &data_store, &state));
-    const context: connection.ConnectionContext = .{ .id = 42 };
-    state = connection.ClientState.initWithConnection(&context);
-    try testing.expectError(error.MissingReportAccess, command.execute(testing.io, &data_store, &state));
 }
 
 test "report formatting brackets IPv6 and clamps or truncates sampled durations" {
