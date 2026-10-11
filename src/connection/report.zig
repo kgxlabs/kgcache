@@ -16,11 +16,39 @@ pub const Values = struct {
     total_cmds: u64 = 0,
 };
 
+pub const Snapshot = struct {
+    values: Values,
+    _allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *Snapshot) void {
+        self._allocator.free(self.values.last_command);
+        self._allocator.free(self.values.lib_name);
+        self._allocator.free(self.values.lib_ver);
+        self.* = undefined;
+    }
+};
+
 _lock: Lock,
 _values: Values,
 
 pub fn init(io: std.Io, registered_at: std.Io.Timestamp) ConnectionReport {
     return .{ ._lock = Lock.init(io), ._values = .{ .last_activity = registered_at } };
+}
+
+pub fn snapshot(self: *ConnectionReport, allocator: std.mem.Allocator) std.mem.Allocator.Error!Snapshot {
+    var tx = self._lock.beginUncancelable();
+    defer tx.end();
+
+    var values = self._values;
+    values.last_command = try allocator.dupe(u8, values.last_command);
+    errdefer allocator.free(values.last_command);
+
+    values.lib_name = try allocator.dupe(u8, values.lib_name);
+    errdefer allocator.free(values.lib_name);
+
+    values.lib_ver = try allocator.dupe(u8, values.lib_ver);
+
+    return .{ .values = values, ._allocator = allocator };
 }
 
 pub fn recordRead(self: *ConnectionReport, byte_count: u64, at: std.Io.Timestamp) void {

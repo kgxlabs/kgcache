@@ -34,7 +34,71 @@ test "connection IDs and borrowed contexts stay stable as the collection grows" 
     try testing.expect(&manager._workers.items[0].report == first_report);
     for (manager._workers.items, 1..) |worker, expected_id| {
         try testing.expectEqual(@as(u64, expected_id), worker.context.id);
+        try testing.expect(worker.context.reports.?.ptr == @as(*anyopaque, worker));
+        var snapshot = try worker.context.snapshotCurrent(manager._io, testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqual(worker.context.id, snapshot.id);
+        try testing.expect(worker.peer_endpoint.eql(&snapshot.peer_endpoint));
+        try testing.expect(worker.local_endpoint.eql(&snapshot.local_endpoint));
+        try testing.expectEqual(worker.descriptor, snapshot.descriptor);
     }
+}
+
+test "current snapshots use request storage and survive manager destruction" {
+    const testing = std.testing;
+    var network = TestNetwork.init(testing.io, 1);
+    network.registration_time = .fromNanoseconds(100);
+    const io = network.io();
+    var request_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer request_arena.deinit();
+
+    var snapshot = captured: {
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var manager = ConnectionManager.initWithOptions(io, testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+        defer manager.deinit() catch unreachable;
+        try manager.start(TestNetwork.stream(7));
+        network.all_reads_started.waitUncancelable(testing.io);
+        const worker = manager._workers.items[0];
+        worker.report.recordDbAndProto(2, .resp3);
+        worker.report.recordRead(12, .fromNanoseconds(200));
+        worker.report.recordWrite(34, .fromNanoseconds(300));
+        worker.report.recordDispatch("client|info");
+        {
+            var tx = worker.report._lock.beginUncancelable();
+            defer tx.end();
+            worker.report._values.lib_name = "test-library";
+            worker.report._values.lib_ver = "1.2.3";
+        }
+        network.registration_time = .fromNanoseconds(500);
+        const state = @import("client_state.zig").initWithConnection(&worker.context);
+        var owned = try state.connection_context.?.snapshotCurrent(io, request_arena.allocator());
+        errdefer owned.deinit();
+        var tx = worker.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
+        tx.end();
+        break :captured owned;
+    };
+    defer snapshot.deinit();
+
+    try testing.expectEqual(1, snapshot.id);
+    const peer: std.Io.net.IpAddress = .{ .ip4 = .loopback(10007) };
+    try testing.expect(snapshot.peer_endpoint.eql(&peer));
+    try testing.expect(snapshot.local_endpoint.eql(&network.local_endpoint_value));
+    try testing.expectEqual(7, snapshot.descriptor);
+    try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(100), snapshot.registered_at);
+    try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(500), snapshot.sampled_at);
+    try testing.expectEqual(2, network.awake_samples.load(.acquire));
+    try testing.expectEqual(2, snapshot.report.values.db_index);
+    try testing.expectEqual(@import("../protocol.zig").Resp.Version.resp3, snapshot.report.values.resp);
+    try testing.expectEqualStrings("client|info", snapshot.report.values.last_command);
+    try testing.expectEqualStrings("test-library", snapshot.report.values.lib_name);
+    try testing.expectEqualStrings("1.2.3", snapshot.report.values.lib_ver);
+    try testing.expectEqual(12, snapshot.report.values.total_net_in);
+    try testing.expectEqual(34, snapshot.report.values.total_net_out);
+    try testing.expectEqual(1, snapshot.report.values.total_cmds);
+    try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(300), snapshot.report.values.last_activity);
+    try testing.expectEqual(1, network.close_calls.load(.acquire));
+    try testing.expectEqual(1, network.shutdown_calls.load(.acquire));
 }
 
 test "worker registration captures endpoint metadata and one monotonic time sample" {

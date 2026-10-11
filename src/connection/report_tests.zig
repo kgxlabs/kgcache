@@ -91,3 +91,142 @@ test "concurrent report updates preserve totals and a coherent published state" 
     try testing.expectEqual(worker_count * iterations, report._values.total_cmds);
     try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(300), report._values.last_activity);
 }
+
+test "report snapshots own their strings and survive changes to the source" {
+    var request_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer request_arena.deinit();
+
+    var snapshot = captured: {
+        var report = ConnectionReport.init(testing.io, .fromNanoseconds(100));
+        const lib_name = try testing.allocator.dupe(u8, "test-library");
+        defer testing.allocator.free(lib_name);
+        const lib_ver = try testing.allocator.dupe(u8, "1.2.3");
+        defer testing.allocator.free(lib_ver);
+        report._values.lib_name = lib_name;
+        report._values.lib_ver = lib_ver;
+        report.recordDbAndProto(7, .resp3);
+        report.recordRead(12, .fromNanoseconds(200));
+        report.recordWrite(34, .fromNanoseconds(300));
+        report.recordDispatch("client|info");
+
+        var owned = try report.snapshot(request_arena.allocator());
+        errdefer owned.deinit();
+        try expectReportUnlocked(&report);
+        try testing.expect(owned.values.last_command.ptr != report._values.last_command.ptr);
+        try testing.expect(owned.values.lib_name.ptr != lib_name.ptr);
+        try testing.expect(owned.values.lib_ver.ptr != lib_ver.ptr);
+
+        report.recordDbAndProto(2, .resp2);
+        report.recordRead(100, .fromNanoseconds(400));
+        report.recordDispatch("get");
+        {
+            var tx = report._lock.beginUncancelable();
+            defer tx.end();
+            report._values.lib_name = "";
+            report._values.lib_ver = "";
+        }
+        @memset(lib_name, 'x');
+        @memset(lib_ver, 'x');
+        break :captured owned;
+    };
+    defer snapshot.deinit();
+
+    const values = snapshot.values;
+    try testing.expectEqual(7, values.db_index);
+    try testing.expectEqual(protocol.Resp.Version.resp3, values.resp);
+    try testing.expectEqualStrings("client|info", values.last_command);
+    try testing.expectEqualStrings("test-library", values.lib_name);
+    try testing.expectEqualStrings("1.2.3", values.lib_ver);
+    try testing.expectEqual(12, values.total_net_in);
+    try testing.expectEqual(34, values.total_net_out);
+    try testing.expectEqual(1, values.total_cmds);
+    try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(300), values.last_activity);
+}
+
+test "snapshot allocation failures release copied strings and the report lock" {
+    try testing.checkAllAllocationFailures(testing.allocator, snapshotAllocation, .{});
+}
+
+fn snapshotAllocation(allocator: std.mem.Allocator) !void {
+    var report = ConnectionReport.init(testing.io, .fromNanoseconds(100));
+    report._values.lib_name = "test-library";
+    report._values.lib_ver = "1.2.3";
+    report.recordDbAndProto(7, .resp3);
+    report.recordDispatch("client|info");
+
+    var snapshot = report.snapshot(allocator) catch |err| {
+        try expectReportUnlocked(&report);
+        try testing.expectEqualStrings("test-library", report._values.lib_name);
+        try testing.expectEqualStrings("1.2.3", report._values.lib_ver);
+        try testing.expectEqualStrings("client|info", report._values.last_command);
+        try testing.expectEqual(7, report._values.db_index);
+        try testing.expectEqual(protocol.Resp.Version.resp3, report._values.resp);
+        return err;
+    };
+    defer snapshot.deinit();
+    try expectReportUnlocked(&report);
+    try testing.expectEqualStrings("test-library", snapshot.values.lib_name);
+    try testing.expectEqualStrings("1.2.3", snapshot.values.lib_ver);
+    try testing.expectEqualStrings("client|info", snapshot.values.last_command);
+}
+
+fn expectReportUnlocked(report: *ConnectionReport) !void {
+    var tx = report._lock.tryBegin() orelse return error.ReportLockStillHeld;
+    tx.end();
+}
+
+test "concurrent snapshots copy coherent report rows" {
+    const iterations = 1000;
+    const Updater = struct {
+        report: *ConnectionReport,
+        started: std.Io.Event = .unset,
+        stop_requested: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            var first = true;
+            while (!self.stop_requested.load(.acquire)) {
+                {
+                    var tx = self.report._lock.beginUncancelable();
+                    defer tx.end();
+                    self.report._values = .{
+                        .last_activity = .fromNanoseconds(if (first) 200 else 300),
+                        .db_index = if (first) 2 else 3,
+                        .resp = if (first) .resp2 else .resp3,
+                        .last_command = if (first) "get" else "hello",
+                        .lib_name = if (first) "first-library" else "second-library",
+                        .lib_ver = if (first) "1" else "2",
+                        .total_net_in = if (first) 11 else 22,
+                        .total_net_out = if (first) 33 else 44,
+                        .total_cmds = if (first) 5 else 6,
+                    };
+                }
+                self.started.set(testing.io);
+                first = !first;
+            }
+        }
+    };
+
+    var report = ConnectionReport.init(testing.io, .fromNanoseconds(100));
+    var updater: Updater = .{ .report = &report };
+    const thread = try std.Thread.spawn(.{}, Updater.run, .{&updater});
+    defer {
+        updater.stop_requested.store(true, .release);
+        thread.join();
+    }
+    updater.started.waitUncancelable(testing.io);
+    for (0..iterations) |_| {
+        var snapshot = try report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        const values = snapshot.values;
+        try testing.expect(values.db_index == 2 or values.db_index == 3);
+        const first = values.db_index == 2;
+        try testing.expectEqual(if (first) protocol.Resp.Version.resp2 else .resp3, values.resp);
+        try testing.expectEqualStrings(if (first) "get" else "hello", values.last_command);
+        try testing.expectEqualStrings(if (first) "first-library" else "second-library", values.lib_name);
+        try testing.expectEqualStrings(if (first) "1" else "2", values.lib_ver);
+        try testing.expectEqual(@as(u64, if (first) 11 else 22), values.total_net_in);
+        try testing.expectEqual(@as(u64, if (first) 33 else 44), values.total_net_out);
+        try testing.expectEqual(@as(u64, if (first) 5 else 6), values.total_cmds);
+        try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(if (first) 200 else 300), values.last_activity);
+    }
+}
