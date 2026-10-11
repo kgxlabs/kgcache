@@ -4,6 +4,12 @@ const TestNetwork = @This();
 base_io: std.Io,
 expected_blocked_reads: usize,
 immediate_eof_handle: ?std.Io.net.Socket.Handle = null,
+local_endpoint_error: ?anyerror = null,
+local_endpoint_value: std.Io.net.IpAddress = .{ .ip4 = .loopback(6379) },
+local_endpoint_calls: usize = 0,
+last_local_endpoint_handle: ?std.Io.net.Socket.Handle = null,
+registration_time: ?std.Io.Timestamp = null,
+awake_samples: std.atomic.Value(usize) = .init(0),
 blocked_reads: std.atomic.Value(usize) = .init(0),
 shutdown_calls: std.atomic.Value(usize) = .init(0),
 close_calls: std.atomic.Value(usize) = .init(0),
@@ -28,11 +34,29 @@ pub fn io(self: *TestNetwork) std.Io {
     self.vtable.netRead = netRead;
     self.vtable.netClose = netClose;
     self.vtable.netShutdown = netShutdown;
+    self.vtable.now = now;
     return .{ .userdata = self, .vtable = &self.vtable };
 }
 
 pub fn stream(handle: usize) std.Io.net.Stream {
-    return .{ .socket = .{ .handle = @intCast(handle), .address = undefined } };
+    return .{ .socket = .{ .handle = @intCast(handle), .address = .{ .ip4 = .loopback(@intCast(10000 + handle)) } } };
+}
+
+pub fn localEndpoint(io_backend: std.Io, handle: std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress {
+    const self: *TestNetwork = @ptrCast(@alignCast(io_backend.userdata));
+    self.local_endpoint_calls += 1;
+    self.last_local_endpoint_handle = handle;
+    if (self.local_endpoint_error) |err| return err;
+    return self.local_endpoint_value;
+}
+
+fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+    const self: *TestNetwork = @ptrCast(@alignCast(userdata));
+    if (clock == .awake) {
+        _ = self.awake_samples.fetchAdd(1, .acq_rel);
+        if (self.registration_time) |at| return at;
+    }
+    return self.base_io.vtable.now(self.base_io.userdata, clock);
 }
 
 fn futexWait(

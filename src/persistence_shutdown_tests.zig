@@ -272,11 +272,21 @@ const BgsaveClientIo = struct {
         self.vtable.netWrite = netWrite;
         self.vtable.netClose = netClose;
         self.vtable.netShutdown = netShutdown;
+        self.vtable.now = now;
         return .{ .userdata = self, .vtable = &self.vtable };
     }
 
     fn stream() std.Io.net.Stream {
-        return .{ .socket = .{ .handle = 1, .address = undefined } };
+        return .{ .socket = .{ .handle = 1, .address = .{ .ip4 = .loopback(40000) } } };
+    }
+
+    fn localEndpoint(_: std.Io, _: std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress {
+        return .{ .ip4 = .loopback(6379) };
+    }
+
+    fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+        const self: *BgsaveClientIo = @ptrCast(@alignCast(userdata));
+        return self.base_io.vtable.now(self.base_io.userdata, clock);
     }
 
     fn netRead(
@@ -556,6 +566,7 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
     var client: BgsaveClientIo = .{ .base_io = testing.io, .fail_shutdown = fail_shutdown };
     defer client.release_write.set(testing.io);
     server._connection_manager._io = client.io();
+    server._connection_manager._local_endpoint = BgsaveClientIo.localEndpoint;
     try server._connection_manager.start(BgsaveClientIo.stream());
     client.write_entered.waitUncancelable(testing.io);
 

@@ -39,6 +39,7 @@ test {
     _ = @import("cron.zig");
     _ = @import("connection/session_tests.zig");
     _ = @import("connection/manager_tests.zig");
+    _ = @import("connection/report_tests.zig");
     _ = @import("logger/test_logger.zig");
     _ = @import("config.zig");
     _ = @import("config/definition.zig");

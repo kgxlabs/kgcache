@@ -1,6 +1,8 @@
 const std = @import("std");
 const connection = @import("session.zig");
 const ConnectionContext = @import("context.zig");
+const ConnectionReport = @import("report.zig");
+const socket_metadata = @import("socket_metadata.zig");
 const Lock = @import("../lock.zig");
 const logging = @import("../logger.zig");
 const store = @import("../store.zig");
@@ -11,13 +13,13 @@ const ConnectionManager = @This();
 const max_reaped_workers_per_pass: usize = 64;
 
 pub const SpawnWorkerFn = *const fn (*ConnectionManager, *ClientWorker) std.Thread.SpawnError!std.Thread;
+pub const LocalEndpointFn = *const fn (std.Io, std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress;
 
-const Options = struct {
-    /// Allows deterministic thread-spawn failure injection in lifecycle tests.
+pub const Options = struct {
     spawn_worker: SpawnWorkerFn = spawnWorkerThread,
+    local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint,
 };
 
-/// A stable, heap-allocated record owned by ConnectionManager.
 pub const ClientWorker = struct {
     pub const Lifecycle = enum {
         starting,
@@ -28,6 +30,11 @@ pub const ClientWorker = struct {
 
     stream: std.Io.net.Stream,
     context: ConnectionContext,
+    peer_endpoint: std.Io.net.IpAddress,
+    local_endpoint: std.Io.net.IpAddress,
+    descriptor: std.Io.net.Socket.Handle,
+    registered_at: std.Io.Timestamp,
+    report: ConnectionReport,
     thread: ?std.Thread = null,
     lifecycle: Lifecycle = .starting,
 };
@@ -44,6 +51,7 @@ _workers: std.ArrayList(*ClientWorker) = .empty,
 _next_connection_id: u64 = 1,
 _stopping: std.atomic.Value(bool) = .init(false),
 _spawn_worker: SpawnWorkerFn,
+_local_endpoint: LocalEndpointFn,
 
 pub fn init(
     io: std.Io,
@@ -62,7 +70,7 @@ pub fn init(
     );
 }
 
-fn initWithOptions(
+pub fn initWithOptions(
     io: std.Io,
     allocator: std.mem.Allocator,
     logger: logging.Logger,
@@ -78,6 +86,7 @@ fn initWithOptions(
         ._connection_buffer_size = connection_buffer_size,
         ._lock = Lock.init(io),
         ._spawn_worker = options.spawn_worker,
+        ._local_endpoint = options.local_endpoint,
     };
 }
 
@@ -90,15 +99,23 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     const worker = try self._allocator.create(ClientWorker);
     errdefer self._allocator.destroy(worker);
 
+    const local_endpoint = try self._local_endpoint(self._io, stream.socket.handle);
+
     var lock_tx = try self._lock.begin();
     defer lock_tx.end();
 
     if (self._stopping.load(.acquire)) return error.ConnectionManagerStopping;
     if (self._next_connection_id > std.math.maxInt(i64)) return error.ConnectionIdExhausted;
 
+    const registered_at = std.Io.Clock.awake.now(self._io);
     worker.* = .{
         .stream = stream,
         .context = .{ .id = self._next_connection_id },
+        .peer_endpoint = stream.socket.address,
+        .local_endpoint = local_endpoint,
+        .descriptor = stream.socket.handle,
+        .registered_at = registered_at,
+        .report = ConnectionReport.init(self._io, registered_at),
     };
     self._next_connection_id += 1;
 
@@ -225,7 +242,7 @@ test "thread spawn failure consumes its ID and closes the stream once" {
         logging.NoopLogger.logger(),
         &data_store,
         1024,
-        .{ .spawn_worker = failSpawn },
+        .{ .spawn_worker = failSpawn, .local_endpoint = TestNetwork.localEndpoint },
     );
     errdefer manager.deinit() catch {};
 
@@ -246,7 +263,7 @@ test "ID exhaustion rejects registration without wrapping or closing twice" {
     var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
     errdefer manager.deinit() catch {};
     manager._next_connection_id = std.math.maxInt(i64);
 
@@ -275,7 +292,7 @@ test "worker and collection allocation failures close the consumed stream once" 
         var mock = store.MockStore.init();
         var data_store = mock.store();
         var failing_allocator = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        var manager = ConnectionManager.init(network.io(), failing_allocator.allocator(), logging.NoopLogger.logger(), &data_store, 1024);
+        var manager = ConnectionManager.initWithOptions(network.io(), failing_allocator.allocator(), logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
         errdefer manager.deinit() catch {};
 
         try testing.expectError(error.OutOfMemory, manager.start(TestNetwork.stream(1)));

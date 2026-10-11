@@ -4,6 +4,7 @@ const store = @import("../store.zig");
 const TestNetwork = @import("test_network.zig");
 const ConnectionManager = @import("../connection.zig").ConnectionManager;
 const ClientWorker = ConnectionManager.ClientWorker;
+const socket_metadata = @import("socket_metadata.zig");
 
 test "connection manager boundary compiles" {
     std.testing.refAllDecls(ConnectionManager);
@@ -16,11 +17,12 @@ test "connection IDs and borrowed contexts stay stable as the collection grows" 
     var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
     defer manager.deinit() catch unreachable;
 
     try manager.start(TestNetwork.stream(1));
     const first_context = &manager._workers.items[0].context;
+    const first_report = &manager._workers.items[0].report;
     for (2..worker_count + 1) |handle| {
         try manager.start(TestNetwork.stream(handle));
     }
@@ -29,9 +31,135 @@ test "connection IDs and borrowed contexts stay stable as the collection grows" 
     var lock_tx = try manager._lock.begin();
     defer lock_tx.end();
     try testing.expect(&manager._workers.items[0].context == first_context);
+    try testing.expect(&manager._workers.items[0].report == first_report);
     for (manager._workers.items, 1..) |worker, expected_id| {
         try testing.expectEqual(@as(u64, expected_id), worker.context.id);
     }
+}
+
+test "worker registration captures endpoint metadata and one monotonic time sample" {
+    const testing = std.testing;
+    const cases = [_]struct { peer: std.Io.net.IpAddress, local: std.Io.net.IpAddress }{
+        .{ .peer = try .parseIp4("192.0.2.10", 40000), .local = try .parseIp4("192.0.2.20", 6379) },
+        .{ .peer = try .parseIp6("2001:db8::10", 40001), .local = try .parseIp6("2001:db8::20", 6380) },
+    };
+    for (cases) |case| {
+        var network = TestNetwork.init(testing.io, 1);
+        network.registration_time = .fromNanoseconds(12345678901);
+        network.local_endpoint_value = case.local;
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+        defer manager.deinit() catch unreachable;
+
+        var stream = TestNetwork.stream(7);
+        stream.socket.address = case.peer;
+        try manager.start(stream);
+        network.all_reads_started.waitUncancelable(testing.io);
+
+        var manager_tx = try manager._lock.begin();
+        defer manager_tx.end();
+        const worker = manager._workers.items[0];
+        try testing.expect(worker.peer_endpoint.eql(&case.peer));
+        try testing.expect(worker.local_endpoint.eql(&case.local));
+        try testing.expectEqual(stream.socket.handle, worker.descriptor);
+        try testing.expectEqual(network.registration_time.?, worker.registered_at);
+        try testing.expectEqual(1, network.awake_samples.load(.acquire));
+        try testing.expectEqual(1, network.local_endpoint_calls);
+        try testing.expectEqual(stream.socket.handle, network.last_local_endpoint_handle.?);
+
+        var report_tx = try worker.report._lock.begin();
+        defer report_tx.end();
+        const values = worker.report._values;
+        try testing.expectEqual(worker.registered_at, values.last_activity);
+        try testing.expectEqual(0, values.db_index);
+        try testing.expectEqual(@import("../protocol.zig").Resp.Version.resp2, values.resp);
+        try testing.expectEqualStrings("NULL", values.last_command);
+        try testing.expectEqualStrings("", values.lib_name);
+        try testing.expectEqualStrings("", values.lib_ver);
+        try testing.expectEqual(0, values.total_net_in);
+        try testing.expectEqual(0, values.total_net_out);
+        try testing.expectEqual(0, values.total_cmds);
+    }
+}
+
+test "accepted sockets report actual local endpoints from wildcard listeners" {
+    const testing = std.testing;
+    const cases = [_]struct { wildcard: std.Io.net.IpAddress, loopback: std.Io.net.IpAddress }{
+        .{ .wildcard = .{ .ip4 = .unspecified(0) }, .loopback = .{ .ip4 = .loopback(0) } },
+        .{ .wildcard = .{ .ip6 = .unspecified(0) }, .loopback = .{ .ip6 = .loopback(0) } },
+    };
+    for (cases) |case| {
+        var listener = try case.wildcard.listen(testing.io, .{ .reuse_address = true });
+        defer listener.deinit(testing.io);
+        var target = case.loopback;
+        target.setPort(listener.socket.address.getPort());
+        const client = try target.connect(testing.io, .{ .mode = .stream });
+        defer client.close(testing.io);
+        const peer = try socket_metadata.localEndpoint(testing.io, client.socket.handle);
+        const accepted = try listener.accept(testing.io);
+
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var manager = ConnectionManager.init(testing.io, testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+        defer manager.deinit() catch unreachable;
+        const before = std.Io.Clock.awake.now(testing.io);
+        try manager.start(accepted);
+        const after = std.Io.Clock.awake.now(testing.io);
+
+        var manager_tx = try manager._lock.begin();
+        defer manager_tx.end();
+        const worker = manager._workers.items[0];
+        try testing.expect(worker.peer_endpoint.eql(&peer));
+        try testing.expect(worker.local_endpoint.eql(&target));
+        try testing.expect(!worker.local_endpoint.eql(&listener.socket.address));
+        try testing.expectEqual(accepted.socket.handle, worker.descriptor);
+        try testing.expect(worker.registered_at.nanoseconds >= before.nanoseconds);
+        try testing.expect(worker.registered_at.nanoseconds <= after.nanoseconds);
+    }
+}
+
+test "metadata failure frees the unpublished record and closes the consumed stream once" {
+    const testing = std.testing;
+    var network = TestNetwork.init(testing.io, 1);
+    network.local_endpoint_error = error.TestEndpointFailure;
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    errdefer manager.deinit() catch {};
+
+    try testing.expectError(error.TestEndpointFailure, manager.start(TestNetwork.stream(1)));
+    try testing.expectEqual(0, manager._workers.items.len);
+    try testing.expectEqual(1, network.close_calls.load(.acquire));
+    try testing.expectEqual(0, network.blocked_reads.load(.acquire));
+    try testing.expectEqual(0, network.awake_samples.load(.acquire));
+
+    network.local_endpoint_error = null;
+    try manager.start(TestNetwork.stream(2));
+    network.all_reads_started.waitUncancelable(testing.io);
+    try testing.expectEqual(1, manager._workers.items.len);
+    try testing.expectEqual(@as(u64, 1), manager._workers.items[0].context.id);
+    try testing.expectEqual(2, network.local_endpoint_calls);
+    try manager.deinit();
+    try testing.expectEqual(2, network.close_calls.load(.acquire));
+    try testing.expectEqual(1, network.shutdown_calls.load(.acquire));
+}
+
+test "native local endpoint lookup errors use the existing start failure cleanup" {
+    const testing = std.testing;
+    var network = TestNetwork.init(testing.io, 0);
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+    errdefer manager.deinit() catch {};
+    const stream: std.Io.net.Stream = .{ .socket = .{ .handle = -1, .address = .{ .ip4 = .loopback(40000) } } };
+
+    try testing.expectError(error.BadFileDescriptor, manager.start(stream));
+    try testing.expectEqual(0, manager._workers.items.len);
+    try testing.expectEqual(1, network.close_calls.load(.acquire));
+    try manager.deinit();
+    try testing.expectEqual(1, network.close_calls.load(.acquire));
+    try testing.expectEqual(0, network.shutdown_calls.load(.acquire));
 }
 
 test "connection IDs are never reused after finished workers are reaped" {
@@ -40,7 +168,7 @@ test "connection IDs are never reused after finished workers are reaped" {
     network.immediate_eof_handle = 1;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
     defer manager.deinit() catch unreachable;
 
     for (1..4) |expected_id| {
@@ -63,12 +191,13 @@ test "deinit wakes an idle worker and closes its stream once" {
     var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(
+    var manager = ConnectionManager.initWithOptions(
         network.io(),
         testing.allocator,
         logging.NoopLogger.logger(),
         &data_store,
         1024,
+        .{ .local_endpoint = TestNetwork.localEndpoint },
     );
     errdefer manager.deinit() catch {};
 
@@ -87,12 +216,13 @@ test "deinit wakes every idle worker before any worker closes" {
     var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(
+    var manager = ConnectionManager.initWithOptions(
         network.io(),
         testing.allocator,
         logging.NoopLogger.logger(),
         &data_store,
         1024,
+        .{ .local_endpoint = TestNetwork.localEndpoint },
     );
     errdefer manager.deinit() catch {};
 
@@ -214,12 +344,13 @@ test "reapFinished reclaims a completed worker without closing an active worker"
     network.immediate_eof_handle = @intCast(1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(
+    var manager = ConnectionManager.initWithOptions(
         network.io(),
         testing.allocator,
         logging.NoopLogger.logger(),
         &data_store,
         1024,
+        .{ .local_endpoint = TestNetwork.localEndpoint },
     );
     errdefer manager.deinit() catch {};
 
