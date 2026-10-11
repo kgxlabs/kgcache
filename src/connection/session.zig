@@ -7,6 +7,26 @@ const ConnectionContext = @import("context.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 
+const ConnectionWriter = struct {
+    io: std.Io,
+    descriptor: std.Io.net.Socket.Handle,
+    context: *const ConnectionContext,
+    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+    err: ?std.Io.net.Stream.Writer.Error = null,
+
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *ConnectionWriter = @alignCast(@fieldParentPtr("interface", writer));
+        const count = self.io.vtable.netWrite(self.io.userdata, self.descriptor, writer.buffered(), data, splat) catch |err| {
+            self.err = err;
+            return error.WriteFailed;
+        };
+
+        self.context.recordWrite(self.io, count);
+
+        return writer.consume(count);
+    }
+};
+
 const InputBuffer = struct {
     bytes: []u8,
     read_pos: usize = 0,
@@ -96,7 +116,12 @@ fn handleConnection(
             buffer.assertValid();
         }
 
-        var connection_writer = connection.writer(io, &.{});
+        var connection_writer: ConnectionWriter = .{
+            .io = io,
+            .descriptor = connection.socket.handle,
+            .context = context,
+        };
+
         if (buffer.write_pos == buffer.bytes.len) {
             buffer.grow(con_allocator) catch |err| {
                 if (err == error.OutOfMemory) {
@@ -119,6 +144,8 @@ fn handleConnection(
         };
 
         if (bytes_read == 0) return;
+        // record successfully read bytes
+        context.recordRead(io, bytes_read);
 
         buffer.write_pos = std.math.add(usize, buffer.write_pos, bytes_read) catch return error.LengthOverflow;
         buffer.assertValid();
@@ -187,7 +214,7 @@ fn handleConnection(
 fn handleCompleteFrame(
     io: std.Io,
     logger: logging.Logger,
-    writer: *std.Io.net.Stream.Writer,
+    writer: *ConnectionWriter,
     data_store: *store.Store,
     client_state: *ClientState,
     allocator: std.mem.Allocator,
@@ -234,7 +261,7 @@ fn parseErrorResponse(err: request_decoder.DecodeError) []const u8 {
 fn writeResponse(
     logger: logging.Logger,
     selected: protocol.Resp,
-    writer: *std.Io.net.Stream.Writer,
+    writer: *ConnectionWriter,
     value: protocol.Reply,
     stop_requested: *const std.atomic.Value(bool),
 ) bool {

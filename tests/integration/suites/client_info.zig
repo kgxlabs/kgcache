@@ -2,9 +2,12 @@ const std = @import("std");
 const support = @import("server_process");
 const resp_client = @import("../harness/resp_client.zig");
 const hello_metadata = @import("hello_metadata.zig");
+const info_request = "*2\r\n$6\r\ncLiEnT\r\n$4\r\niNfO\r\n";
+const ping_request = "*1\r\n$4\r\nPING\r\n";
+const pong_reply = "+PONG\r\n";
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
-    std.log.info("integration: CLIENT INFO binding started", .{});
+    std.log.info("integration: CLIENT INFO binding and accounting started", .{});
     const server = try support.ServerProcess.create(io, allocator, executable_path, .{ .artifact_dir = artifact_dir });
     defer server.destroy();
     errdefer server.failed = true;
@@ -31,7 +34,10 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
                 const response = try std.fmt.bufPrint(&reply_buffer, "{s}+PONG\r\n", .{case.response});
                 try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
             }
-            try expectInfo(io, server, client.socket.handle, 1, version);
+            const first = try expectInfo(io, server, client.socket.handle, 1, version);
+            const second = try expectInfo(io, server, client.socket.handle, 1, version);
+            if (second.net_in - first.net_in != ping_request.len + info_request.len) return error.UnexpectedReadAccounting;
+            if (second.net_out - first.net_out != first.reply_bytes + pong_reply.len) return error.UnexpectedWriteAccounting;
         }
 
         const second = try server.address.?.connect(io, .{ .mode = .stream });
@@ -39,14 +45,20 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         var metadata_buffer: [512]u8 = undefined;
         const metadata = try hello_metadata.expectedMetadata(&metadata_buffer, 2, 2);
         try resp_client.sendAndExpect(io, server, second.socket.handle, "*1\r\n$5\r\nHELLO\r\n", metadata);
-        try expectInfo(io, server, second.socket.handle, 2, 2);
+        _ = try expectInfo(io, server, second.socket.handle, 2, 2);
     }
     try server.stop();
-    std.log.info("integration: CLIENT INFO binding passed", .{});
+    std.log.info("integration: CLIENT INFO binding and accounting passed", .{});
 }
 
-fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8) !void {
-    try resp_client.sendAndExpect(io, server, fd, "*2\r\n$6\r\ncLiEnT\r\n$4\r\niNfO\r\n", if (version == 2) "$" else "=");
+const InfoCounts = struct {
+    net_in: u64 = 0,
+    net_out: u64 = 0,
+    reply_bytes: u64,
+};
+
+fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8) !InfoCounts {
+    try resp_client.sendAndExpect(io, server, fd, info_request, if (version == 2) "$" else "=");
     var header: [24]u8 = undefined;
     var header_len: usize = 0;
     while (true) {
@@ -59,6 +71,7 @@ fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id
     try server.readExact(fd, &lf);
     if (lf[0] != '\n') return error.UnexpectedReply;
     const length = try std.fmt.parseInt(usize, header[0..header_len], 10);
+    var counts: InfoCounts = .{ .reply_bytes = header_len + length + 5 };
     var buffer: [4096]u8 = undefined;
     if (length > buffer.len - 2) return error.ReplyTooLong;
     try server.readExact(fd, buffer[0 .. length + 2]);
@@ -91,7 +104,9 @@ fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id
                 const address = try std.Io.net.IpAddress.parseLiteral(value);
                 if (!address.eql(&server.address.?)) return error.UnexpectedReply;
             },
-            3, 4, 5, 6, 8, 11, 12, 13 => _ = try std.fmt.parseInt(u64, value, 10),
+            3, 4, 5, 6, 8, 13 => _ = try std.fmt.parseInt(u64, value, 10),
+            11 => counts.net_in = try std.fmt.parseInt(u64, value, 10),
+            12 => counts.net_out = try std.fmt.parseInt(u64, value, 10),
             7 => if (value.len == 0) return error.UnexpectedReply,
             9, 10, 14 => if (value.len != 0) return error.UnexpectedReply,
             15, 16, 17, 18, 20 => if (!std.mem.eql(u8, value, "0")) return error.UnexpectedReply,
@@ -100,5 +115,6 @@ fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id
         }
     }
     if (fields.next() != null) return error.UnexpectedReply;
-    try resp_client.sendAndExpect(io, server, fd, "*1\r\n$4\r\nPING\r\n", "+PONG\r\n");
+    try resp_client.sendAndExpect(io, server, fd, ping_request, pong_reply);
+    return counts;
 }

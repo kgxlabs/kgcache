@@ -71,10 +71,16 @@ The field order is `id`, `addr`, `laddr`, `fd`, `age`, `idle`, `db`, `cmd`,
 The fixed indicators are an empty `name`, zero subscription/watch counts,
 `multi=-1`, `multi-mem=0`, and `redir=-1`.
 
-At this checkpoint, `db=0`, `resp=2`, `cmd=NULL`, and zero byte/command totals
-are registration defaults. They do not yet track command activity or changes
-made through HELLO or SELECT. Both library labels are empty.
-Idle currently equals age because report activity stays at registration time.
+`tot-net-in` counts successful network read bytes once, before dispatch,
+including received pipeline tails. `tot-net-out` counts bytes actually sent,
+including prefixes sent before a later write failure. INFO includes its received
+bytes and excludes its current reply bytes. Successful positive reads and writes
+update activity; idle measures the time since the last such transfer. Byte and
+command totals saturate at `18446744073709551615` (`maxInt(u64)`).
+
+At this checkpoint, `db=0`, `resp=2`, `cmd=NULL`, and `tot-cmds=0` are
+registration defaults. They do not yet track dispatches or changes made through
+HELLO or SELECT. Both library labels are empty.
 
 Bare `CLIENT` and extra INFO arguments return `ERR wrong number of arguments`.
 Unknown subcommands, including `SETINFO` and `LIST`, return `ERR unsupported

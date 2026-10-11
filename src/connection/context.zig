@@ -12,3 +12,19 @@ pub fn snapshotCurrent(self: *const ConnectionContext, io: std.Io, allocator: st
     const reports = self.reports orelse return error.MissingReportAccess;
     return reports.snapshotCurrent(io, allocator);
 }
+
+pub fn recordRead(self: *const ConnectionContext, io: std.Io, byte_count: u64) void {
+    if (byte_count == 0) return;
+
+    const reports = self.reports orelse return;
+
+    reports.recordRead(byte_count, std.Io.Clock.awake.now(io));
+}
+
+pub fn recordWrite(self: *const ConnectionContext, io: std.Io, byte_count: u64) void {
+    if (byte_count == 0) return;
+
+    const reports = self.reports orelse return;
+
+    reports.recordWrite(byte_count, std.Io.Clock.awake.now(io));
+}

@@ -25,8 +25,18 @@ vtable: *const VTable,
 
 pub const VTable = struct {
     snapshot_current: *const fn (*anyopaque, std.Io, std.mem.Allocator) Error!Snapshot,
+    record_read: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
+    record_write: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
 };
 
 pub fn snapshotCurrent(self: ReportAccess, io: std.Io, allocator: std.mem.Allocator) Error!Snapshot {
     return self.vtable.snapshot_current(self.ptr, io, allocator);
+}
+
+pub fn recordRead(self: ReportAccess, byte_count: u64, at: std.Io.Timestamp) void {
+    self.vtable.record_read(self.ptr, byte_count, at);
+}
+
+pub fn recordWrite(self: ReportAccess, byte_count: u64, at: std.Io.Timestamp) void {
+    self.vtable.record_write(self.ptr, byte_count, at);
 }

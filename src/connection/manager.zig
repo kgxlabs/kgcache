@@ -45,7 +45,19 @@ pub const ClientWorker = struct {
 
     const report_vtable: ReportAccess.VTable = .{
         .snapshot_current = snapshotCurrent,
+        .record_read = recordRead,
+        .record_write = recordWrite,
     };
+
+    fn recordRead(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
+        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
+        self.report.recordRead(byte_count, at);
+    }
+
+    fn recordWrite(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
+        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
+        self.report.recordWrite(byte_count, at);
+    }
 
     fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ReportAccess.Error!ReportAccess.Snapshot {
         const self: *ClientWorker = @ptrCast(@alignCast(ptr));

@@ -3,6 +3,8 @@ const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 const serve = @import("../connection.zig").serve;
 const ConnectionContext = @import("../connection.zig").ConnectionContext;
+const ClientWorker = @import("manager.zig").ClientWorker;
+const ConnectionReport = @import("report.zig");
 
 const test_connection_context: ConnectionContext = .{ .id = 1 };
 const never_stop_requested: std.atomic.Value(bool) = .init(false);
@@ -66,6 +68,10 @@ const TestConnectionIo = struct {
     continue_write: std.Io.Event = .unset,
     stop_after_read: ?*std.atomic.Value(bool) = null,
     stop_during_write: ?*std.atomic.Value(bool) = null,
+    transport_time_ns: i96 = 100,
+    time_step_ns: i96 = 1,
+    awake_samples: usize = 0,
+    zero_writes: usize = 0,
     vtable: std.Io.VTable = undefined,
 
     fn io(self: *@This()) std.Io {
@@ -73,11 +79,13 @@ const TestConnectionIo = struct {
         self.vtable.netRead = read;
         self.vtable.netWrite = write;
         self.vtable.netClose = close;
+        self.vtable.now = now;
         return .{ .userdata = self, .vtable = &self.vtable };
     }
 
     fn read(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.transport_time_ns += self.time_step_ns;
         if (self.next_request == self.requests.len) {
             if (self.read_error) |err| return err;
             return 0;
@@ -97,6 +105,11 @@ const TestConnectionIo = struct {
 
     fn write(ptr: ?*anyopaque, _: std.Io.net.Socket.Handle, header: []const u8, data: []const []const u8, splat: usize) std.Io.net.Stream.Writer.Error!usize {
         const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.transport_time_ns += self.time_step_ns;
+        if (self.zero_writes > 0) {
+            self.zero_writes -= 1;
+            return 0;
+        }
         if (self.fail_write) return self.write_error;
         if (self.fail_after_bytes) |limit| {
             if (self.output_len >= limit) return self.write_error;
@@ -148,10 +161,181 @@ const TestConnectionIo = struct {
         self.close_calls += handles.len;
     }
 
+    fn now(ptr: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        if (clock != .awake) return std.testing.io.vtable.now(std.testing.io.userdata, clock);
+        self.awake_samples += 1;
+        return .fromNanoseconds(self.transport_time_ns);
+    }
+
     fn written(self: *const @This()) []const u8 {
         return self.output[0..self.output_len];
     }
 };
+
+fn testWorker(registered_at: std.Io.Timestamp) ClientWorker {
+    const peer: std.Io.net.IpAddress = .{ .ip4 = .loopback(40000) };
+    return .{
+        .stream = .{ .socket = .{ .handle = 1, .address = peer } },
+        .context = .{ .id = 1 },
+        .peer_endpoint = peer,
+        .local_endpoint = .{ .ip4 = .loopback(6379) },
+        .descriptor = 1,
+        .registered_at = registered_at,
+        .report = ConnectionReport.init(std.testing.io, registered_at),
+    };
+}
+
+test "fragmented and retained input counts each received byte once through short writes" {
+    const testing = std.testing;
+    const request = "*1\r\n$4\r\nPING\r\n" ++
+        "*2\r\n$4\r\nECHO\r\n$25\r\napple banana orange grape\r\n" ++
+        "*1\r\n$4\r\nPING\r\n*1\r\n$4\r\nPI";
+    const expected = "+PONG\r\n$25\r\napple banana orange grape\r\n+PONG\r\n";
+    for (1..request.len) |split| {
+        var fake_io: TestConnectionIo = .{
+            .requests = &.{ request[0..split], request[split..] },
+            .max_write_bytes = 2,
+            .zero_writes = 3,
+        };
+        var worker = testWorker(.fromNanoseconds(100));
+        worker.context.reports = worker.reportAccess();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var logger = logging.TestLogger.init();
+
+        serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 16, &never_stop_requested);
+
+        try testing.expectEqualStrings(expected, fake_io.written());
+        var snapshot = try worker.report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqual(request.len, snapshot.values.total_net_in);
+        try testing.expectEqual(expected.len, snapshot.values.total_net_out);
+        try testing.expectEqual(fake_io.transport_time_ns - fake_io.time_step_ns, snapshot.values.last_activity.nanoseconds);
+        try testing.expectEqual(0, logger.recordedEvents().len);
+        try testing.expectEqual(0, fake_io.close_calls);
+    }
+}
+
+test "INFO snapshots include received pipeline tails and exclude their current reply" {
+    const testing = std.testing;
+    const info = "*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n";
+    const first_read = info ++ "*1\r\n$4\r\nPI";
+    var fake_io: TestConnectionIo = .{
+        .requests = &.{ first_read, "NG\r\n" },
+        .max_write_bytes = 2,
+        .transport_time_ns = 9_400_000_000,
+        .time_step_ns = 700_000_000,
+    };
+    var worker = testWorker(.fromNanoseconds(0));
+    worker.context.reports = worker.reportAccess();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var logger = logging.TestLogger.init();
+
+    serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    var buffer: [80]u8 = undefined;
+    const counters = try std.fmt.bufPrint(&buffer, " tot-net-in={d} tot-net-out=0 ", .{first_read.len});
+    try testing.expect(std.mem.indexOf(u8, fake_io.written(), counters) != null);
+    try testing.expect(std.mem.indexOf(u8, fake_io.written(), " age=10 idle=0 ") != null);
+    try testing.expect(std.mem.endsWith(u8, fake_io.written(), "+PONG\r\n"));
+    var snapshot = try worker.report.snapshot(testing.allocator);
+    defer snapshot.deinit();
+    try testing.expectEqual(first_read.len + 4, snapshot.values.total_net_in);
+    try testing.expectEqual(fake_io.output_len, snapshot.values.total_net_out);
+    try testing.expectEqual(fake_io.transport_time_ns - fake_io.time_step_ns, snapshot.values.last_activity.nanoseconds);
+    try testing.expectEqual(0, logger.recordedEvents().len);
+}
+
+test "EOF and failed reads leave activity at the last successful transfer" {
+    const testing = std.testing;
+    for ([_]?std.Io.net.Stream.Reader.Error{ null, error.NetworkDown, error.ConnectionResetByPeer }) |read_error| {
+        for ([_]bool{ false, true }) |receive_prefix| {
+            var fake_io: TestConnectionIo = .{
+                .requests = if (receive_prefix) &.{"*1\r\n"} else &.{},
+                .read_error = read_error,
+            };
+            var worker = testWorker(.fromNanoseconds(100));
+            worker.context.reports = worker.reportAccess();
+            var mock = store.MockStore.init();
+            var data_store = mock.store();
+            var logger = logging.TestLogger.init();
+
+            serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+            var snapshot = try worker.report.snapshot(testing.allocator);
+            defer snapshot.deinit();
+            try testing.expectEqual(@as(u64, if (receive_prefix) 4 else 0), snapshot.values.total_net_in);
+            try testing.expectEqual(0, snapshot.values.total_net_out);
+            try testing.expectEqual(@as(i96, if (receive_prefix) 101 else 100), snapshot.values.last_activity.nanoseconds);
+            try testing.expectEqual(@as(usize, if (receive_prefix) 1 else 0), fake_io.awake_samples);
+        }
+    }
+}
+
+test "failed writes retain successful prefixes and ignore zero writes and failure activity" {
+    const testing = std.testing;
+    const requests = [_][]const u8{
+        "*1\r\n$4\r\nPING\r\n*1\r\n$6\r\nDBSIZE\r\n",
+        "*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n*1\r\n$6\r\nDBSIZE\r\n",
+    };
+    for (requests) |request| {
+        for ([_]usize{ 0, 1, 3, 6 }) |prefix_length| {
+            var fake_io: TestConnectionIo = .{
+                .requests = &.{request},
+                .fail_after_bytes = prefix_length,
+                .max_write_bytes = 1,
+                .zero_writes = 2,
+            };
+            var worker = testWorker(.fromNanoseconds(100));
+            worker.context.reports = worker.reportAccess();
+            var mock = store.MockStore.init();
+            var data_store = mock.store();
+            var logger = logging.TestLogger.init();
+
+            serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+            var snapshot = try worker.report.snapshot(testing.allocator);
+            defer snapshot.deinit();
+            try testing.expectEqual(request.len, snapshot.values.total_net_in);
+            try testing.expectEqual(prefix_length, snapshot.values.total_net_out);
+            try testing.expectEqual(prefix_length, fake_io.output_len);
+            const last_activity = if (prefix_length == 0) 101 else 103 + @as(i96, @intCast(prefix_length));
+            try testing.expectEqual(last_activity, snapshot.values.last_activity.nanoseconds);
+            const snapshot_samples: usize = if (std.mem.startsWith(u8, request, "*2")) 1 else 0;
+            try testing.expectEqual(1 + prefix_length + snapshot_samples, fake_io.awake_samples);
+            try testing.expectEqual(0, mock.dbsize_calls);
+            try testing.expectEqual(0, fake_io.close_calls);
+            try testing.expectEqual(1, logger.recordedEvents().len);
+            try testing.expectEqual(error.NetworkDown, logger.recordedEvents()[0].source.?);
+        }
+    }
+}
+
+test "network byte totals saturate before INFO formatting and after its output" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n"}, .max_write_bytes = 2 };
+    var worker = testWorker(.fromNanoseconds(100));
+    worker.context.reports = worker.reportAccess();
+    const max = std.math.maxInt(u64);
+    worker.report._values.total_net_in = max - 1;
+    worker.report._values.total_net_out = max - 1;
+    worker.report._values.total_cmds = max;
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var logger = logging.TestLogger.init();
+
+    serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    try testing.expect(std.mem.indexOf(u8, fake_io.written(), " tot-net-in=18446744073709551615 tot-net-out=18446744073709551614 tot-cmds=18446744073709551615 ") != null);
+    var snapshot = try worker.report.snapshot(testing.allocator);
+    defer snapshot.deinit();
+    try testing.expectEqual(max, snapshot.values.total_net_in);
+    try testing.expectEqual(max, snapshot.values.total_net_out);
+    try testing.expectEqual(max, snapshot.values.total_cmds);
+    try testing.expectEqual(0, logger.recordedEvents().len);
+}
 
 test "a Storage source crosses Store and Commander to the connection logger" {
     const testing = std.testing;
@@ -783,8 +967,8 @@ test "a blocked reply keeps later mutations pending and permits another storage 
     const PersistenceState = @import("../persistence_state.zig");
     const persistence = @import("../persistence.zig");
     const Worker = struct {
-        fn run(fake_io: *TestConnectionIo, logger: logging.Logger, data_store: *store.Store) void {
-            serve(fake_io.io(), logger, TestConnectionStream, &test_connection_context, data_store, testing.allocator, 128, &never_stop_requested);
+        fn run(fake_io: *TestConnectionIo, logger: logging.Logger, data_store: *store.Store, context: *const ConnectionContext) void {
+            serve(fake_io.io(), logger, TestConnectionStream, context, data_store, testing.allocator, 128, &never_stop_requested);
         }
 
         const TestConnectionStream: std.Io.net.Stream = .{ .socket = .{ .handle = 1, .address = undefined } };
@@ -811,6 +995,8 @@ test "a blocked reply keeps later mutations pending and permits another storage 
         const request = try std.fmt.allocPrint(testing.allocator, "{s}*2\r\n$3\r\nDEL\r\n$5\r\nfruit\r\n", .{first_request});
         defer testing.allocator.free(request);
         var fake_io: TestConnectionIo = .{ .requests = &.{request}, .max_write_bytes = 2, .pause_after_bytes = 6 };
+        var connection_worker = testWorker(.fromNanoseconds(100));
+        connection_worker.context.reports = connection_worker.reportAccess();
         var test_logger = logging.TestLogger.init();
         var backend = DefaultStorage.init(testing.io, testing.allocator);
         var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
@@ -820,7 +1006,7 @@ test "a blocked reply keeps later mutations pending and permits another storage 
         defer data_store.deinit();
         _ = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
 
-        const worker = try std.Thread.spawn(.{}, Worker.run, .{ &fake_io, test_logger.logger(), &data_store });
+        const worker = try std.Thread.spawn(.{}, Worker.run, .{ &fake_io, test_logger.logger(), &data_store, &connection_worker.context });
         var worker_joined = false;
         defer {
             fake_io.continue_write.set(testing.io);
@@ -828,6 +1014,12 @@ test "a blocked reply keeps later mutations pending and permits another storage 
         }
         try fake_io.write_paused.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
         try testing.expectEqualStrings("$5\r\nap", fake_io.written());
+        var report_tx = connection_worker.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
+        report_tx.end();
+        var report_snapshot = try connection_worker.report.snapshot(testing.allocator);
+        defer report_snapshot.deinit();
+        try testing.expectEqual(request.len, report_snapshot.values.total_net_in);
+        try testing.expectEqual(6, report_snapshot.values.total_net_out);
 
         var observer: Observer = .{ .data_store = &data_store };
         const observer_thread = try std.Thread.spawn(.{}, Observer.run, .{&observer});
@@ -845,6 +1037,9 @@ test "a blocked reply keeps later mutations pending and permits another storage 
         worker.join();
         worker_joined = true;
         try testing.expectEqualStrings("$5\r\napple\r\n:1\r\n", fake_io.written());
+        var final_snapshot = try connection_worker.report.snapshot(testing.allocator);
+        defer final_snapshot.deinit();
+        try testing.expectEqual(fake_io.output_len, final_snapshot.values.total_net_out);
         try testing.expect((try data_store.get("fruit", 0)) == null);
         try testing.expectEqual(0, test_logger.recordedEvents().len);
         try testing.expectEqual(0, fake_io.close_calls);
@@ -895,6 +1090,8 @@ test "stopping prevents a new command while a live reply finishes" {
             .stop_after_read = if (stop_during == .read) &stop_requested else null,
             .stop_during_write = if (stop_during == .write) &stop_requested else null,
         };
+        var worker = testWorker(.fromNanoseconds(100));
+        worker.context.reports = worker.reportAccess();
         var test_logger = logging.TestLogger.init();
         var backend = DefaultStorage.init(testing.io, testing.allocator);
         var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
@@ -905,7 +1102,7 @@ test "stopping prevents a new command while a live reply finishes" {
         var initial = try data_store.set(.{ .key = "fruit", .value = "apple", .condition = null, .expires_at = null, .response = null }, 0);
         if (initial.value) |*previous| previous.deinit();
 
-        serve(fake_io.io(), test_logger.logger(), .{ .socket = .{ .handle = 1, .address = undefined } }, &test_connection_context, &data_store, testing.allocator, 64, &stop_requested);
+        serve(fake_io.io(), test_logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 64, &stop_requested);
 
         try testing.expect(stop_requested.load(.acquire));
         try testing.expectEqualStrings(if (stop_during == .read) "" else "$5\r\napple\r\n", fake_io.written());
@@ -914,6 +1111,10 @@ test "stopping prevents a new command while a live reply finishes" {
         try testing.expectEqualStrings("apple", stored.value.string);
         try testing.expectEqual(0, test_logger.recordedEvents().len);
         try testing.expectEqual(0, fake_io.close_calls);
+        var report_snapshot = try worker.report.snapshot(testing.allocator);
+        defer report_snapshot.deinit();
+        try testing.expectEqual(fake_io.requests[0].len, report_snapshot.values.total_net_in);
+        try testing.expectEqual(fake_io.output_len, report_snapshot.values.total_net_out);
     }
 }
 

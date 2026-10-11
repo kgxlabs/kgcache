@@ -8,7 +8,21 @@ test "session state exposes current snapshots through a borrowed report provider
         report: connection.ConnectionReport,
         calls: usize = 0,
 
-        const vtable: connection.ReportAccess.VTable = .{ .snapshot_current = snapshotCurrent };
+        const vtable: connection.ReportAccess.VTable = .{
+            .snapshot_current = snapshotCurrent,
+            .record_read = recordRead,
+            .record_write = recordWrite,
+        };
+
+        fn recordRead(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.report.recordRead(count, at);
+        }
+
+        fn recordWrite(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.report.recordWrite(count, at);
+        }
 
         fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ReportAccess.Error!connection.ReportAccess.Snapshot {
             const self: *@This() = @ptrCast(@alignCast(ptr));

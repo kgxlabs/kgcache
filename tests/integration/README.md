@@ -20,6 +20,8 @@ The CLIENT INFO cases check RESP2 bulk and RESP3 `txt:` verbatim replies,
 the 22 fields in order, endpoint formatting, fixed indicators, empty labels,
 and identity agreement with HELLO on two connections. They pipeline invalid
 CLIENT forms with PING in both modes to check mapped errors and recovery.
+Consecutive INFO replies verify exact read and write byte deltas, including the
+previous INFO reply and PONG, without depending on socket read grouping.
 
 The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
 and `appendfilename` with a real process. They check the first and last valid

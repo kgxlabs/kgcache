@@ -35,7 +35,21 @@ const Provider = struct {
         return .{ .id = 42, .reports = .{ .ptr = self, .vtable = &vtable } };
     }
 
-    const vtable: connection.ReportAccess.VTable = .{ .snapshot_current = snapshotCurrent };
+    const vtable: connection.ReportAccess.VTable = .{
+        .snapshot_current = snapshotCurrent,
+        .record_read = recordRead,
+        .record_write = recordWrite,
+    };
+
+    fn recordRead(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
+        const self: *Provider = @ptrCast(@alignCast(ptr));
+        self.report.recordRead(count, at);
+    }
+
+    fn recordWrite(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
+        const self: *Provider = @ptrCast(@alignCast(ptr));
+        self.report.recordWrite(count, at);
+    }
 
     fn snapshotCurrent(ptr: *anyopaque, _: std.Io, allocator: std.mem.Allocator) connection.ReportAccess.Error!connection.ReportAccess.Snapshot {
         const self: *Provider = @ptrCast(@alignCast(ptr));
