@@ -21,6 +21,7 @@ pub const Error = std.mem.Allocator.Error || error{
 
 ptr: *anyopaque,
 vtable: *const VTable,
+canonical_name: []const u8 = "",
 
 pub const VTable = struct {
     execute: *const fn (*anyopaque, std.Io, *store.Store, *ClientState) anyerror!Result,

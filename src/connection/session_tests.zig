@@ -212,6 +212,8 @@ test "fragmented and retained input counts each received byte once through short
         defer snapshot.deinit();
         try testing.expectEqual(request.len, snapshot.values.total_net_in);
         try testing.expectEqual(expected.len, snapshot.values.total_net_out);
+        try testing.expectEqual(3, snapshot.values.total_cmds);
+        try testing.expectEqualStrings("ping", snapshot.values.last_command);
         try testing.expectEqual(fake_io.transport_time_ns - fake_io.time_step_ns, snapshot.values.last_activity.nanoseconds);
         try testing.expectEqual(0, logger.recordedEvents().len);
         try testing.expectEqual(0, fake_io.close_calls);
@@ -240,11 +242,15 @@ test "INFO snapshots include received pipeline tails and exclude their current r
     const counters = try std.fmt.bufPrint(&buffer, " tot-net-in={d} tot-net-out=0 ", .{first_read.len});
     try testing.expect(std.mem.indexOf(u8, fake_io.written(), counters) != null);
     try testing.expect(std.mem.indexOf(u8, fake_io.written(), " age=10 idle=0 ") != null);
+    try testing.expect(std.mem.indexOf(u8, fake_io.written(), " cmd=client|info ") != null);
+    try testing.expect(std.mem.indexOf(u8, fake_io.written(), " tot-cmds=1 ") != null);
     try testing.expect(std.mem.endsWith(u8, fake_io.written(), "+PONG\r\n"));
     var snapshot = try worker.report.snapshot(testing.allocator);
     defer snapshot.deinit();
     try testing.expectEqual(first_read.len + 4, snapshot.values.total_net_in);
     try testing.expectEqual(fake_io.output_len, snapshot.values.total_net_out);
+    try testing.expectEqual(2, snapshot.values.total_cmds);
+    try testing.expectEqualStrings("ping", snapshot.values.last_command);
     try testing.expectEqual(fake_io.transport_time_ns - fake_io.time_step_ns, snapshot.values.last_activity.nanoseconds);
     try testing.expectEqual(0, logger.recordedEvents().len);
 }
@@ -269,6 +275,8 @@ test "EOF and failed reads leave activity at the last successful transfer" {
             defer snapshot.deinit();
             try testing.expectEqual(@as(u64, if (receive_prefix) 4 else 0), snapshot.values.total_net_in);
             try testing.expectEqual(0, snapshot.values.total_net_out);
+            try testing.expectEqual(0, snapshot.values.total_cmds);
+            try testing.expectEqualStrings("NULL", snapshot.values.last_command);
             try testing.expectEqual(@as(i96, if (receive_prefix) 101 else 100), snapshot.values.last_activity.nanoseconds);
             try testing.expectEqual(@as(usize, if (receive_prefix) 1 else 0), fake_io.awake_samples);
         }
@@ -301,6 +309,8 @@ test "failed writes retain successful prefixes and ignore zero writes and failur
             defer snapshot.deinit();
             try testing.expectEqual(request.len, snapshot.values.total_net_in);
             try testing.expectEqual(prefix_length, snapshot.values.total_net_out);
+            try testing.expectEqual(1, snapshot.values.total_cmds);
+            try testing.expectEqualStrings(if (std.mem.startsWith(u8, request, "*2")) "client|info" else "ping", snapshot.values.last_command);
             try testing.expectEqual(prefix_length, fake_io.output_len);
             const last_activity = if (prefix_length == 0) 101 else 103 + @as(i96, @intCast(prefix_length));
             try testing.expectEqual(last_activity, snapshot.values.last_activity.nanoseconds);
@@ -314,15 +324,15 @@ test "failed writes retain successful prefixes and ignore zero writes and failur
     }
 }
 
-test "network byte totals saturate before INFO formatting and after its output" {
+test "network byte and dispatch totals saturate while canonical names keep updating" {
     const testing = std.testing;
-    var fake_io: TestConnectionIo = .{ .requests = &.{"*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n"}, .max_write_bytes = 2 };
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n*1\r\n$4\r\nPING\r\n"}, .max_write_bytes = 2 };
     var worker: ClientWorker = undefined;
     initTestWorker(&worker, .fromNanoseconds(100));
     const max = std.math.maxInt(u64);
     worker.report._values.total_net_in = max - 1;
     worker.report._values.total_net_out = max - 1;
-    worker.report._values.total_cmds = max;
+    worker.report._values.total_cmds = max - 1;
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var logger = logging.TestLogger.init();
@@ -335,7 +345,106 @@ test "network byte totals saturate before INFO formatting and after its output" 
     try testing.expectEqual(max, snapshot.values.total_net_in);
     try testing.expectEqual(max, snapshot.values.total_net_out);
     try testing.expectEqual(max, snapshot.values.total_cmds);
+    try testing.expectEqualStrings("ping", snapshot.values.last_command);
     try testing.expectEqual(0, logger.recordedEvents().len);
+}
+
+test "rejected bindings and undecoded input preserve the previous dispatch" {
+    const testing = std.testing;
+    const cases = [_]struct { request: []const u8, response: []const u8 }{
+        .{ .request = "*1\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unknown command\r\n" },
+        .{ .request = "*1\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*3\r\n$4\r\nPING\r\n$1\r\na\r\n$1\r\nb\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*1\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$1\r\nx\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$1\r\nx\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*1\r\n$4\r\nPI", .response = "" },
+        .{ .request = "*1\r\n:42\r\n", .response = "-ERR protocol error: invalid RESP type\r\n" },
+        .{ .request = "*0\r\n", .response = "-ERR protocol error: malformed request\r\n" },
+    };
+    for (cases) |case| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{case.request} };
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
+        worker.report.recordDispatch("echo");
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var logger = logging.TestLogger.init();
+
+        serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        var snapshot = try worker.report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqual(1, snapshot.values.total_cmds);
+        try testing.expectEqualStrings("echo", snapshot.values.last_command);
+        try testing.expectEqualStrings(case.response, fake_io.written());
+        try testing.expectEqual(0, logger.recordedEvents().len);
+    }
+}
+
+test "INFO includes its dispatch after expected handler errors and rejected pipeline requests" {
+    const testing = std.testing;
+    const request = "*1\r\n$4\r\npInG\r\n" ++
+        "*2\r\n$5\r\nhElLo\r\n$1\r\n4\r\n" ++
+        "*2\r\n$6\r\nsElEcT\r\n$2\r\n99\r\n" ++
+        "*1\r\n$3\r\nGET\r\n" ++
+        "*1\r\n$7\r\nUNKNOWN\r\n" ++
+        "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n" ++
+        "*3\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$1\r\nx\r\n" ++
+        "*2\r\n$6\r\ncLiEnT\r\n$4\r\niNfO\r\n" ++
+        "*1\r\n$4\r\nPiNg\r\n";
+    const previous_replies = "+PONG\r\n" ++
+        "-NOPROTO unsupported protocol version\r\n" ++
+        "-ERR DB index is out of range\r\n" ++
+        "-ERR wrong number of arguments\r\n" ++
+        "-ERR unknown command\r\n" ++
+        "-ERR unsupported option\r\n" ++
+        "-ERR wrong number of arguments\r\n";
+    var fake_io: TestConnectionIo = .{ .requests = &.{request}, .max_write_bytes = 2 };
+    var worker: ClientWorker = undefined;
+    initTestWorker(&worker, .fromNanoseconds(100));
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var logger = logging.TestLogger.init();
+
+    serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    try testing.expect(std.mem.startsWith(u8, fake_io.written(), previous_replies));
+    try testing.expect(std.mem.endsWith(u8, fake_io.written(), "+PONG\r\n"));
+    try testing.expect(std.mem.indexOf(u8, fake_io.written(), " cmd=client|info ") != null);
+    var buffer: [96]u8 = undefined;
+    const totals = try std.fmt.bufPrint(&buffer, " tot-net-in={d} tot-net-out={d} tot-cmds=4 ", .{ request.len, previous_replies.len });
+    try testing.expect(std.mem.indexOf(u8, fake_io.written(), totals) != null);
+    var snapshot = try worker.report.snapshot(testing.allocator);
+    defer snapshot.deinit();
+    try testing.expectEqual(5, snapshot.values.total_cmds);
+    try testing.expectEqualStrings("ping", snapshot.values.last_command);
+    try testing.expectEqual(0, mock.get_calls);
+    try testing.expectEqual(0, logger.recordedEvents().len);
+}
+
+test "unexpected handler failures count before stopping later pipeline dispatches" {
+    const testing = std.testing;
+    var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\ndBsIzE\r\n*1\r\n$4\r\nPING\r\n"} };
+    var worker: ClientWorker = undefined;
+    initTestWorker(&worker, .fromNanoseconds(100));
+    var mock = store.MockStore.init();
+    mock.dbsize_result = error.TestStorageSource;
+    var data_store = mock.store();
+    var logger = logging.TestLogger.init();
+
+    serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+    var snapshot = try worker.report.snapshot(testing.allocator);
+    defer snapshot.deinit();
+    try testing.expectEqual(1, snapshot.values.total_cmds);
+    try testing.expectEqualStrings("dbsize", snapshot.values.last_command);
+    try testing.expectEqual(1, mock.dbsize_calls);
+    try testing.expectEqualStrings("-ERR something went wrong\r\n", fake_io.written());
+    try testing.expectEqual(1, logger.recordedEvents().len);
+    try testing.expectEqual(error.TestStorageSource, logger.recordedEvents()[0].source.?);
 }
 
 test "a Storage source crosses Store and Commander to the connection logger" {
@@ -1021,6 +1130,8 @@ test "a blocked reply keeps later mutations pending and permits another storage 
         defer report_snapshot.deinit();
         try testing.expectEqual(request.len, report_snapshot.values.total_net_in);
         try testing.expectEqual(6, report_snapshot.values.total_net_out);
+        try testing.expectEqual(1, report_snapshot.values.total_cmds);
+        try testing.expectEqualStrings(if (std.mem.startsWith(u8, first_request, "*2\r\n$4")) "echo" else "get", report_snapshot.values.last_command);
 
         var observer: Observer = .{ .data_store = &data_store };
         const observer_thread = try std.Thread.spawn(.{}, Observer.run, .{&observer});
@@ -1041,6 +1152,8 @@ test "a blocked reply keeps later mutations pending and permits another storage 
         var final_snapshot = try connection_worker.report.snapshot(testing.allocator);
         defer final_snapshot.deinit();
         try testing.expectEqual(fake_io.output_len, final_snapshot.values.total_net_out);
+        try testing.expectEqual(2, final_snapshot.values.total_cmds);
+        try testing.expectEqualStrings("del", final_snapshot.values.last_command);
         try testing.expect((try data_store.get("fruit", 0)) == null);
         try testing.expectEqual(0, test_logger.recordedEvents().len);
         try testing.expectEqual(0, fake_io.close_calls);
@@ -1116,6 +1229,8 @@ test "stopping prevents a new command while a live reply finishes" {
         defer report_snapshot.deinit();
         try testing.expectEqual(fake_io.requests[0].len, report_snapshot.values.total_net_in);
         try testing.expectEqual(fake_io.output_len, report_snapshot.values.total_net_out);
+        try testing.expectEqual(@as(u64, if (stop_during == .read) 0 else 1), report_snapshot.values.total_cmds);
+        try testing.expectEqualStrings(if (stop_during == .read) "NULL" else "get", report_snapshot.values.last_command);
     }
 }
 

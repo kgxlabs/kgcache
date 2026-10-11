@@ -17,7 +17,7 @@ pub fn init(allocator: std.mem.Allocator, arguments: []const []const u8) Command
     const self = try allocator.create(Client);
     self.* = .{ .allocator = allocator };
 
-    return .{ .ptr = self, .vtable = &vtable };
+    return .{ .ptr = self, .vtable = &vtable, .canonical_name = "client|info" };
 }
 
 const vtable: Commander.VTable = .{ .execute = execute, .deinit = deinit };

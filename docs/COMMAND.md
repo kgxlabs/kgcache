@@ -78,9 +78,14 @@ bytes and excludes its current reply bytes. Successful positive reads and writes
 update activity; idle measures the time since the last such transfer. Byte and
 command totals saturate at `18446744073709551615` (`maxInt(u64)`).
 
-At this checkpoint, `db=0`, `resp=2`, `cmd=NULL`, and `tot-cmds=0` are
-registration defaults. They do not yet track dispatches or changes made through
-HELLO or SELECT. Both library labels are empty.
+`cmd` is the canonical registered handler name, such as `get`, `hello`, or
+`client|info`. `tot-cmds` increments immediately before each successfully bound
+handler call, including calls that return an error. Unknown commands, binding
+arity errors, unsupported CLIENT forms, incomplete input, and malformed frames
+do not change the count or last command. INFO includes its own dispatch.
+
+At this checkpoint, `db=0` and `resp=2` are registration defaults. They do not
+yet track changes made through HELLO or SELECT. Both library labels are empty.
 
 Bare `CLIENT` and extra INFO arguments return `ERR wrong number of arguments`.
 Unknown subcommands, including `SETINFO` and `LIST`, return `ERR unsupported

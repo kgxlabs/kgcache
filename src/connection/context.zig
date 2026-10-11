@@ -28,6 +28,7 @@ pub const VTable = struct {
     snapshot_current: *const fn (*anyopaque, std.Io, std.mem.Allocator) Error!Snapshot,
     record_read: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
     record_write: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
+    record_dispatch: *const fn (*anyopaque, []const u8) void,
 };
 
 pub fn snapshotCurrent(self: *const ConnectionContext, io: std.Io, allocator: std.mem.Allocator) Error!Snapshot {
@@ -44,4 +45,8 @@ pub fn recordWrite(self: *const ConnectionContext, io: std.Io, byte_count: u64) 
     if (byte_count == 0) return;
 
     self.vtable.record_write(self.ptr, byte_count, std.Io.Clock.awake.now(io));
+}
+
+pub fn recordDispatch(self: *const ConnectionContext, canonical_name: []const u8) void {
+    self.vtable.record_dispatch(self.ptr, canonical_name);
 }

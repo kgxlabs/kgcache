@@ -50,6 +50,7 @@ pub fn identityContext(id: u64) ConnectionContext {
             .snapshot_current = snapshotCurrent,
             .record_read = recordTransfer,
             .record_write = recordTransfer,
+            .record_dispatch = recordDispatch,
         };
 
         fn snapshotCurrent(_: *anyopaque, _: std.Io, _: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
@@ -57,6 +58,7 @@ pub fn identityContext(id: u64) ConnectionContext {
         }
 
         fn recordTransfer(_: *anyopaque, _: u64, _: std.Io.Timestamp) void {}
+        fn recordDispatch(_: *anyopaque, _: []const u8) void {}
     };
 
     return .{ .id = id, .ptr = &Provider.marker, .vtable = &Provider.context_vtable };

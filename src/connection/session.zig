@@ -232,6 +232,9 @@ fn handleCompleteFrame(
     };
     defer command.deinit();
 
+    // record command count
+    if (client_state.connection_context) |context| context.recordDispatch(command.canonical_name);
+
     var result = command.execute(io, data_store, client_state) catch |err| {
         if (executeErrorResponse(err)) |message| {
             return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);

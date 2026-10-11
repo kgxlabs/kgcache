@@ -12,6 +12,7 @@ test "session state exposes current snapshots through a borrowed report provider
             .snapshot_current = snapshotCurrent,
             .record_read = recordRead,
             .record_write = recordWrite,
+            .record_dispatch = recordDispatch,
         };
 
         fn recordRead(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
@@ -22,6 +23,11 @@ test "session state exposes current snapshots through a borrowed report provider
         fn recordWrite(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.report.recordWrite(count, at);
+        }
+
+        fn recordDispatch(ptr: *anyopaque, name: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.report.recordDispatch(name);
         }
 
         fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.Snapshot {

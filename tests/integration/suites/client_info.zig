@@ -15,27 +15,37 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
     {
         const client = try server.address.?.connect(io, .{ .mode = .stream });
         defer client.close(io);
-        const cases = [_]struct { request: []const u8, response: []const u8 }{
+        const cases = [_]struct { request: []const u8, response: []const u8, dispatches: u64 = 0 }{
             .{ .request = "*1\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n" },
             .{ .request = "*3\r\n$6\r\ncLiEnT\r\n$4\r\niNfO\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
             .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
             .{ .request = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n", .response = "-ERR unsupported option\r\n" },
             .{ .request = "*4\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$2\r\nID\r\n$1\r\n1\r\n", .response = "-ERR unsupported option\r\n" },
             .{ .request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$4\r\ntest\r\n", .response = "-ERR unsupported option\r\n" },
+            .{ .request = "*1\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unknown command\r\n" },
+            .{ .request = "*1\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n" },
+            .{ .request = "*2\r\n$6\r\nSELECT\r\n$4\r\n9999\r\n", .response = "-ERR DB index is out of range\r\n", .dispatches = 1 },
+            .{ .request = "*2\r\n$5\r\nHELLO\r\n$1\r\n4\r\n", .response = "-NOPROTO unsupported protocol version\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$5\r\nHELLO\r\n$1\r\n3\r\n$4\r\nAUTH\r\n", .response = "-ERR unsupported option\r\n", .dispatches = 1 },
         };
+        var dispatches: u64 = 0;
         for ([_]u8{ 2, 3 }) |version| {
             var request_buffer: [512]u8 = undefined;
             var reply_buffer: [512]u8 = undefined;
             const hello = try std.fmt.bufPrint(&request_buffer, "*2\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n", .{version});
             const metadata = try hello_metadata.expectedMetadata(&reply_buffer, 1, version);
             try resp_client.sendAndExpect(io, server, client.socket.handle, hello, metadata);
+            dispatches += 1;
             for (cases) |case| {
                 const request = try std.fmt.bufPrint(&request_buffer, "{s}*1\r\n$4\r\nPING\r\n", .{case.request});
                 const response = try std.fmt.bufPrint(&reply_buffer, "{s}+PONG\r\n", .{case.response});
                 try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
+                dispatches += case.dispatches + 1;
             }
             const first = try expectInfo(io, server, client.socket.handle, 1, version);
             const second = try expectInfo(io, server, client.socket.handle, 1, version);
+            if (first.commands != dispatches + 1 or second.commands != dispatches + 3) return error.UnexpectedDispatchAccounting;
+            dispatches += 4;
             if (second.net_in - first.net_in != ping_request.len + info_request.len) return error.UnexpectedReadAccounting;
             if (second.net_out - first.net_out != first.reply_bytes + pong_reply.len) return error.UnexpectedWriteAccounting;
         }
@@ -45,7 +55,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         var metadata_buffer: [512]u8 = undefined;
         const metadata = try hello_metadata.expectedMetadata(&metadata_buffer, 2, 2);
         try resp_client.sendAndExpect(io, server, second.socket.handle, "*1\r\n$5\r\nHELLO\r\n", metadata);
-        _ = try expectInfo(io, server, second.socket.handle, 2, 2);
+        const report = try expectInfo(io, server, second.socket.handle, 2, 2);
+        if (report.commands != 2) return error.UnexpectedDispatchAccounting;
     }
     try server.stop();
     std.log.info("integration: CLIENT INFO binding and accounting passed", .{});
@@ -54,6 +65,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
 const InfoCounts = struct {
     net_in: u64 = 0,
     net_out: u64 = 0,
+    commands: u64 = 0,
     reply_bytes: u64,
 };
 
@@ -104,10 +116,11 @@ fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id
                 const address = try std.Io.net.IpAddress.parseLiteral(value);
                 if (!address.eql(&server.address.?)) return error.UnexpectedReply;
             },
-            3, 4, 5, 6, 8, 13 => _ = try std.fmt.parseInt(u64, value, 10),
+            3, 4, 5, 6, 8 => _ = try std.fmt.parseInt(u64, value, 10),
             11 => counts.net_in = try std.fmt.parseInt(u64, value, 10),
             12 => counts.net_out = try std.fmt.parseInt(u64, value, 10),
-            7 => if (value.len == 0) return error.UnexpectedReply,
+            13 => counts.commands = try std.fmt.parseInt(u64, value, 10),
+            7 => if (!std.mem.eql(u8, value, "client|info")) return error.UnexpectedReply,
             9, 10, 14 => if (value.len != 0) return error.UnexpectedReply,
             15, 16, 17, 18, 20 => if (!std.mem.eql(u8, value, "0")) return error.UnexpectedReply,
             19, 21 => if (!std.mem.eql(u8, value, "-1")) return error.UnexpectedReply,

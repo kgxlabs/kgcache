@@ -46,6 +46,7 @@ pub const ClientWorker = struct {
         .snapshot_current = snapshotCurrent,
         .record_read = recordRead,
         .record_write = recordWrite,
+        .record_dispatch = recordDispatch,
     };
 
     fn recordRead(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
@@ -56,6 +57,11 @@ pub const ClientWorker = struct {
     fn recordWrite(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
         const self: *ClientWorker = @ptrCast(@alignCast(ptr));
         self.report.recordWrite(byte_count, at);
+    }
+
+    fn recordDispatch(ptr: *anyopaque, canonical_name: []const u8) void {
+        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
+        self.report.recordDispatch(canonical_name);
     }
 
     fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {

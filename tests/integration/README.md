@@ -22,6 +22,8 @@ and identity agreement with HELLO on two connections. They pipeline invalid
 CLIENT forms with PING in both modes to check mapped errors and recovery.
 Consecutive INFO replies verify exact read and write byte deltas, including the
 previous INFO reply and PONG, without depending on socket read grouping.
+They also verify `cmd=client|info`, INFO's own dispatch, handler-error counts,
+unchanged counts for rejected bindings, and separate totals for each connection.
 
 The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
 and `appendfilename` with a real process. They check the first and last valid

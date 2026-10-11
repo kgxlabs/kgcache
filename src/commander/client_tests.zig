@@ -39,6 +39,7 @@ const Provider = struct {
         .snapshot_current = snapshotCurrent,
         .record_read = recordRead,
         .record_write = recordWrite,
+        .record_dispatch = recordDispatch,
     };
 
     fn recordRead(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
@@ -49,6 +50,11 @@ const Provider = struct {
     fn recordWrite(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
         const self: *Provider = @ptrCast(@alignCast(ptr));
         self.report.recordWrite(count, at);
+    }
+
+    fn recordDispatch(ptr: *anyopaque, name: []const u8) void {
+        const self: *Provider = @ptrCast(@alignCast(ptr));
+        self.report.recordDispatch(name);
     }
 
     fn snapshotCurrent(ptr: *anyopaque, _: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.Snapshot {

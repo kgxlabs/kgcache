@@ -49,6 +49,26 @@ test "reject unknown command" {
     }
 }
 
+test "bound commands keep static canonical names after caller input and handlers are released" {
+    const testing = std.testing;
+    const registry = @import("commander/registry.zig");
+    for (registry.all()) |definition| {
+        var name: [32]u8 = undefined;
+        for (definition.name, 0..) |byte, index| name[index] = std.ascii.toUpper(byte);
+        const is_client = std.mem.eql(u8, definition.name, "client");
+        const arguments = [_][]const u8{ "key", "value" };
+        const command = try init(testing.allocator, .{
+            .name = name[0..definition.name.len],
+            .arguments = if (is_client) &.{"iNfO"} else arguments[0..definition.arity.minimum],
+        });
+        const canonical_name = command.canonical_name;
+        command.deinit();
+        @memset(&name, 'x');
+        try testing.expectEqualStrings(if (is_client) "client|info" else definition.name, canonical_name);
+        if (!is_client) try testing.expect(canonical_name.ptr == definition.name.ptr);
+    }
+}
+
 fn executeWithMockStore(keyword: []const u8, arguments: []const []const u8, mock_store: *MockStore) anyerror!Commander.Result {
     var data_store = mock_store.store();
     var client_state: Commander.ClientState = .{};
