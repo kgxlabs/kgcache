@@ -7,6 +7,7 @@ const Lock = @import("../lock.zig");
 const logging = @import("../logger.zig");
 const store = @import("../store.zig");
 const TestNetwork = @import("test_network.zig");
+const protocol = @import("../protocol.zig");
 
 const ConnectionManager = @This();
 // TODO: If this is too much, reduce it.
@@ -47,6 +48,7 @@ pub const ClientWorker = struct {
         .record_read = recordRead,
         .record_write = recordWrite,
         .record_dispatch = recordDispatch,
+        .record_db_and_proto = recordDbAndProto,
     };
 
     fn recordRead(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
@@ -62,6 +64,11 @@ pub const ClientWorker = struct {
     fn recordDispatch(ptr: *anyopaque, canonical_name: []const u8) void {
         const self: *ClientWorker = @ptrCast(@alignCast(ptr));
         self.report.recordDispatch(canonical_name);
+    }
+
+    fn recordDbAndProto(ptr: *anyopaque, db_index: u32, resp: protocol.Resp.Version) void {
+        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
+        self.report.recordDbAndProto(db_index, resp);
     }
 
     fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {

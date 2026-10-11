@@ -1,5 +1,6 @@
 const std = @import("std");
 const ConnectionReport = @import("report.zig");
+const protocol = @import("../protocol.zig");
 
 const ConnectionContext = @This();
 
@@ -29,6 +30,7 @@ pub const VTable = struct {
     record_read: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
     record_write: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
     record_dispatch: *const fn (*anyopaque, []const u8) void,
+    record_db_and_proto: *const fn (*anyopaque, u32, protocol.Resp.Version) void,
 };
 
 pub fn snapshotCurrent(self: *const ConnectionContext, io: std.Io, allocator: std.mem.Allocator) Error!Snapshot {
@@ -49,4 +51,8 @@ pub fn recordWrite(self: *const ConnectionContext, io: std.Io, byte_count: u64) 
 
 pub fn recordDispatch(self: *const ConnectionContext, canonical_name: []const u8) void {
     self.vtable.record_dispatch(self.ptr, canonical_name);
+}
+
+pub fn recordDbAndProto(self: *const ConnectionContext, db_index: u32, resp: protocol.Resp.Version) void {
+    self.vtable.record_db_and_proto(self.ptr, db_index, resp);
 }

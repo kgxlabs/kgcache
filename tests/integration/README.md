@@ -24,6 +24,8 @@ Consecutive INFO replies verify exact read and write byte deltas, including the
 previous INFO reply and PONG, without depending on socket read grouping.
 They also verify `cmd=client|info`, INFO's own dispatch, handler-error counts,
 unchanged counts for rejected bindings, and separate totals for each connection.
+HELLO, SELECT, expected errors, versionless HELLO, INFO, and PING in one pipeline
+verify the latest valid database/protocol and independent connection defaults.
 
 The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
 and `appendfilename` with a real process. They check the first and last valid

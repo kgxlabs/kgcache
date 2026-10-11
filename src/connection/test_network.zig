@@ -1,5 +1,6 @@
 const std = @import("std");
 const ConnectionContext = @import("context.zig");
+const protocol = @import("../protocol.zig");
 const TestNetwork = @This();
 
 base_io: std.Io,
@@ -51,6 +52,7 @@ pub fn identityContext(id: u64) ConnectionContext {
             .record_read = recordTransfer,
             .record_write = recordTransfer,
             .record_dispatch = recordDispatch,
+            .record_db_and_proto = recordDbAndProto,
         };
 
         fn snapshotCurrent(_: *anyopaque, _: std.Io, _: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
@@ -59,6 +61,7 @@ pub fn identityContext(id: u64) ConnectionContext {
 
         fn recordTransfer(_: *anyopaque, _: u64, _: std.Io.Timestamp) void {}
         fn recordDispatch(_: *anyopaque, _: []const u8) void {}
+        fn recordDbAndProto(_: *anyopaque, _: u32, _: protocol.Resp.Version) void {}
     };
 
     return .{ .id = id, .ptr = &Provider.marker, .vtable = &Provider.context_vtable };

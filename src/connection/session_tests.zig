@@ -56,7 +56,7 @@ const TestConnectionIo = struct {
     requests: []const []const u8,
     next_request: usize = 0,
     request_offset: usize = 0,
-    output: [512]u8 = undefined,
+    output: [2048]u8 = undefined,
     output_len: usize = 0,
     close_calls: usize = 0,
     read_error: ?std.Io.net.Stream.Reader.Error = null,
@@ -423,6 +423,138 @@ test "INFO includes its dispatch after expected handler errors and rejected pipe
     try testing.expectEqualStrings("ping", snapshot.values.last_command);
     try testing.expectEqual(0, mock.get_calls);
     try testing.expectEqual(0, logger.recordedEvents().len);
+}
+
+test "pipelined INFO reports the latest valid database and protocol after handler errors" {
+    const testing = std.testing;
+    for ([_]u8{ 2, 3 }) |version| {
+        const next_version: u8 = if (version == 2) 3 else 2;
+        const request = try std.fmt.allocPrint(testing.allocator, "*2\r\n$6\r\nsElEcT\r\n$1\r\n1\r\n" ++
+            "*2\r\n$5\r\nhElLo\r\n$1\r\n{d}\r\n" ++
+            "*3\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n$4\r\nAUTH\r\n" ++
+            "*2\r\n$6\r\nSELECT\r\n$2\r\n99\r\n" ++
+            "*2\r\n$5\r\nHELLO\r\n$1\r\n4\r\n" ++
+            "*1\r\n$3\r\nGET\r\n" ++
+            "*1\r\n$5\r\nHELLO\r\n" ++
+            "*2\r\n$6\r\ncLiEnT\r\n$4\r\niNfO\r\n" ++
+            "*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n" ++
+            "*2\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n" ++
+            "*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n" ++
+            "*1\r\n$4\r\nPiNg\r\n", .{ version, next_version, next_version });
+        defer testing.allocator.free(request);
+        var fake_io: TestConnectionIo = .{ .requests = &.{request}, .max_write_bytes = 3 };
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
+        var mock = store.MockStore.init();
+        mock.num_databases_result = 2;
+        var data_store = mock.store();
+        var logger = logging.TestLogger.init();
+
+        serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        var first_buffer: [64]u8 = undefined;
+        var second_buffer: [64]u8 = undefined;
+        const first_state = try std.fmt.bufPrint(&first_buffer, " db=1 cmd=client|info resp={d} ", .{version});
+        const second_state = try std.fmt.bufPrint(&second_buffer, " db=0 cmd=client|info resp={d} ", .{next_version});
+        const first = std.mem.indexOf(u8, fake_io.written(), first_state) orelse return error.MissingFirstReport;
+        const second = std.mem.indexOf(u8, fake_io.written(), second_state) orelse return error.MissingSecondReport;
+        try testing.expect(first < second);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written()[first..second], " tot-cmds=7 ") != null);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written()[second..], " tot-cmds=10 ") != null);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written(), "-ERR unsupported option\r\n-ERR DB index is out of range\r\n-NOPROTO unsupported protocol version\r\n-ERR wrong number of arguments\r\n") != null);
+        try testing.expect(std.mem.endsWith(u8, fake_io.written(), "+PONG\r\n"));
+        var snapshot = try worker.report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqual(0, snapshot.values.db_index);
+        try testing.expectEqual(next_version, @intFromEnum(snapshot.values.resp));
+        try testing.expectEqual(11, snapshot.values.total_cmds);
+        try testing.expectEqualStrings("ping", snapshot.values.last_command);
+        try testing.expectEqual(request.len, snapshot.values.total_net_in);
+        try testing.expectEqual(fake_io.output_len, snapshot.values.total_net_out);
+        try testing.expectEqual(0, logger.recordedEvents().len);
+        try testing.expectEqual(0, fake_io.close_calls);
+    }
+}
+
+test "database and protocol publish before success and expected-error output even when writes fail" {
+    const testing = std.testing;
+    const protocol = @import("../protocol.zig");
+    const Worker = struct {
+        fn run(fake_io: *TestConnectionIo, logger: logging.Logger, data_store: *store.Store, worker: *ClientWorker) void {
+            serve(fake_io.io(), logger, worker.stream, &worker.context, data_store, testing.allocator, 1024, &never_stop_requested);
+        }
+    };
+    const cases = [_]struct {
+        request: []const u8,
+        reply_prefix: []const u8,
+        db_index: u32 = 0,
+        resp: protocol.Resp.Version = .resp2,
+        command: []const u8,
+    }{
+        .{ .request = "*2\r\n$6\r\nSELECT\r\n$1\r\n1\r\n", .reply_prefix = "+OK\r\n", .db_index = 1, .command = "select" },
+        .{ .request = "*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n", .reply_prefix = "%7\r\n", .resp = .resp3, .command = "hello" },
+        .{ .request = "*1\r\n$5\r\nHELLO\r\n", .reply_prefix = "*14\r\n", .command = "hello" },
+        .{ .request = "*2\r\n$6\r\nSELECT\r\n$2\r\n99\r\n", .reply_prefix = "-ERR DB index is out of range\r\n", .command = "select" },
+        .{ .request = "*2\r\n$5\r\nHELLO\r\n$1\r\n4\r\n", .reply_prefix = "-NOPROTO unsupported protocol version\r\n", .command = "hello" },
+        .{ .request = "*3\r\n$5\r\nHELLO\r\n$1\r\n3\r\n$4\r\nAUTH\r\n", .reply_prefix = "-ERR unsupported option\r\n", .command = "hello" },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |fail_write| {
+            const request = try std.fmt.allocPrint(testing.allocator, "{s}*1\r\n$4\r\nPING\r\n", .{case.request});
+            defer testing.allocator.free(request);
+            var fake_io: TestConnectionIo = .{
+                .requests = &.{request},
+                .max_write_bytes = 2,
+                .pause_after_bytes = 0,
+                .fail_after_bytes = if (fail_write) 3 else null,
+                .write_error = error.ConnectionResetByPeer,
+            };
+            var connection_worker: ClientWorker = undefined;
+            initTestWorker(&connection_worker, .fromNanoseconds(100));
+            connection_worker.report.recordDbAndProto(7, .resp3);
+            var mock = store.MockStore.init();
+            mock.num_databases_result = 2;
+            var data_store = mock.store();
+            var logger = logging.TestLogger.init();
+            const thread = try std.Thread.spawn(.{}, Worker.run, .{ &fake_io, logger.logger(), &data_store, &connection_worker });
+            var joined = false;
+            defer {
+                fake_io.continue_write.set(testing.io);
+                if (!joined) thread.join();
+            }
+            try fake_io.write_paused.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+
+            try testing.expectEqual(0, fake_io.output_len);
+            var tx = connection_worker.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
+            tx.end();
+            var snapshot = try connection_worker.report.snapshot(testing.allocator);
+            defer snapshot.deinit();
+            try testing.expectEqual(case.db_index, snapshot.values.db_index);
+            try testing.expectEqual(case.resp, snapshot.values.resp);
+            try testing.expectEqual(1, snapshot.values.total_cmds);
+            try testing.expectEqualStrings(case.command, snapshot.values.last_command);
+            try testing.expectEqual(0, snapshot.values.total_net_out);
+
+            fake_io.continue_write.set(testing.io);
+            thread.join();
+            joined = true;
+            if (fail_write) {
+                try testing.expectEqualStrings(case.reply_prefix[0..3], fake_io.written());
+            } else {
+                try testing.expect(std.mem.startsWith(u8, fake_io.written(), case.reply_prefix));
+                try testing.expect(std.mem.endsWith(u8, fake_io.written(), "+PONG\r\n"));
+            }
+            var final_snapshot = try connection_worker.report.snapshot(testing.allocator);
+            defer final_snapshot.deinit();
+            try testing.expectEqual(case.db_index, final_snapshot.values.db_index);
+            try testing.expectEqual(case.resp, final_snapshot.values.resp);
+            try testing.expectEqual(@as(u64, if (fail_write) 1 else 2), final_snapshot.values.total_cmds);
+            try testing.expectEqualStrings(if (fail_write) case.command else "ping", final_snapshot.values.last_command);
+            try testing.expectEqual(fake_io.output_len, final_snapshot.values.total_net_out);
+            try testing.expectEqual(0, logger.recordedEvents().len);
+            try testing.expectEqual(0, fake_io.close_calls);
+        }
+    }
 }
 
 test "unexpected handler failures count before stopping later pipeline dispatches" {

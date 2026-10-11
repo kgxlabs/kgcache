@@ -84,8 +84,11 @@ handler call, including calls that return an error. Unknown commands, binding
 arity errors, unsupported CLIENT forms, incomplete input, and malformed frames
 do not change the count or last command. INFO includes its own dispatch.
 
-At this checkpoint, `db=0` and `resp=2` are registration defaults. They do not
-yet track changes made through HELLO or SELECT. Both library labels are empty.
+`db` and `resp` report the selected database and protocol, initially `0` and `2`.
+The session publishes their current values after handler execution and before
+reply output, including expected command errors. A valid HELLO or SELECT is
+visible to the next INFO in the same pipeline. Rejected changes preserve the
+previous selection. Both library labels are empty at this checkpoint.
 
 Bare `CLIENT` and extra INFO arguments return `ERR wrong number of arguments`.
 Unknown subcommands, including `SETINFO` and `LIST`, return `ERR unsupported

@@ -237,13 +237,25 @@ fn handleCompleteFrame(
 
     var result = command.execute(io, data_store, client_state) catch |err| {
         if (executeErrorResponse(err)) |message| {
+            if (client_state.connection_context) |context| context.recordDbAndProto(
+                client_state.db_index,
+                client_state.resp.version(),
+            );
+
             return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);
         }
+
         logger.err("connection: command execution failed", err, @errorReturnTrace());
         _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
+
         return false;
     };
     defer result.deinit();
+
+    if (client_state.connection_context) |context| context.recordDbAndProto(
+        client_state.db_index,
+        client_state.resp.version(),
+    );
 
     return writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
 }

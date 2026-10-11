@@ -32,18 +32,30 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         for ([_]u8{ 2, 3 }) |version| {
             var request_buffer: [512]u8 = undefined;
             var reply_buffer: [512]u8 = undefined;
-            const hello = try std.fmt.bufPrint(&request_buffer, "*2\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n", .{version});
-            const metadata = try hello_metadata.expectedMetadata(&reply_buffer, 1, version);
-            try resp_client.sendAndExpect(io, server, client.socket.handle, hello, metadata);
-            dispatches += 1;
+            var metadata_buffer: [512]u8 = undefined;
+            const db_index: u32 = version - 1;
+            const metadata = try hello_metadata.expectedMetadata(&metadata_buffer, 1, version);
+            const pipeline = try std.fmt.bufPrint(&request_buffer, "*2\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n" ++
+                "*2\r\n$6\r\nSELECT\r\n$1\r\n{d}\r\n" ++
+                "*3\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n$4\r\nAUTH\r\n" ++
+                "*2\r\n$6\r\nSELECT\r\n$4\r\n9999\r\n" ++
+                "*1\r\n$5\r\nHELLO\r\n{s}{s}", .{ version, db_index, @as(u8, if (version == 2) 3 else 2), info_request, ping_request });
+            const previous_replies = try std.fmt.bufPrint(&reply_buffer, "{s}+OK\r\n-ERR unsupported option\r\n-ERR DB index is out of range\r\n{s}{s}", .{ metadata, metadata, if (version == 2) "$" else "=" });
+            try resp_client.sendAndExpect(io, server, client.socket.handle, pipeline, previous_replies);
+            const pipelined_info = try readInfo(server, client.socket.handle, 1, version, db_index);
+            if (pipelined_info.commands != dispatches + 6) return error.UnexpectedDispatchAccounting;
+            var pong: [pong_reply.len]u8 = undefined;
+            try server.readExact(client.socket.handle, &pong);
+            if (!std.mem.eql(u8, &pong, pong_reply)) return error.UnexpectedReply;
+            dispatches += 7;
             for (cases) |case| {
                 const request = try std.fmt.bufPrint(&request_buffer, "{s}*1\r\n$4\r\nPING\r\n", .{case.request});
                 const response = try std.fmt.bufPrint(&reply_buffer, "{s}+PONG\r\n", .{case.response});
                 try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
                 dispatches += case.dispatches + 1;
             }
-            const first = try expectInfo(io, server, client.socket.handle, 1, version);
-            const second = try expectInfo(io, server, client.socket.handle, 1, version);
+            const first = try expectInfo(io, server, client.socket.handle, 1, version, db_index);
+            const second = try expectInfo(io, server, client.socket.handle, 1, version, db_index);
             if (first.commands != dispatches + 1 or second.commands != dispatches + 3) return error.UnexpectedDispatchAccounting;
             dispatches += 4;
             if (second.net_in - first.net_in != ping_request.len + info_request.len) return error.UnexpectedReadAccounting;
@@ -55,7 +67,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         var metadata_buffer: [512]u8 = undefined;
         const metadata = try hello_metadata.expectedMetadata(&metadata_buffer, 2, 2);
         try resp_client.sendAndExpect(io, server, second.socket.handle, "*1\r\n$5\r\nHELLO\r\n", metadata);
-        const report = try expectInfo(io, server, second.socket.handle, 2, 2);
+        const report = try expectInfo(io, server, second.socket.handle, 2, 2, 0);
         if (report.commands != 2) return error.UnexpectedDispatchAccounting;
     }
     try server.stop();
@@ -69,8 +81,14 @@ const InfoCounts = struct {
     reply_bytes: u64,
 };
 
-fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8) !InfoCounts {
+fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8, db_index: u32) !InfoCounts {
     try resp_client.sendAndExpect(io, server, fd, info_request, if (version == 2) "$" else "=");
+    const counts = try readInfo(server, fd, id, version, db_index);
+    try resp_client.sendAndExpect(io, server, fd, ping_request, pong_reply);
+    return counts;
+}
+
+fn readInfo(server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8, db_index: u32) !InfoCounts {
     var header: [24]u8 = undefined;
     var header_len: usize = 0;
     while (true) {
@@ -116,7 +134,9 @@ fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id
                 const address = try std.Io.net.IpAddress.parseLiteral(value);
                 if (!address.eql(&server.address.?)) return error.UnexpectedReply;
             },
-            3, 4, 5, 6, 8 => _ = try std.fmt.parseInt(u64, value, 10),
+            3, 4, 5 => _ = try std.fmt.parseInt(u64, value, 10),
+            6 => if (try std.fmt.parseInt(u32, value, 10) != db_index) return error.UnexpectedDatabase,
+            8 => if (try std.fmt.parseInt(u8, value, 10) != version) return error.UnexpectedProtocol,
             11 => counts.net_in = try std.fmt.parseInt(u64, value, 10),
             12 => counts.net_out = try std.fmt.parseInt(u64, value, 10),
             13 => counts.commands = try std.fmt.parseInt(u64, value, 10),
@@ -128,6 +148,5 @@ fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id
         }
     }
     if (fields.next() != null) return error.UnexpectedReply;
-    try resp_client.sendAndExpect(io, server, fd, ping_request, pong_reply);
     return counts;
 }

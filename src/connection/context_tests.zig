@@ -1,6 +1,7 @@
 const std = @import("std");
 const connection = @import("../connection.zig");
 const TestNetwork = @import("test_network.zig");
+const protocol = @import("../protocol.zig");
 const testing = std.testing;
 
 test "session state exposes current snapshots through a borrowed report provider" {
@@ -13,6 +14,7 @@ test "session state exposes current snapshots through a borrowed report provider
             .record_read = recordRead,
             .record_write = recordWrite,
             .record_dispatch = recordDispatch,
+            .record_db_and_proto = recordDbAndProto,
         };
 
         fn recordRead(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
@@ -28,6 +30,11 @@ test "session state exposes current snapshots through a borrowed report provider
         fn recordDispatch(ptr: *anyopaque, name: []const u8) void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.report.recordDispatch(name);
+        }
+
+        fn recordDbAndProto(ptr: *anyopaque, db_index: u32, resp: protocol.Resp.Version) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.report.recordDbAndProto(db_index, resp);
         }
 
         fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.Snapshot {
@@ -50,13 +57,13 @@ test "session state exposes current snapshots through a borrowed report provider
     network.registration_time = .fromNanoseconds(500);
     const io = network.io();
     var provider: Provider = .{ .report = connection.ConnectionReport.init(io, .fromNanoseconds(100)) };
-    provider.report.recordDbAndProto(7, .resp3);
-    provider.report.recordDispatch("client|info");
     const context: connection.ConnectionContext = .{
         .id = 42,
         .ptr = &provider,
         .vtable = &Provider.vtable,
     };
+    context.recordDbAndProto(7, .resp3);
+    context.recordDispatch("client|info");
     const state = connection.ClientState.initWithConnection(&context);
     var request_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer request_arena.deinit();
