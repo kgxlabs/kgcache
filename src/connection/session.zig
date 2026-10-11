@@ -303,6 +303,7 @@ fn executeErrorResponse(err: anyerror) ?[]const u8 {
         error.WrongNumberArguments => "ERR wrong number of arguments",
         error.DbIndexOutOfRange => "ERR DB index is out of range",
         error.UnsupportedOption => "ERR unsupported option",
+        error.UnsupportedProtocolVersion => "NOPROTO unsupported protocol version",
         error.Syntax => "ERR syntax error",
         error.SaveAlreadyInProgress => "ERR save already in progress",
         error.RewriteAlreadyInProgress => "ERR rewrite already in progress",

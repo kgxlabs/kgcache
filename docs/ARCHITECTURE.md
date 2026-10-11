@@ -26,8 +26,8 @@ name. Their bodies borrow the input buffer; the caller owns their slice table.
 
 Commands return semantic `Reply` values. The connection reads `ClientState.resp`
 after execution and uses its selected vtable to encode the reply. Each client
-starts in RESP2. Both RESP2 and RESP3 encoders are implemented, but network
-negotiation is not available. AOF uses a separate command writer.
+starts in RESP2 and can select RESP2 or RESP3 through HELLO. AOF uses a separate
+command writer.
 
 The TCP server has three layers for client connections:
 

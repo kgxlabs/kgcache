@@ -2,8 +2,8 @@
 
 This reference covers the commands currently implemented by kgcache. Command
 names and subcommand names are case-insensitive. kgcache supports a subset of
-Redis commands over RESP2, but full Redis compatibility is still a development
-goal. For connection behavior and other server limitations, see
+Redis commands over RESP2 and RESP3, but full Redis compatibility is still a
+development goal. For connection behavior and other server limitations, see
 [Current status and compatibility](../README.md#current-status-and-compatibility).
 
 The commands below start with connection and database selection, move through
@@ -27,10 +27,14 @@ Returns the non-null bulk string argument unchanged.
 
 ## `HELLO`
 
-`HELLO`
+`HELLO [2|3]`
 
-Returns seven ordered metadata fields for the requesting connection as a flat
-key/value array in RESP2, without changing its database or protocol.
+Returns seven ordered metadata fields for the requesting connection. New
+connections start in RESP2. `HELLO 2` selects RESP2 and returns a flat key/value
+array. `HELLO 3` selects RESP3 and returns a map. Bare `HELLO` reports the current
+mode without changing it. The selected mode applies to HELLO's own reply and
+subsequent commands, including commands in the same pipeline. HELLO preserves
+the selected database.
 
 | Field | Value |
 | --- | --- |
@@ -42,9 +46,11 @@ key/value array in RESP2, without changing its database or protocol.
 | `role` | `master` |
 | `modules` | An empty array |
 
-IDs may restart after a server restart. Explicit protocol versions and
-`AUTH`/`SETNAME` options currently return `ERR unsupported option` and leave
-the connection usable. TCP sessions currently use RESP2.
+IDs may restart after a server restart. Unsupported integer versions return
+`NOPROTO unsupported protocol version`. Invalid or out-of-range integers return
+`ERR malformed command request`. Additional arguments, including `AUTH` and
+`SETNAME` options, return `ERR unsupported option`. Rejected requests preserve
+the current mode and leave the connection usable.
 
 `COMMAND INFO HELLO` reports arity `-1`, the `fast` flag, the `@connection`
 and `@fast` categories, and no keys.
