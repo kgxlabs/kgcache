@@ -1,7 +1,9 @@
 const std = @import("std");
 const BgRewriteAof = @import("bgrewriteaof.zig");
 const BgSave = @import("bgsave.zig");
-const Client = @import("client.zig");
+const ClientInfo = @import("client/client_info.zig");
+const ClientSetinfo = @import("client/client_setinfo.zig");
+const ClientList = @import("client/client_list.zig");
 const Command = @import("command.zig");
 const DBSize = @import("dbsize.zig");
 const Del = @import("del.zig");
@@ -116,7 +118,7 @@ const definitions = [_]Definition{
                 .flags = &.{.fast},
                 .categories = &.{ .connection, .fast },
                 .keys = .none,
-                .factory = Client.init,
+                .factory = ClientInfo.init,
             },
             .{
                 .name = "client|setinfo",
@@ -125,7 +127,7 @@ const definitions = [_]Definition{
                 .flags = &.{},
                 .categories = &.{ .connection, .slow },
                 .keys = .none,
-                .factory = Client.init,
+                .factory = ClientSetinfo.init,
             },
             .{
                 .name = "client|list",
@@ -134,7 +136,7 @@ const definitions = [_]Definition{
                 .flags = &.{.admin},
                 .categories = &.{ .admin, .connection, .slow, .dangerous },
                 .keys = .none,
-                .factory = Client.init,
+                .factory = ClientList.init,
             },
         },
     },
@@ -260,7 +262,7 @@ fn validateDefinitions(comptime entries: []const Definition) void {
         validateName(definition);
         validateArity(definition);
         validateKind(definition, false);
-        validateKeys(definition);
+        validateKeys(definition, false);
         inline for (definition.subcommands, 0..) |subcommand, sub_index| {
             const prefix = definition.name ++ "|";
             if (!std.mem.startsWith(u8, subcommand.name, prefix)) invalidDefinition(subcommand.name, "must include its parent command name");
@@ -269,7 +271,7 @@ fn validateDefinitions(comptime entries: []const Definition) void {
             validateName(leaf);
             validateArity(subcommand);
             validateKind(subcommand, true);
-            validateKeys(subcommand);
+            validateKeys(subcommand, true);
             if (subcommand.subcommands.len != 0) invalidDefinition(subcommand.name, "nested subcommands are unsupported");
             inline for (definition.subcommands, 0..) |other, other_index| {
                 if (other_index > sub_index and std.ascii.eqlIgnoreCase(subcommand.name, other.name)) {
@@ -330,14 +332,20 @@ fn validateArity(comptime definition: Definition) void {
     }
 }
 
-fn validateKeys(comptime definition: Definition) void {
+fn validateKeys(comptime definition: Definition, comptime is_child: bool) void {
     switch (definition.keys) {
         .none => {},
         .range => |key_range| {
             if (key_range.step == 0) invalidDefinition(definition.name, "key step must be greater than zero");
+
             if (key_range.flags.len == 0) invalidDefinition(definition.name, "key flags must not be empty");
+
             if (key_range.first >= definition.arity.minimum) {
                 invalidDefinition(definition.name, "first key index is outside required arguments");
+            }
+
+            if (is_child and key_range.first == 0) {
+                invalidDefinition(definition.name, "child key range must not include the selector at index zero");
             }
 
             switch (key_range.last) {
