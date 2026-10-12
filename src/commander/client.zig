@@ -7,20 +7,22 @@ const Client = @This();
 
 allocator: std.mem.Allocator,
 arguments: []const []const u8,
-subcommand: enum { info, setinfo },
+subcommand: enum { info, list, setinfo },
 
 pub fn init(allocator: std.mem.Allocator, arguments: []const []const u8) Commander.Error!Commander {
     if (arguments.len == 0) return error.WrongNumberArguments;
 
     const subcommand: @FieldType(Client, "subcommand") = if (std.ascii.eqlIgnoreCase(arguments[0], "info"))
         .info
+    else if (std.ascii.eqlIgnoreCase(arguments[0], "list"))
+        .list
     else if (std.ascii.eqlIgnoreCase(arguments[0], "setinfo"))
         .setinfo
     else
         return error.UnsupportedOption;
 
     const arity: usize = switch (subcommand) {
-        .info => 1,
+        .info, .list => 1,
         .setinfo => 3,
     };
 
@@ -31,6 +33,7 @@ pub fn init(allocator: std.mem.Allocator, arguments: []const []const u8) Command
 
     return .{ .ptr = self, .vtable = &vtable, .canonical_name = switch (subcommand) {
         .info => "client|info",
+        .list => "client|list",
         .setinfo => "client|setinfo",
     } };
 }
@@ -40,8 +43,7 @@ const vtable: Commander.VTable = .{ .execute = execute, .deinit = deinit };
 fn execute(ptr: *anyopaque, io: std.Io, _: *store.Store, state: *Commander.ClientState) anyerror!Commander.Result {
     const self: *Client = @ptrCast(@alignCast(ptr));
 
-    // using simple if else because we only have two subcommands `info` and `setinfo`
-    // TODO: Refactor this with proper Subcommand design. tracked here: https://github.com/kgxlabs/kgcache/issues/182
+    // Shared registry subcommand dispatch is deferred to issue #182.
     if (self.subcommand == .setinfo) {
         const attribute: connection.ConnectionReport.LibraryAttribute = if (std.ascii.eqlIgnoreCase(self.arguments[1], "lib-name"))
             .lib_name
@@ -69,6 +71,22 @@ fn execute(ptr: *anyopaque, io: std.Io, _: *store.Store, state: *Commander.Clien
     errdefer {
         arena.deinit();
         self.allocator.destroy(arena);
+    }
+
+    if (self.subcommand == .list) {
+        var snapshots = try context.snapshotLive(io, arena.allocator());
+        defer snapshots.deinit();
+        std.mem.sort(connection.ConnectionContext.Snapshot, snapshots.items, {}, struct {
+            fn lessThan(_: void, left: connection.ConnectionContext.Snapshot, right: connection.ConnectionContext.Snapshot) bool {
+                return left.id < right.id;
+            }
+        }.lessThan);
+
+        var text: std.ArrayList(u8) = .empty;
+        for (snapshots.items) |snapshot| {
+            try text.appendSlice(arena.allocator(), try formatReport(arena.allocator(), snapshot));
+        }
+        return Commander.Result.inArena(.{ .verbatim = try text.toOwnedSlice(arena.allocator()) }, arena);
     }
 
     var snapshot = try context.snapshotCurrent(io, arena.allocator());

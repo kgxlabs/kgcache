@@ -44,7 +44,7 @@ test "command handlers borrow their client's connection identity" {
 }
 
 test "reject unknown command" {
-    for ([_][]const u8{ "UNKNOWN", "" }) |name| {
+    for ([_][]const u8{ "UNKNOWN", "AUTH", "" }) |name| {
         try std.testing.expectError(error.UnknownCommand, init(std.testing.allocator, .{ .name = name, .arguments = &.{} }));
     }
 }
@@ -484,7 +484,7 @@ test "COMMAND reports CLIENT and supported subcommand metadata" {
     try expectBulkArray(fields[6], &.{ "@connection", "@slow" });
     for (fields[7..9]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
     const subcommands = try expectArray(fields[9]);
-    try testing.expectEqual(2, subcommands.len);
+    try testing.expectEqual(3, subcommands.len);
     const info = try expectArray(subcommands[0]);
     try expectBulk(info[0], "client|info");
     try testing.expectEqual(@as(i64, 2), info[1].integer);
@@ -495,16 +495,22 @@ test "COMMAND reports CLIENT and supported subcommand metadata" {
     try testing.expectEqual(@as(i64, 4), setinfo[1].integer);
     try expectBulkArray(setinfo[2], &.{});
     try expectBulkArray(setinfo[6], &.{ "@connection", "@slow" });
+    const list = try expectArray(subcommands[2]);
+    try expectBulk(list[0], "client|list");
+    try testing.expectEqual(@as(i64, 2), list[1].integer);
+    try expectBulkArray(list[2], &.{"admin"});
+    try expectBulkArray(list[6], &.{ "@admin", "@connection", "@slow", "@dangerous" });
     for (subcommands) |subcommand| {
         const child = try expectArray(subcommand);
         for (child[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
         for (child[7..10]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
     }
-    var direct = try executeWithMockStore("COMMAND", &.{ "INFO", "cLiEnT|sEtInFo", "client|list" }, &mock);
+    var direct = try executeWithMockStore("COMMAND", &.{ "INFO", "cLiEnT|sEtInFo", "cLiEnT|lIsT", "client|missing" }, &mock);
     defer direct.deinit();
     const direct_commands = try expectArray(direct.value);
     try expectBulk((try expectArray(direct_commands[0]))[0], "client|setinfo");
-    try testing.expect(direct_commands[1] == .null_value);
+    try expectBulk((try expectArray(direct_commands[1]))[0], "client|list");
+    try testing.expect(direct_commands[2] == .null_value);
 }
 
 test "COMMAND GETKEYS extracts keys without changing them" {

@@ -78,11 +78,12 @@ bytes and excludes its current reply bytes. Successful positive reads and writes
 update activity; idle measures the time since the last such transfer. Byte and
 command totals saturate at `18446744073709551615` (`maxInt(u64)`).
 
-`cmd` is the canonical registered handler name, such as `get`, `hello`, or
-`client|info`, or `client|setinfo`. `tot-cmds` increments immediately before each
-successfully bound handler call, including calls that return an error. Unknown commands, binding
-arity errors, unsupported CLIENT forms, incomplete input, and malformed frames
-do not change the count or last command. INFO includes its own dispatch.
+`cmd` is the canonical registered handler name, such as `get`, `hello`,
+`client|info`, `client|list`, or `client|setinfo`. `tot-cmds` increments immediately
+before each successfully bound handler call, including calls that return an
+error. Unknown commands, binding arity errors, unsupported CLIENT forms,
+incomplete input, and malformed frames do not change the count or last command.
+INFO includes its own dispatch.
 
 `db` and `resp` report the selected database and protocol, initially `0` and `2`.
 The session publishes their current values after handler execution and before
@@ -90,6 +91,27 @@ reply output, including expected command errors. A valid HELLO or SELECT is
 visible to the next INFO in the same pipeline. Rejected changes preserve the
 previous selection. Library labels start empty and reflect successful SETINFO
 calls on this connection.
+
+`CLIENT LIST`
+
+Returns one text payload containing a row for each live connection, including
+the caller, sorted by ascending connection ID. Each row uses INFO's 22 fields
+and trailing LF, with the same RESP2 bulk and RESP3 `txt:` verbatim encoding.
+LIST takes no filters. Additional arguments, including ID and TYPE filters,
+return `ERR wrong number of arguments` before dispatch.
+
+LIST includes registered connections until their worker finishes. Finished
+workers are excluded even before cleanup removes their records. A connection
+captured before it closes can still appear in that response. Each row is
+consistent at its own capture time; the rows are not one simultaneous snapshot
+of all connections. Owned copies preserve row data through disconnects and
+library-label replacement. All collection and report locks are released before
+sorting, formatting, or sending the reply.
+
+The caller's row includes LIST's own dispatch as `cmd=client|list` and in
+`tot-cmds`. Its incoming bytes are counted, and its current reply bytes are
+excluded. Other rows contain their most recently published database, protocol,
+labels, command name, and counters.
 
 `CLIENT SETINFO LIB-NAME <value>`
 
@@ -109,14 +131,16 @@ SETINFO takes exactly an attribute and a value. Wrong arity is rejected before
 dispatch and does not change `cmd` or `tot-cmds`. Attribute and content errors
 occur in the recognized handler and count as `client|setinfo` dispatches.
 
-Bare `CLIENT` and extra INFO arguments return `ERR wrong number of arguments`.
-Unknown subcommands, including `LIST`, `SETNAME`, `GETNAME`, `ID`, and `TRACKING`,
+Bare `CLIENT` and extra INFO/LIST arguments return `ERR wrong number of arguments`.
+Unknown subcommands, including `SETNAME`, `GETNAME`, `ID`, and `TRACKING`,
 return `ERR unsupported option`. These errors leave the connection usable.
 `COMMAND INFO CLIENT` reports container arity `-2`, no flags or keys, the
 `@connection` and `@slow` categories, and its supported subcommand metadata.
 `COMMAND INFO client|info` reports arity `2`, the `fast` flag, and `@connection`
 and `@fast`. `COMMAND INFO client|setinfo` reports arity `4`, no flags or keys,
 and `@connection` and `@slow`.
+`COMMAND INFO client|list` reports arity `2`, the `admin` flag, no keys, and
+`@admin`, `@connection`, `@slow`, and `@dangerous`.
 
 ## `SELECT`
 
@@ -217,8 +241,8 @@ repeated requests of that kind coalesce into it. With
 Without a subcommand, returns registry metadata for every supported command.
 Each RESP2 metadata entry has ten fields: name, arity, flags, first key, last
 key, key step, ACL categories, tips, key specifications, and subcommands. Tips
-are empty. CLIENT includes INFO and SETINFO subcommand details, also available
-by their case-insensitive full names through COMMAND INFO.
+are empty. CLIENT includes INFO, LIST, and SETINFO subcommand details, also
+available by their case-insensitive full names through COMMAND INFO.
 
 | Subcommand | Behavior |
 | --- | --- |

@@ -29,6 +29,7 @@ pub const ClientWorker = struct {
         finished,
     };
 
+    manager: *ConnectionManager,
     stream: std.Io.net.Stream,
     context: ConnectionContext,
     peer_endpoint: std.Io.net.IpAddress,
@@ -45,6 +46,7 @@ pub const ClientWorker = struct {
 
     const context_vtable: ConnectionContext.VTable = .{
         .snapshot_current = snapshotCurrent,
+        .snapshot_live = ClientWorker.snapshotLive,
         .record_read = recordRead,
         .record_write = recordWrite,
         .record_dispatch = recordDispatch,
@@ -90,6 +92,11 @@ pub const ClientWorker = struct {
             .sampled_at = sampled_at,
             .report = try self.report.snapshot(allocator),
         };
+    }
+
+    fn snapshotLive(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
+        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
+        return self.manager.snapshotLive(io, allocator);
     }
 };
 
@@ -163,6 +170,7 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 
     const registered_at = std.Io.Clock.awake.now(self._io);
     worker.* = .{
+        .manager = self,
         .stream = stream,
         .context = worker.connectionContext(self._next_connection_id),
         .peer_endpoint = stream.socket.address,
@@ -179,6 +187,30 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 
     worker.thread = try self._spawn_worker(self, worker);
     worker.lifecycle = .running;
+}
+
+pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
+    // Membership and record lifetime stay protected until every row is copied.
+    var tx = self._lock.beginUncancelable();
+    defer tx.end();
+
+    var count: usize = 0;
+    for (self._workers.items) |worker| {
+        if (worker.lifecycle == .running or worker.lifecycle == .stopping) count += 1;
+    }
+    const items = try allocator.alloc(ConnectionContext.Snapshot, count);
+    var captured: usize = 0;
+    errdefer {
+        for (items[0..captured]) |*snapshot| snapshot.deinit();
+        allocator.free(items);
+    }
+
+    for (self._workers.items) |worker| {
+        if (worker.lifecycle != .running and worker.lifecycle != .stopping) continue;
+        items[captured] = try worker.context.snapshotCurrent(io, allocator);
+        captured += 1;
+    }
+    return .{ .items = items, .allocator = allocator };
 }
 
 pub fn reapFinished(self: *ConnectionManager) !void {
@@ -310,6 +342,9 @@ test "thread spawn failure consumes its ID and closes the stream once" {
     try testing.expectError(error.ThreadQuotaExceeded, manager.start(TestNetwork.stream(1)));
     try testing.expectEqual(1, network.close_calls.load(.acquire));
     try testing.expectEqual(0, manager._workers.items.len);
+    var unpublished = try manager.snapshotLive(manager._io, testing.allocator);
+    defer unpublished.deinit();
+    try testing.expectEqual(0, unpublished.items.len);
 
     try manager.start(TestNetwork.stream(2));
     network.all_reads_started.waitUncancelable(testing.io);

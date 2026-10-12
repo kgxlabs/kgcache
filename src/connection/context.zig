@@ -21,12 +21,24 @@ pub const Snapshot = struct {
     }
 };
 
+pub const LiveSnapshots = struct {
+    items: []Snapshot,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *LiveSnapshots) void {
+        for (self.items) |*snapshot| snapshot.deinit();
+        self.allocator.free(self.items);
+        self.* = undefined;
+    }
+};
+
 id: u64,
 ptr: *anyopaque,
 vtable: *const VTable,
 
 pub const VTable = struct {
     snapshot_current: *const fn (*anyopaque, std.Io, std.mem.Allocator) Error!Snapshot,
+    snapshot_live: *const fn (*anyopaque, std.Io, std.mem.Allocator) Error!LiveSnapshots,
     record_read: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
     record_write: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
     record_dispatch: *const fn (*anyopaque, []const u8) void,
@@ -36,6 +48,10 @@ pub const VTable = struct {
 
 pub fn snapshotCurrent(self: *const ConnectionContext, io: std.Io, allocator: std.mem.Allocator) Error!Snapshot {
     return self.vtable.snapshot_current(self.ptr, io, allocator);
+}
+
+pub fn snapshotLive(self: *const ConnectionContext, io: std.Io, allocator: std.mem.Allocator) Error!LiveSnapshots {
+    return self.vtable.snapshot_live(self.ptr, io, allocator);
 }
 
 pub fn recordRead(self: *const ConnectionContext, io: std.Io, byte_count: u64) void {

@@ -50,6 +50,7 @@ pub fn identityContext(id: u64) ConnectionContext {
         var marker: u8 = 0;
         const context_vtable: ConnectionContext.VTable = .{
             .snapshot_current = snapshotCurrent,
+            .snapshot_live = snapshotLive,
             .record_read = recordTransfer,
             .record_write = recordTransfer,
             .record_dispatch = recordDispatch,
@@ -58,6 +59,10 @@ pub fn identityContext(id: u64) ConnectionContext {
         };
 
         fn snapshotCurrent(_: *anyopaque, _: std.Io, _: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
+            unreachable;
+        }
+
+        fn snapshotLive(_: *anyopaque, _: std.Io, _: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
             unreachable;
         }
 

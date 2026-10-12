@@ -33,6 +33,15 @@ COMMAND's SETINFO metadata. Unit tests also cover replacement/snapshot allocatio
 failures, input-buffer reuse, concurrent snapshots, partial output failure,
 worker startup failure, reaping, and shutdown cleanup.
 
+CLIENT LIST cases verify the same 22 fields in RESP2 and RESP3, caller inclusion,
+ascending IDs, independent database/protocol/labels, replacement and clearing,
+pipeline visibility, rejected filters without dispatch, disconnect exclusion,
+and new IDs after reconnect. Manager tests copy reports during concurrent label
+updates and worker registration/reaping, inject allocation failures, and keep
+owned rows after manager destruction. A real socket test leaves a 1 MiB LIST
+reply unread, verifies another client still answers PING and the collection lock
+is free, and requires shutdown to join the blocked writer within five seconds.
+
 The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
 and `appendfilename` with a real process. They check the first and last valid
 database indices and reject the next index. Snapshot cases call `SAVE`, then

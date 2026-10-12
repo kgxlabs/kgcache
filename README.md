@@ -113,6 +113,7 @@ zig build test
 ## Current status and compatibility
 
 - TCP sessions start in RESP2. `HELLO 2` and `HELLO 3` select the connection's reply mode and report server and connection metadata. Bare `HELLO` reports the current mode.
+- `CLIENT INFO` reports the caller's connection, and filter-free `CLIENT LIST` reports live connections sorted by ID. Both use the documented 22-field subset. `CLIENT SETINFO` retains library labels for each connection. See [CLIENT commands](docs/COMMAND.md#client).
 - Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, or transactions.
 - Complete requests are processed in order, including requests split across reads. The input buffer starts at 1 KiB by default and grows as needed up to 1 MiB. `connection-buffer-size` sets the initial capacity, clamped to that cap.
 - Each encoded request is limited to 1 MiB and 1,024 array elements, including the command name. Limits apply per command, so a pipeline can exceed them overall. Oversized declared sizes or counts receive a protocol error without waiting for the remaining payload, then the connection closes. EOF with a valid unfinished request closes quietly without executing it. See [TCP request limits](docs/CONFIGURATION.md#tcp-request-limits).

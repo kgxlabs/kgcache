@@ -16,6 +16,7 @@ const Provider = struct {
     library_version: [5]u8 = "1.2.3".*,
     calls: usize = 0,
     label_calls: usize = 0,
+    live_ids: []const u64 = &.{},
 
     fn init() Provider {
         return .{ .report = connection.ConnectionReport.init(testing.io, testing.allocator, .fromNanoseconds(10_500_000_000)) };
@@ -38,6 +39,7 @@ const Provider = struct {
 
     const vtable: connection.ConnectionContext.VTable = .{
         .snapshot_current = snapshotCurrent,
+        .snapshot_live = snapshotLive,
         .record_read = recordRead,
         .record_write = recordWrite,
         .record_dispatch = recordDispatch,
@@ -84,6 +86,22 @@ const Provider = struct {
             .report = try self.report.snapshot(allocator),
         };
     }
+
+    fn snapshotLive(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.LiveSnapshots {
+        const self: *Provider = @ptrCast(@alignCast(ptr));
+        const items = try allocator.alloc(connection.ConnectionContext.Snapshot, self.live_ids.len);
+        var count: usize = 0;
+        errdefer {
+            for (items[0..count]) |*snapshot| snapshot.deinit();
+            allocator.free(items);
+        }
+        for (self.live_ids, 0..) |id, index| {
+            items[index] = try snapshotCurrent(ptr, io, allocator);
+            items[index].id = id;
+            count += 1;
+        }
+        return .{ .items = items, .allocator = allocator };
+    }
 };
 
 const expected_row = "id=42 addr=127.0.0.1:40000 laddr=127.0.0.1:6379 fd=7 age=120 idle=3 db=7 cmd=get resp=3 " ++
@@ -98,13 +116,15 @@ test "CLIENT resolves supported subcommands and exact arity before allocation" {
         .{ .arguments = &.{""}, .err = error.UnsupportedOption },
         .{ .arguments = &.{"UNKNOWN"}, .err = error.UnsupportedOption },
         .{ .arguments = &.{ "UNKNOWN", "extra" }, .err = error.UnsupportedOption },
-        .{ .arguments = &.{"lIsT"}, .err = error.UnsupportedOption },
-        .{ .arguments = &.{ "LIST", "ID", "42" }, .err = error.UnsupportedOption },
+        .{ .arguments = &.{ "lIsT", "extra" }, .err = error.WrongNumberArguments },
+        .{ .arguments = &.{ "LIST", "ID", "42" }, .err = error.WrongNumberArguments },
+        .{ .arguments = &.{ "LIST", "TYPE", "NORMAL" }, .err = error.WrongNumberArguments },
         .{ .arguments = &.{"SETINFO"}, .err = error.WrongNumberArguments },
         .{ .arguments = &.{ "setinfo", "LIB-NAME" }, .err = error.WrongNumberArguments },
         .{ .arguments = &.{ "setinfo", "LIB-NAME", "client", "extra" }, .err = error.WrongNumberArguments },
         .{ .arguments = &.{ "setinfo", "unknown" }, .err = error.WrongNumberArguments },
         .{ .arguments = &.{ "SETNAME", "name" }, .err = error.UnsupportedOption },
+        .{ .arguments = &.{ "TRACKING", "ON" }, .err = error.UnsupportedOption },
         .{ .arguments = &.{"ID"}, .err = error.UnsupportedOption },
         .{ .arguments = &.{"INFO\x00"}, .err = error.UnsupportedOption },
     };
@@ -282,4 +302,93 @@ test "report formatting brackets IPv6 and clamps or truncates sampled durations"
     var earlier = try command.execute(testing.io, &unused_store, &state);
     defer earlier.deinit();
     try testing.expectEqualStrings(result.value.verbatim, earlier.value.verbatim);
+}
+
+test "CLIENT LIST sorts complete owned rows and encodes empty and populated lists in both protocols" {
+    for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |resp| {
+        for ([_][]const u64{ &.{}, &.{42}, &.{ 99, 42, 7 } }) |ids| {
+            var provider = Provider.init();
+            provider.live_ids = ids;
+            const context = provider.context();
+            var state = connection.ClientState.initWithConnection(&context);
+            state.db_index = 2;
+            state.resp = resp;
+            var unused_store: @import("../store.zig").Store = undefined;
+            const command = try commander.init(testing.allocator, .{ .name = "cLiEnT", .arguments = &.{"lIsT"} });
+            try testing.expectEqualStrings("client|list", command.canonical_name);
+            var result = command.execute(testing.io, &unused_store, &state) catch |err| {
+                command.deinit();
+                return err;
+            };
+            command.deinit();
+            defer result.deinit();
+
+            @memset(&provider.command, 'x');
+            @memset(&provider.library_name, 'x');
+            @memset(&provider.library_version, 'x');
+            try testing.expectEqual(ids.len, provider.calls);
+            try testing.expectEqual(2, state.db_index);
+            try testing.expectEqual(resp, state.resp);
+            try testing.expect(result.owned_arena != null);
+            try testing.expect(result.value == .verbatim);
+
+            var expected: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer expected.deinit();
+            const sorted: []const u64 = switch (ids.len) {
+                0 => &.{},
+                1 => &.{42},
+                else => &.{ 7, 42, 99 },
+            };
+            for (sorted) |id| {
+                try expected.writer.print("id={d}{s}", .{ id, expected_row["id=42".len..] });
+            }
+            try testing.expectEqualStrings(expected.written(), result.value.verbatim);
+
+            var small_buffer: [1]u8 = undefined;
+            var failing_writer = std.Io.Writer.fixed(&small_buffer);
+            try testing.expectError(error.WriteFailed, resp.writeReply(&failing_writer, result.value));
+            var wire: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer wire.deinit();
+            try resp.writeReply(&wire.writer, result.value);
+            var expected_wire: std.Io.Writer.Allocating = .init(testing.allocator);
+            defer expected_wire.deinit();
+            if (resp.version() == .resp2) {
+                try expected_wire.writer.print("${d}\r\n{s}\r\n", .{ expected.written().len, expected.written() });
+            } else {
+                try expected_wire.writer.print("={d}\r\ntxt:{s}\r\n", .{ expected.written().len + 4, expected.written() });
+            }
+            try testing.expectEqualStrings(expected_wire.written(), wire.written());
+            var tx = provider.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
+            tx.end();
+        }
+    }
+}
+
+test "CLIENT LIST releases partial snapshots and reply owners on every allocation failure" {
+    try testing.checkAllAllocationFailures(testing.allocator, listAllocation, .{});
+}
+
+fn listAllocation(allocator: std.mem.Allocator) !void {
+    var provider = Provider.init();
+    provider.live_ids = &.{ 99, 42, 7 };
+    const context = provider.context();
+    var state = connection.ClientState.initWithConnection(&context);
+    defer {
+        var tx = provider.report._lock.tryBegin() orelse unreachable;
+        tx.end();
+    }
+    var unused_store: @import("../store.zig").Store = undefined;
+    const command = try commander.init(allocator, .{ .name = "CLIENT", .arguments = &.{"LIST"} });
+    defer command.deinit();
+    var result = try command.execute(testing.io, &unused_store, &state);
+    defer result.deinit();
+    try testing.expect(std.mem.startsWith(u8, result.value.verbatim, "id=7 "));
+}
+
+test "CLIENT LIST requires live snapshot access" {
+    var unused_store: @import("../store.zig").Store = undefined;
+    var state = connection.ClientState.init();
+    const command = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{"LIST"} });
+    defer command.deinit();
+    try testing.expectError(error.MissingConnectionContext, command.execute(testing.io, &unused_store, &state));
 }

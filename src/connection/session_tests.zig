@@ -177,6 +177,7 @@ const TestConnectionIo = struct {
 fn initTestWorker(worker: *ClientWorker, registered_at: std.Io.Timestamp) void {
     const peer: std.Io.net.IpAddress = .{ .ip4 = .loopback(40000) };
     worker.* = .{
+        .manager = undefined,
         .stream = .{ .socket = .{ .handle = 1, .address = peer } },
         .context = worker.connectionContext(1),
         .peer_endpoint = peer,
@@ -358,7 +359,7 @@ test "rejected bindings and undecoded input preserve the previous dispatch" {
         .{ .request = "*1\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$1\r\nx\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
-        .{ .request = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*1\r\n$4\r\nPI", .response = "" },
         .{ .request = "*1\r\n:42\r\n", .response = "-ERR protocol error: invalid RESP type\r\n" },
@@ -734,7 +735,7 @@ test "argument count errors use ERR for every command and allow another request"
 test "unsupported CLIENT forms use mapped errors and keep the session usable" {
     const testing = std.testing;
     const requests = [_][]const u8{
-        "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n",
+        "*2\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n",
         "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nUNKNOWN\r\n$4\r\ntest\r\n",
         "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n",
     };

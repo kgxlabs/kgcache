@@ -95,6 +95,14 @@ const definitions = [_]Definition{
                 .keys = .none,
                 .factory = Client.init,
             },
+            .{
+                .name = "client|list",
+                .arity = Arity.exact(1),
+                .flags = &.{.admin},
+                .categories = &.{ .admin, .connection, .slow, .dangerous },
+                .keys = .none,
+                .factory = Client.init,
+            },
         },
     },
     .{

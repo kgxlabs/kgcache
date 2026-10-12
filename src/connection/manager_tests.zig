@@ -6,9 +6,284 @@ const ConnectionManager = @import("../connection.zig").ConnectionManager;
 const ClientWorker = ConnectionManager.ClientWorker;
 const socket_metadata = @import("socket_metadata.zig");
 
+test "live snapshots own identity and reports across label replacement and manager destruction" {
+    const testing = std.testing;
+    const Context = @import("context.zig");
+    var network = TestNetwork.init(testing.io, 2);
+    network.registration_time = .fromNanoseconds(100);
+    var snapshots: Context.LiveSnapshots = captured: {
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+        defer manager.deinit() catch unreachable;
+        try manager.start(TestNetwork.stream(7));
+        try manager.start(TestNetwork.stream(8));
+        network.all_reads_started.waitUncancelable(testing.io);
+        const first = manager._workers.items[0];
+        const second = manager._workers.items[1];
+        first.context.recordDbAndProto(2, .resp3);
+        first.context.recordDispatch("client|list");
+        try first.context.setLibraryInfo(.lib_name, "First");
+        try second.context.setLibraryInfo(.lib_name, "Second");
+        try second.context.setLibraryInfo(.lib_ver, "V2");
+        var owned = try first.context.snapshotLive(manager._io, testing.allocator);
+        errdefer owned.deinit();
+        try testing.expectEqual(2, owned.items.len);
+        var tx = manager._lock.tryBegin() orelse return error.ManagerLockStillHeld;
+        tx.end();
+        for (manager._workers.items) |worker| {
+            tx = worker.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
+            tx.end();
+        }
+        try first.context.setLibraryInfo(.lib_name, "Replaced");
+        try second.context.setLibraryInfo(.lib_name, "");
+        break :captured owned;
+    };
+    defer snapshots.deinit();
+    const first = snapshots.items[0];
+    const second = snapshots.items[1];
+    try testing.expectEqual(1, first.id);
+    try testing.expectEqual(2, second.id);
+    const first_peer: std.Io.net.IpAddress = .{ .ip4 = .loopback(10007) };
+    const second_peer: std.Io.net.IpAddress = .{ .ip4 = .loopback(10008) };
+    try testing.expect(first.peer_endpoint.eql(&first_peer));
+    try testing.expect(second.peer_endpoint.eql(&second_peer));
+    try testing.expect(first.local_endpoint.eql(&network.local_endpoint_value));
+    try testing.expectEqual(7, first.descriptor);
+    try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(100), first.registered_at);
+    try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(100), first.sampled_at);
+    try testing.expectEqual(2, first.report.values.db_index);
+    try testing.expectEqual(@import("../protocol.zig").Resp.Version.resp3, first.report.values.resp);
+    try testing.expectEqualStrings("client|list", first.report.values.last_command);
+    try testing.expectEqual(1, first.report.values.total_cmds);
+    try testing.expectEqualStrings("First", first.report.values.lib_name);
+    try testing.expectEqualStrings("Second", second.report.values.lib_name);
+    try testing.expectEqualStrings("V2", second.report.values.lib_ver);
+    try testing.expectEqual(2, network.close_calls.load(.acquire));
+}
+
+test "live snapshots exclude finished records before and after reaping" {
+    const testing = std.testing;
+    var network = TestNetwork.init(testing.io, 1);
+    network.immediate_eof_handle = 7;
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    defer manager.deinit() catch unreachable;
+    try manager.start(TestNetwork.stream(7));
+    try manager.start(TestNetwork.stream(8));
+    network.immediate_closed.waitUncancelable(testing.io);
+    network.all_reads_started.waitUncancelable(testing.io);
+    const caller = manager._workers.items[1];
+    var before = try caller.context.snapshotLive(manager._io, testing.allocator);
+    defer before.deinit();
+    try testing.expectEqual(1, before.items.len);
+    try testing.expectEqual(2, before.items[0].id);
+    try testing.expectEqual(2, manager._workers.items.len);
+    try manager.reapFinished();
+    var after = try caller.context.snapshotLive(manager._io, testing.allocator);
+    defer after.deinit();
+    try testing.expectEqual(1, after.items.len);
+    try testing.expectEqual(2, after.items[0].id);
+    try testing.expectEqual(1, manager._workers.items.len);
+}
+
+test "live snapshots release partial rows and all locks on every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, liveAllocation, .{});
+}
+
+fn liveAllocation(allocator: std.mem.Allocator) !void {
+    const testing = std.testing;
+    var network = TestNetwork.init(testing.io, 2);
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    defer manager.deinit() catch unreachable;
+    try manager.start(TestNetwork.stream(7));
+    try manager.start(TestNetwork.stream(8));
+    network.all_reads_started.waitUncancelable(testing.io);
+    try manager._workers.items[0].context.setLibraryInfo(.lib_name, "First");
+    try manager._workers.items[1].context.setLibraryInfo(.lib_name, "Second");
+    defer {
+        var tx = manager._lock.tryBegin() orelse unreachable;
+        tx.end();
+        for (manager._workers.items) |worker| {
+            tx = worker.report._lock.tryBegin() orelse unreachable;
+            tx.end();
+        }
+    }
+    var snapshots = try manager._workers.items[0].context.snapshotLive(manager._io, allocator);
+    defer snapshots.deinit();
+    try testing.expectEqual(2, snapshots.items.len);
+}
+
+test "live snapshot copies remain coherent while labels and manager membership change" {
+    const testing = std.testing;
+    const Churn = struct {
+        manager: *ConnectionManager,
+        caller: *ClientWorker,
+        done: std.atomic.Value(bool) = .init(false),
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            for (0..32) |index| {
+                self.caller.context.recordDbAndProto(if (index % 2 == 0) 7 else 8, if (index % 2 == 0) .resp3 else .resp2);
+                self.caller.context.setLibraryInfo(.lib_name, if (index % 2 == 0) "A" else "LongerLibrary") catch |err| {
+                    self.failure = err;
+                    return;
+                };
+                self.manager.start(TestNetwork.stream(7)) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+                self.manager.reapFinished() catch |err| {
+                    self.failure = err;
+                    return;
+                };
+            }
+        }
+    };
+    var network = TestNetwork.init(testing.io, 1);
+    network.immediate_eof_handle = 7;
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    defer manager.deinit() catch unreachable;
+    try manager.start(TestNetwork.stream(8));
+    network.all_reads_started.waitUncancelable(testing.io);
+    const caller = manager._workers.items[0];
+    var churn: Churn = .{ .manager = &manager, .caller = caller };
+    const thread = try std.Thread.spawn(.{}, Churn.run, .{&churn});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var captures: usize = 0;
+    while (!churn.done.load(.acquire) or captures < 32) : (captures += 1) {
+        var snapshots = try caller.context.snapshotLive(manager._io, testing.allocator);
+        defer snapshots.deinit();
+        try testing.expect(snapshots.items.len >= 1);
+        for (snapshots.items) |snapshot| {
+            if (snapshot.id != 1) continue;
+            const values = snapshot.report.values;
+            try testing.expect((values.db_index == 0 and values.resp == .resp2) or
+                (values.db_index == 7 and values.resp == .resp3) or
+                (values.db_index == 8 and values.resp == .resp2));
+            try testing.expect(std.mem.eql(u8, values.lib_name, "") or
+                std.mem.eql(u8, values.lib_name, "A") or
+                std.mem.eql(u8, values.lib_name, "LongerLibrary"));
+        }
+    }
+    thread.join();
+    joined = true;
+    if (churn.failure) |err| return err;
+}
+
 test "connection manager boundary compiles" {
     std.testing.refAllDecls(ConnectionManager);
     std.testing.refAllDecls(ClientWorker);
+}
+
+test "a blocked CLIENT LIST writer releases collection and report locks and joins during shutdown" {
+    const testing = std.testing;
+    const Shutdown = struct {
+        manager: *ConnectionManager,
+        done: std.Io.Event = .unset,
+        result: anyerror!void = error.Unexpected,
+
+        fn run(self: *@This()) void {
+            self.result = self.manager.deinit();
+            self.done.set(testing.io);
+        }
+    };
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var logger = logging.TestLogger.init();
+    var manager = ConnectionManager.init(testing.io, testing.allocator, logger.logger(), &data_store, 128);
+    var stopped = false;
+    defer if (!stopped) manager.deinit() catch {};
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var listener = try address.listen(testing.io, .{ .reuse_address = true });
+    defer listener.deinit(testing.io);
+    const slow = try listener.socket.address.connect(testing.io, .{ .mode = .stream });
+    var slow_open = true;
+    defer if (slow_open) slow.close(testing.io);
+    const capacity: c_int = 4096;
+    try std.posix.setsockopt(slow.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, std.mem.asBytes(&capacity));
+    const accepted = try listener.accept(testing.io);
+    std.posix.setsockopt(accepted.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, std.mem.asBytes(&capacity)) catch |err| {
+        accepted.close(testing.io);
+        return err;
+    };
+    try manager.start(accepted);
+    const caller = manager._workers.items[0];
+    const label = try testing.allocator.alloc(u8, 512 * 1024);
+    defer testing.allocator.free(label);
+    @memset(label, 'x');
+    try caller.context.setLibraryInfo(.lib_name, label);
+    try caller.context.setLibraryInfo(.lib_ver, label);
+
+    var writer = slow.writer(testing.io, &.{});
+    try writer.interface.writeAll("*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n*1\r\n$4\r\nPING\r\n");
+    try writer.interface.flush();
+    const deadline: std.Io.Timeout = .{ .deadline = .fromNow(testing.io, .{ .raw = .fromSeconds(3), .clock = .awake }) };
+    var header: [32]u8 = undefined;
+    var header_len: usize = 0;
+    while (header_len < header.len) {
+        const message = try slow.socket.receiveTimeout(testing.io, header[header_len..][0..1], deadline);
+        if (message.data.len == 0) return error.PrematureReplyEnd;
+        header_len += 1;
+        if (header[header_len - 1] == '\n') break;
+    }
+    try testing.expect(header_len >= 4 and header[0] == '$');
+    const length = try std.fmt.parseInt(usize, header[1 .. header_len - 2], 10);
+    try testing.expect(length > 2 * label.len);
+
+    var tx = manager._lock.tryBegin() orelse return error.ManagerLockStillHeld;
+    tx.end();
+    const report_deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 100 * std.time.ns_per_ms;
+    while (true) {
+        var report_tx = caller.report._lock.tryBegin() orelse {
+            if (std.Io.Clock.awake.now(testing.io).nanoseconds >= report_deadline) return error.ReportLockStillHeld;
+            try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+            continue;
+        };
+        const before = caller.report._values;
+        report_tx.end();
+        try testing.expectEqual(1, before.total_cmds);
+        try testing.expectEqualStrings("client|list", before.last_command);
+        break;
+    }
+
+    const observer = try listener.socket.address.connect(testing.io, .{ .mode = .stream });
+    defer observer.close(testing.io);
+    try manager.start(try listener.accept(testing.io));
+    var observer_writer = observer.writer(testing.io, &.{});
+    try observer_writer.interface.writeAll("*1\r\n$4\r\nPING\r\n");
+    try observer_writer.interface.flush();
+    var pong: [7]u8 = undefined;
+    var received: usize = 0;
+    while (received < pong.len) {
+        const message = try observer.socket.receiveTimeout(testing.io, pong[received..], deadline);
+        if (message.data.len == 0) return error.PrematureReplyEnd;
+        received += message.data.len;
+    }
+    try testing.expectEqualStrings("+PONG\r\n", &pong);
+
+    var shutdown: Shutdown = .{ .manager = &manager };
+    const thread = try std.Thread.spawn(.{}, Shutdown.run, .{&shutdown});
+    const in_time = finished: {
+        shutdown.done.waitTimeout(testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } }) catch {
+            slow.close(testing.io);
+            slow_open = false;
+            break :finished false;
+        };
+        break :finished true;
+    };
+    thread.join();
+    stopped = true;
+    try testing.expect(in_time);
+    try shutdown.result;
+    try testing.expectEqual(0, logger.recordedEvents().len);
 }
 
 test "connection IDs and borrowed contexts stay stable as the collection grows" {

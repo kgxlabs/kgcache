@@ -11,6 +11,7 @@ test "session state exposes current snapshots through a borrowed report provider
 
         const vtable: connection.ConnectionContext.VTable = .{
             .snapshot_current = snapshotCurrent,
+            .snapshot_live = snapshotLive,
             .record_read = recordRead,
             .record_write = recordWrite,
             .record_dispatch = recordDispatch,
@@ -57,6 +58,13 @@ test "session state exposes current snapshots through a borrowed report provider
                 .report = try self.report.snapshot(allocator),
             };
         }
+
+        fn snapshotLive(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.LiveSnapshots {
+            const items = try allocator.alloc(connection.ConnectionContext.Snapshot, 1);
+            errdefer allocator.free(items);
+            items[0] = try snapshotCurrent(ptr, io, allocator);
+            return .{ .items = items, .allocator = allocator };
+        }
     };
 
     var network = TestNetwork.init(testing.io, 0);
@@ -94,4 +102,25 @@ test "session state exposes current snapshots through a borrowed report provider
     try testing.expectEqual(2, network.awake_samples.load(.acquire));
     tx = provider.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
     tx.end();
+}
+
+test "live snapshot access is supplied by the borrowed context provider" {
+    const Context = connection.ConnectionContext;
+    const Provider = struct {
+        calls: usize = 0,
+
+        fn live(ptr: *anyopaque, _: std.Io, allocator: std.mem.Allocator) Context.Error!Context.LiveSnapshots {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            return .{ .items = try allocator.alloc(Context.Snapshot, 0), .allocator = allocator };
+        }
+    };
+    var provider: Provider = .{};
+    var vtable = TestNetwork.identityContext(1).vtable.*;
+    vtable.snapshot_live = Provider.live;
+    const context: Context = .{ .id = 1, .ptr = &provider, .vtable = &vtable };
+    var snapshots = try context.snapshotLive(testing.io, testing.allocator);
+    defer snapshots.deinit();
+    try testing.expectEqual(1, provider.calls);
+    try testing.expectEqual(0, snapshots.items.len);
 }
