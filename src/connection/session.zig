@@ -356,3 +356,7 @@ fn executeErrorResponse(err: anyerror) ?[]const u8 {
         else => null,
     };
 }
+
+test "handler creation failures preserve the previous session dispatch" {
+    try @import("session_tests.zig").checkHandlerCreationFailures(ConnectionWriter, handleCompleteFrame);
+}

@@ -2,6 +2,7 @@ const std = @import("std");
 const support = @import("server_process");
 const resp_client = @import("../harness/resp_client.zig");
 const hello_metadata = @import("hello_metadata.zig");
+const fixtures = @import("protocol_fixtures");
 const info_request = "*2\r\n$6\r\ncLiEnT\r\n$4\r\niNfO\r\n";
 const ping_request = "*1\r\n$4\r\nPING\r\n";
 const pong_reply = "+PONG\r\n";
@@ -77,6 +78,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
                 const response = try std.fmt.bufPrint(&reply_buffer, "{s}+PONG\r\n", .{case.response});
                 try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
                 dispatches += case.dispatches + 1;
+            }
+            for (fixtures.metadata ++ [_]fixtures.Fixture{ fixtures.count, fixtures.list }) |fixture| {
+                const request = try std.fmt.bufPrint(&request_buffer, "{s}{s}", .{ fixture.request, ping_request });
+                const response = try std.fmt.allocPrint(allocator, "{s}{s}", .{ fixture.replyFor(version), pong_reply });
+                defer allocator.free(response);
+                try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
+                dispatches += 2;
             }
             const first = try expectInfo(io, server, client.socket.handle, 1, version, db_index, .{});
             const second = try expectInfo(io, server, client.socket.handle, 1, version, db_index, .{});
