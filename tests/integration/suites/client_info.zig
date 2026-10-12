@@ -2,6 +2,7 @@ const std = @import("std");
 const support = @import("server_process");
 const resp_client = @import("../harness/resp_client.zig");
 const hello_metadata = @import("hello_metadata.zig");
+const fixtures = @import("protocol_fixtures");
 const info_request = "*2\r\n$6\r\ncLiEnT\r\n$4\r\niNfO\r\n";
 const ping_request = "*1\r\n$4\r\nPING\r\n";
 const pong_reply = "+PONG\r\n";
@@ -22,6 +23,17 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
             .{ .request = "*4\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$2\r\nID\r\n$1\r\n1\r\n", .response = "-ERR wrong number of arguments\r\n" },
             .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n", .response = "-ERR wrong number of arguments\r\n" },
+            .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$4\r\nDOCS\r\n", .response = "-ERR unsupported option\r\n" },
+            .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$4\r\nHELP\r\n", .response = "-ERR unsupported option\r\n" },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
+            .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n", .response = "-ERR wrong number of arguments\r\n" },
+            .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n", .response = "-ERR wrong number of arguments\r\n" },
+            .{ .request = "*2\r\n$7\r\ncOmMaNd\r\n$5\r\ncOuNt\r\n", .response = ":13\r\n", .dispatches = 1 },
+            .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$8\r\nFILTERBY\r\n$7\r\nPATTERN\r\n$8\r\ncommand*\r\n", .response = "*1\r\n$7\r\ncommand\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$3\r\nbad\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$13\r\ncommand|count\r\n", .response = "*1\r\n*10\r\n$13\r\ncommand|count\r\n:2\r\n*1\r\n$4\r\nfast\r\n:0\r\n:0\r\n:0\r\n*2\r\n$11\r\n@connection\r\n$5\r\n@fast\r\n*0\r\n*0\r\n*0\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
             .{ .request = "*1\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unknown command\r\n" },
             .{ .request = "*1\r\n$4\r\nAUTH\r\n", .response = "-ERR unknown command\r\n" },
             .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n$4\r\nname\r\n", .response = "-ERR unsupported option\r\n" },
@@ -30,6 +42,16 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             .{ .request = "*2\r\n$6\r\nSELECT\r\n$4\r\n9999\r\n", .response = "-ERR DB index is out of range\r\n", .dispatches = 1 },
             .{ .request = "*2\r\n$5\r\nHELLO\r\n$1\r\n4\r\n", .response = "-NOPROTO unsupported protocol version\r\n", .dispatches = 1 },
             .{ .request = "*3\r\n$5\r\nHELLO\r\n$1\r\n3\r\n$4\r\nAUTH\r\n", .response = "-ERR unsupported option\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n", .dispatches = 1 },
+            .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
+            .{ .request = "*6\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$5\r\nprobe\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n", .dispatches = 1 },
+            .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
+            .{ .request = "*6\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$5\r\nprobe\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
         };
         var dispatches: u64 = 0;
         for ([_]u8{ 2, 3 }) |version| {
@@ -56,6 +78,13 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
                 const response = try std.fmt.bufPrint(&reply_buffer, "{s}+PONG\r\n", .{case.response});
                 try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
                 dispatches += case.dispatches + 1;
+            }
+            for (fixtures.metadata ++ [_]fixtures.Fixture{ fixtures.count, fixtures.list }) |fixture| {
+                const request = try std.fmt.bufPrint(&request_buffer, "{s}{s}", .{ fixture.request, ping_request });
+                const response = try std.fmt.allocPrint(allocator, "{s}{s}", .{ fixture.replyFor(version), pong_reply });
+                defer allocator.free(response);
+                try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
+                dispatches += 2;
             }
             const first = try expectInfo(io, server, client.socket.handle, 1, version, db_index, .{});
             const second = try expectInfo(io, server, client.socket.handle, 1, version, db_index, .{});

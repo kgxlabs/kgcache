@@ -61,6 +61,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     integration_runner.root_module.addOptions("build_options", build_options);
+    integration_runner.root_module.addImport("protocol_fixtures", b.createModule(.{
+        .root_source_file = b.path("src/protocol/compatibility_fixtures.zig"),
+    }));
 
     integration_runner.root_module.addImport("server_process", b.createModule(.{
         .root_source_file = b.path("tests/integration/harness/server_process.zig"),

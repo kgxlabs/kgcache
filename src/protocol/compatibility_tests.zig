@@ -7,20 +7,10 @@ const Journal = @import("../persistence/journal_interface.zig");
 const protocol = @import("../protocol.zig");
 const testing = std.testing;
 
-const command_fixtures = [_]struct { request: []const u8, reply: []const u8 }{
-    .{ .request = @embedFile("fixtures/ping.request.resp"), .reply = @embedFile("fixtures/ping.reply.resp") },
-    .{ .request = @embedFile("fixtures/echo-binary.request.resp"), .reply = @embedFile("fixtures/echo-binary.reply.resp") },
-    .{ .request = @embedFile("fixtures/get-missing.request.resp"), .reply = @embedFile("fixtures/get-missing.reply.resp") },
-    .{ .request = @embedFile("fixtures/set-get-missing.request.resp"), .reply = @embedFile("fixtures/set-get-missing.reply.resp") },
-    .{ .request = @embedFile("fixtures/command-count.request.resp"), .reply = @embedFile("fixtures/command-count.reply.resp") },
-    .{ .request = @embedFile("fixtures/command-list.request.resp"), .reply = @embedFile("fixtures/command-list.reply.resp") },
-    .{ .request = @embedFile("fixtures/command-info-get.request.resp"), .reply = @embedFile("fixtures/command-info-get.reply.resp") },
-    .{ .request = @embedFile("fixtures/command-info-unknown.request.resp"), .reply = @embedFile("fixtures/command-info-unknown.reply.resp") },
-    .{ .request = @embedFile("fixtures/command-getkeys.request.resp"), .reply = @embedFile("fixtures/command-getkeys.reply.resp") },
-};
+const fixtures = @import("compatibility_fixtures.zig");
 
-test "captured commands keep exact RESP2 replies" {
-    for (command_fixtures) |fixture| {
+test "command and metadata fixtures keep exact replies in both protocols" {
+    for (fixtures.commands ++ fixtures.metadata) |fixture| {
         var decoded = switch (try protocol.request_decoder.decode(fixture.request, testing.allocator, protocol.request_decoder.aof_limits)) {
             .complete => |complete| complete,
             .incomplete => return error.TestUnexpectedResult,
@@ -31,14 +21,17 @@ test "captured commands keep exact RESP2 replies" {
         var mock = MockStore.init();
         mock.num_databases_result = 16;
         var data_store = mock.store();
-        var state = ClientState.init();
-        var result = try command.execute(testing.io, &data_store, &state);
-        defer result.deinit();
-        var buffer: [4096]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&buffer);
-        try state.resp.writeReply(&writer, result.value);
-        try writer.flush();
-        try testing.expectEqualStrings(fixture.reply, writer.buffered());
+        for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+            var state = ClientState.init();
+            state.resp = selected;
+            var result = try command.execute(testing.io, &data_store, &state);
+            defer result.deinit();
+            var buffer: [4096]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try state.resp.writeReply(&writer, result.value);
+            try writer.flush();
+            try testing.expectEqualStrings(fixture.replyFor(@intFromEnum(selected.version())), writer.buffered());
+        }
     }
 }
 

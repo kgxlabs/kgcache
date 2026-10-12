@@ -2,6 +2,7 @@ const std = @import("std");
 const support = @import("server_process");
 const resp_client = @import("../harness/resp_client.zig");
 const hello_metadata = @import("hello_metadata.zig");
+const fixtures = @import("protocol_fixtures");
 
 const list_request = "*2\r\n$6\r\ncLiEnT\r\n$4\r\nlIsT\r\n";
 const ping_request = "*1\r\n$4\r\nPING\r\n";
@@ -60,13 +61,14 @@ fn check(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, 
         var reply_buffer: [1024]u8 = undefined;
         const request = try std.fmt.bufPrint(&request_buffer, "*2\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n" ++
             "*2\r\n$6\r\nSELECT\r\n$1\r\n3\r\n" ++
-            "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$7\r\nUpdated\r\n{s}{s}", .{ selected, list_request, ping_request });
+            "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$7\r\nUpdated\r\n" ++
+            "*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n{s}{s}", .{ selected, list_request, ping_request });
         const metadata = try hello_metadata.expectedMetadata(&metadata_buffer, 1, selected);
-        const prefix = try std.fmt.bufPrint(&reply_buffer, "{s}+OK\r\n+OK\r\n", .{metadata});
+        const prefix = try std.fmt.bufPrint(&reply_buffer, "{s}+OK\r\n+OK\r\n:13\r\n", .{metadata});
         try resp_client.sendAndExpect(io, server, caller.socket.handle, request, prefix);
         var reports = try readReports(server, caller.socket.handle, allocator, selected);
         defer reports.deinit();
-        caller_commands += 4;
+        caller_commands += 5;
         if (reports.rows.len != 2) return error.UnexpectedLiveConnections;
         try expectRow(reports.rows[0], 1, 3, selected, "client|list", "Updated", "V1", caller_commands);
         try expectRow(reports.rows[1], 2, 2, version, "client|setinfo", "Replacement", "", 7);
@@ -88,6 +90,8 @@ fn check(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, 
         caller_commands += 2;
         try expectRow(reports.rows[0], 1, 3, selected, "client|list", "Updated", "V1", caller_commands);
     }
+
+    try checkDispatches(io, allocator, server, caller.socket.handle, peer.socket.handle, selected, version, &caller_commands);
 
     peer.close(io);
     peer_open = false;
@@ -116,6 +120,77 @@ fn check(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, 
     try server.stop();
     if (std.mem.indexOf(u8, server.stdout.bytes(), "[error]") != null or
         std.mem.indexOf(u8, server.stderr.bytes(), "[error]") != null) return error.UnexpectedReportErrorLog;
+}
+
+fn checkDispatches(io: std.Io, allocator: std.mem.Allocator, server: *support.ServerProcess, caller: std.posix.fd_t, peer: std.posix.fd_t, caller_version: u8, peer_version: u8, caller_commands: *u64) !void {
+    var peer_commands: u64 = 7;
+    var peer_name: []const u8 = "client|setinfo";
+    for (fixtures.metadata ++ [_]fixtures.Fixture{ fixtures.count, fixtures.list }) |fixture| {
+        try resp_client.sendAndExpect(io, server, peer, fixture.request, fixture.replyFor(peer_version));
+        peer_commands += 1;
+        peer_name = fixture.canonical_name;
+        try expectDispatch(io, allocator, server, caller, caller_version, peer_version, caller_commands, peer_commands, peer_name);
+    }
+
+    const cases = [_]struct {
+        request: []const u8,
+        response: []const u8,
+        name: ?[]const u8 = null,
+    }{
+        .{ .request = "*4\r\n$7\r\ncOmMaNd\r\n$7\r\ngEtKeYs\r\n$3\r\ngEt\r\n$3\r\none\r\n", .response = "*1\r\n$3\r\none\r\n", .name = "command|getkeys" },
+        .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n$3\r\none\r\n", .response = "*1\r\n*2\r\n$3\r\none\r\n*2\r\n$2\r\nRO\r\n$6\r\naccess\r\n", .name = "command|getkeysandflags" },
+        .{ .request = "*1\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unknown command\r\n" },
+        .{ .request = "*1\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nUNKNOWN\r\n$5\r\nvalue\r\n", .response = "-ERR unsupported option\r\n", .name = "client|setinfo" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$3\r\nbad\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|list" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|getkeys" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|getkeysandflags" },
+    };
+    for (cases) |case| {
+        try resp_client.sendAndExpect(io, server, peer, case.request, case.response);
+        if (case.name) |name| {
+            peer_name = name;
+            peer_commands += 1;
+        }
+        try expectDispatch(io, allocator, server, caller, caller_version, peer_version, caller_commands, peer_commands, peer_name);
+    }
+
+    const targets = [_]struct { arguments: []const u8, count: usize, response: []const u8 }{
+        .{ .arguments = "$6\r\nCLIENT\r\n", .count = 1, .response = "-ERR wrong number of arguments\r\n" },
+        .{ .arguments = "$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .count = 2, .response = "-ERR unsupported option\r\n" },
+        .{ .arguments = "$6\r\nCLIENT\r\n$4\r\nINFO\r\n$5\r\nextra\r\n", .count = 3, .response = "-ERR wrong number of arguments\r\n" },
+        .{ .arguments = "$6\r\nCLIENT\r\n$4\r\nINFO\r\n", .count = 2, .response = "-ERR syntax error\r\n" },
+        .{ .arguments = "$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n$5\r\nextra\r\n", .count = 3, .response = "-ERR wrong number of arguments\r\n" },
+        .{ .arguments = "$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$3\r\nbad\r\n", .count = 3, .response = "-ERR syntax error\r\n" },
+    };
+    for ([_][]const u8{ "GETKEYS", "GETKEYSANDFLAGS" }) |helper| {
+        for (targets) |target| {
+            var buffer: [512]u8 = undefined;
+            const request = try std.fmt.bufPrint(&buffer, "*{d}\r\n$7\r\nCOMMAND\r\n${d}\r\n{s}\r\n{s}", .{ target.count + 2, helper.len, helper, target.arguments });
+            try resp_client.sendAndExpect(io, server, peer, request, target.response);
+            peer_commands += 1;
+            peer_name = if (std.mem.eql(u8, helper, "GETKEYS")) "command|getkeys" else "command|getkeysandflags";
+            try expectDispatch(io, allocator, server, caller, caller_version, peer_version, caller_commands, peer_commands, peer_name);
+        }
+    }
+    try resp_client.sendAndExpect(io, server, peer, ping_request, "+PONG\r\n");
+    try expectDispatch(io, allocator, server, caller, caller_version, peer_version, caller_commands, peer_commands + 1, "ping");
+}
+
+fn expectDispatch(io: std.Io, allocator: std.mem.Allocator, server: *support.ServerProcess, caller: std.posix.fd_t, caller_version: u8, peer_version: u8, caller_commands: *u64, peer_commands: u64, peer_name: []const u8) !void {
+    var reports = try list(io, server, caller, allocator, caller_version);
+    defer reports.deinit();
+    caller_commands.* += 1;
+    if (reports.rows.len != 2) return error.UnexpectedLiveConnections;
+    try expectRow(reports.rows[0], 1, 3, caller_version, "client|list", "Updated", "V1", caller_commands.*);
+    try expectRow(reports.rows[1], 2, 2, peer_version, peer_name, "Replacement", "", peer_commands);
 }
 
 fn hello(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8) !void {

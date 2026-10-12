@@ -9,6 +9,9 @@ const good = select_1 ++
 const unfinished = "*3\r\n$3\r\nSET\r\n$3\r\nbad\r\n$5\r\npar";
 const malformed = "*3\r\n$3\r\nDEL\r\n$6\r\nstable\r\n$1\r\nxX";
 const final_path = "aof/appendonly.aof.1.incr";
+const binary_set = "*3\r\n$3\r\nsEt\r\n$3\r\n\x00\r\n\r\n$8\r\nkept\x00\r\n\xff\r\n";
+const binary_get = "*2\r\n$3\r\nGET\r\n$3\r\n\x00\r\n\r\n";
+const binary_reply = "$8\r\nkept\x00\r\n\xff\r\n";
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: AOF recovery started", .{});
@@ -69,6 +72,8 @@ fn checkRecovery(io: std.Io, allocator: std.mem.Allocator, executable_path: []co
             "*2\r\n$3\r\nDEL\r\n$6\r\nstable\r\n" ++
             "*2\r\n$3\r\nDEL\r\n$0\r\n\r\n");
         try resp_client.sendAndExpect(io, server, fd, "*3\r\n$3\r\nSET\r\n$5\r\nafter\r\n$8\r\nwritable\r\n", "+OK\r\n");
+        try resp_client.sendAndExpect(io, server, fd, binary_set, "+OK\r\n");
+        try resp_client.sendAndExpect(io, server, fd, binary_get, binary_reply);
     }
     try server.stop();
     var buffer: [128]u8 = undefined;
@@ -83,8 +88,11 @@ fn checkRecovery(io: std.Io, allocator: std.mem.Allocator, executable_path: []co
         const client = try server.address.?.connect(io, .{ .mode = .stream });
         defer client.close(io);
         const fd = client.socket.handle;
+        try resp_client.sendAndExpect(io, server, fd, "*2\r\n$3\r\nGET\r\n$5\r\nafter\r\n", "$-1\r\n");
+        try resp_client.sendAndExpect(io, server, fd, binary_get, "$-1\r\n");
         try resp_client.sendAndExpect(io, server, fd, select_1, "+OK\r\n");
         try resp_client.sendAndExpect(io, server, fd, "*2\r\n$3\r\nGET\r\n$5\r\nafter\r\n", "$8\r\nwritable\r\n");
+        try resp_client.sendAndExpect(io, server, fd, binary_get, binary_reply);
         try resp_client.sendAndExpect(io, server, fd, "*2\r\n$3\r\nGET\r\n$6\r\nstable\r\n", "$-1\r\n");
         try resp_client.sendAndExpect(io, server, fd, "*2\r\n$3\r\nGET\r\n$0\r\n\r\n", "$-1\r\n");
         try resp_client.sendAndExpect(io, server, fd, "*2\r\n$3\r\nGET\r\n$3\r\nbad\r\n", "$-1\r\n");

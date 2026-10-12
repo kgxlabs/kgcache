@@ -63,6 +63,7 @@ const TestConnectionIo = struct {
     fail_write: bool = false,
     write_error: std.Io.net.Stream.Writer.Error = error.NetworkDown,
     fail_after_bytes: ?usize = null,
+    fail_on_request: ?struct { index: usize, prefix_bytes: usize } = null,
     max_write_bytes: usize = std.math.maxInt(usize),
     pause_after_bytes: ?usize = null,
     write_paused: std.Io.Event = .unset,
@@ -92,6 +93,11 @@ const TestConnectionIo = struct {
             return 0;
         }
         const request = self.requests[self.next_request];
+        if (self.fail_on_request) |failure| {
+            if (self.next_request == failure.index and self.request_offset == 0) {
+                self.fail_after_bytes = self.output_len + failure.prefix_bytes;
+            }
+        }
         std.debug.assert(data[0].len > 0);
         const count = @min(request.len - self.request_offset, data[0].len);
         @memcpy(data[0][0..count], request[self.request_offset..][0..count]);
@@ -186,6 +192,58 @@ fn initTestWorker(worker: *ClientWorker, registered_at: std.Io.Timestamp) void {
         .registered_at = registered_at,
         .report = ConnectionReport.init(std.testing.io, std.testing.allocator, registered_at),
     };
+}
+
+pub fn checkHandlerCreationFailures(comptime Writer: type, comptime handle_frame: anytype) !void {
+    const testing = std.testing;
+    const protocol = @import("../protocol.zig");
+    const registry = @import("../commander/registry.zig");
+    const frames = [_]protocol.CommandFrame{
+        .{ .name = "PING", .arguments = &.{} },
+        .{ .name = "CLIENT", .arguments = &.{"INFO"} },
+        .{ .name = "CLIENT", .arguments = &.{"LIST"} },
+        .{ .name = "CLIENT", .arguments = &.{ "SETINFO", "LIB-NAME", "value" } },
+        .{ .name = "COMMAND", .arguments = &.{} },
+        .{ .name = "COMMAND", .arguments = &.{"COUNT"} },
+        .{ .name = "COMMAND", .arguments = &.{"LIST"} },
+        .{ .name = "COMMAND", .arguments = &.{"INFO"} },
+        .{ .name = "COMMAND", .arguments = &.{ "GETKEYS", "GET", "key" } },
+        .{ .name = "COMMAND", .arguments = &.{ "GETKEYSANDFLAGS", "GET", "key" } },
+    };
+    for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+        for (frames) |frame| {
+            try testing.expect((try registry.resolve(frame)).factory != null);
+            var fake_io: TestConnectionIo = .{ .requests = &.{}, .max_write_bytes = 2 };
+            var worker: ClientWorker = undefined;
+            initTestWorker(&worker, .fromNanoseconds(100));
+            defer worker.report.deinit();
+            worker.report.recordDispatch("echo");
+            worker.report.recordDbAndProto(2, selected.version());
+            var state = @import("client_state.zig").initWithConnection(&worker.context);
+            state.db_index = 2;
+            state.resp = selected;
+            var mock = store.MockStore.init();
+            var data_store = mock.store();
+            var logger = logging.TestLogger.init();
+            const io = fake_io.io();
+            var writer: Writer = .{ .io = io, .descriptor = worker.stream.socket.handle, .context = &worker.context };
+            var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+
+            try testing.expect(!handle_frame(io, logger.logger(), &writer, &data_store, &state, failing.allocator(), frame, &never_stop_requested));
+
+            var snapshot = try worker.report.snapshot(testing.allocator);
+            defer snapshot.deinit();
+            try testing.expectEqual(@as(u64, 1), snapshot.values.total_cmds);
+            try testing.expectEqualStrings("echo", snapshot.values.last_command);
+            try testing.expectEqual(@as(u32, 2), snapshot.values.db_index);
+            try testing.expectEqual(selected.version(), snapshot.values.resp);
+            try testing.expectEqualStrings("-ERR something went wrong\r\n", fake_io.written());
+            try testing.expectEqual(@as(usize, 0), failing.allocations);
+            try testing.expectEqual(failing.allocations, failing.deallocations);
+            try testing.expectEqual(@as(usize, 1), logger.recordedEvents().len);
+            try testing.expectEqual(error.OutOfMemory, logger.recordedEvents()[0].source.?);
+        }
+    }
 }
 
 test "fragmented and retained input counts each received byte once through short writes" {
@@ -361,6 +419,12 @@ test "rejected bindings and undecoded input preserve the previous dispatch" {
         .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
         .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$4\r\nDOCS\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$4\r\nHELP\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*1\r\n$4\r\nPI", .response = "" },
         .{ .request = "*1\r\n:42\r\n", .response = "-ERR protocol error: invalid RESP type\r\n" },
         .{ .request = "*0\r\n", .response = "-ERR protocol error: malformed request\r\n" },
@@ -382,6 +446,95 @@ test "rejected bindings and undecoded input preserve the previous dispatch" {
         try testing.expectEqualStrings("echo", snapshot.values.last_command);
         try testing.expectEqualStrings(case.response, fake_io.written());
         try testing.expectEqual(0, logger.recordedEvents().len);
+    }
+}
+
+test "COMMAND children record their selected names for replies and handler errors" {
+    const testing = std.testing;
+    const cases = [_]struct { request: []const u8, response: []const u8, name: []const u8 }{
+        .{ .request = "*2\r\n$7\r\ncOmMaNd\r\n$5\r\ncOuNt\r\n", .response = ":13\r\n", .name = "command|count" },
+        .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$8\r\nFILTERBY\r\n$7\r\nPATTERN\r\n$7\r\nabsent*\r\n", .response = "*0\r\n", .name = "command|list" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$7\r\nmissing\r\n", .response = "*1\r\n*-1\r\n", .name = "command|info" },
+        .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n$3\r\none\r\n", .response = "*1\r\n$3\r\none\r\n", .name = "command|getkeys" },
+        .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n$3\r\none\r\n", .response = "*1\r\n*2\r\n$3\r\none\r\n*2\r\n$2\r\nRO\r\n$6\r\naccess\r\n", .name = "command|getkeysandflags" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$3\r\nbad\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|list" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|getkeys" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|getkeysandflags" },
+    };
+    for (cases) |case| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{case.request}, .max_write_bytes = 2 };
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
+        worker.report.recordDispatch("echo");
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var logger = logging.TestLogger.init();
+
+        serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        var snapshot = try worker.report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqual(@as(u64, 2), snapshot.values.total_cmds);
+        try testing.expectEqualStrings(case.name, snapshot.values.last_command);
+        try testing.expectEqualStrings(case.response, fake_io.written());
+        try testing.expectEqual(@as(usize, 0), mock.get_calls);
+        try testing.expectEqual(@as(usize, 0), logger.recordedEvents().len);
+    }
+}
+
+test "partial COMMAND replies keep the selected dispatch and stop later commands in both protocols" {
+    const testing = std.testing;
+    const protocol = @import("../protocol.zig");
+    const registry = @import("../commander/registry.zig");
+    const cases = [_]struct { request: []const u8, prefix: []const u8, name: []const u8, label: []const u8 = "" }{
+        .{ .request = "*1\r\n$7\r\nCOMMAND\r\n", .prefix = "*13", .name = "command" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n", .prefix = ":13", .name = "command|count" },
+        .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$8\r\nFILTERBY\r\n$7\r\nPATTERN\r\n$3\r\ng?t\r\n", .prefix = "*1\r", .name = "command|list" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$13\r\ncommand|count\r\n", .prefix = "*1\r", .name = "command|info" },
+        .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n$3\r\none\r\n", .prefix = "*1\r", .name = "command|getkeys" },
+        .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n$3\r\none\r\n", .prefix = "*1\r", .name = "command|getkeysandflags" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$3\r\nbad\r\n", .prefix = "-ER", .name = "command|list" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n", .prefix = "-ER", .name = "command|getkeys" },
+        .{ .request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nUNKNOWN\r\n$5\r\nvalue\r\n", .prefix = "-ER", .name = "client|setinfo" },
+        .{ .request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$4\r\nKept\r\n", .prefix = "+OK", .name = "client|setinfo", .label = "Kept" },
+    };
+    for ([_]u8{ 2, 3 }) |version| {
+        var hello_buffer: [64]u8 = undefined;
+        const hello = try std.fmt.bufPrint(&hello_buffer, "*2\r\n$5\r\nHELLO\r\n$1\r\n{d}\r\n", .{version});
+        for (cases) |case| {
+            const pipeline = try std.fmt.allocPrint(testing.allocator, "{s}*1\r\n$6\r\nDBSIZE\r\n", .{case.request});
+            defer testing.allocator.free(pipeline);
+            for ([_]usize{ 0, 1, 3 }) |prefix_length| {
+                var fake_io: TestConnectionIo = .{
+                    .requests = &.{ hello, pipeline },
+                    .fail_on_request = .{ .index = 1, .prefix_bytes = prefix_length },
+                    .max_write_bytes = 1,
+                    .write_error = error.ConnectionResetByPeer,
+                };
+                var worker: ClientWorker = undefined;
+                initTestWorker(&worker, .fromNanoseconds(100));
+                defer worker.report.deinit();
+                var mock = store.MockStore.init();
+                var data_store = mock.store();
+                var logger = logging.TestLogger.init();
+
+                serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+                var snapshot = try worker.report.snapshot(testing.allocator);
+                defer snapshot.deinit();
+                try testing.expectEqual(@as(u64, 2), snapshot.values.total_cmds);
+                try testing.expectEqualStrings(case.name, snapshot.values.last_command);
+                try testing.expect(worker.report._values.last_command.ptr == registry.findMetadata(case.name).?.name.ptr);
+                try testing.expectEqual(@as(protocol.Resp.Version, @enumFromInt(version)), snapshot.values.resp);
+                try testing.expectEqualStrings(case.label, snapshot.values.lib_name);
+                try testing.expectEqual(fake_io.output_len, snapshot.values.total_net_out);
+                try testing.expectEqualStrings(case.prefix[0..prefix_length], fake_io.written()[fake_io.output_len - prefix_length ..]);
+                try testing.expectEqual(@as(usize, 0), mock.dbsize_calls);
+                try testing.expectEqual(@as(usize, 0), mock.get_calls);
+                try testing.expectEqual(@as(usize, 0), logger.recordedEvents().len);
+                try testing.expectEqual(@as(usize, 0), fake_io.close_calls);
+            }
+        }
     }
 }
 

@@ -3,6 +3,7 @@ const protocol = @import("protocol.zig");
 const Reply = protocol.Reply;
 const commander = @import("commander.zig");
 const Commander = commander.Commander;
+const Definition = @import("commander/definition.zig").Definition;
 const store = @import("store.zig");
 const MockStore = @import("store/mock_store.zig");
 const init = commander.init;
@@ -50,23 +51,43 @@ test "reject unknown command" {
 }
 
 test "bound commands keep static canonical names after caller input and handlers are released" {
+    const registry = @import("commander/registry.zig");
+    for (registry.all()) |*root| {
+        if (root.kind != .namespace) try expectBoundNameLifetime(root, root);
+        for (root.subcommands) |*child| try expectBoundNameLifetime(root, child);
+    }
+}
+
+fn expectBoundNameLifetime(root: *const Definition, selected: *const Definition) !void {
     const testing = std.testing;
     const registry = @import("commander/registry.zig");
-    for (registry.all()) |definition| {
-        var name: [32]u8 = undefined;
-        for (definition.name, 0..) |byte, index| name[index] = std.ascii.toUpper(byte);
-        const is_client = std.mem.eql(u8, definition.name, "client");
-        const arguments = [_][]const u8{ "key", "value" };
-        const command = try init(testing.allocator, .{
-            .name = name[0..definition.name.len],
-            .arguments = if (is_client) &.{"iNfO"} else arguments[0..definition.arity.minimum],
-        });
-        const canonical_name = command.canonical_name;
-        command.deinit();
-        @memset(&name, 'x');
-        try testing.expectEqualStrings(if (is_client) "client|info" else definition.name, canonical_name);
-        if (!is_client) try testing.expect(canonical_name.ptr == definition.name.ptr);
-    }
+    const is_child = selected != root;
+    const name = try testing.allocator.dupe(u8, root.name);
+    defer testing.allocator.free(name);
+    for (name) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    const selector = try testing.allocator.dupe(u8, if (is_child) selected.name[root.name.len + 1 ..] else "");
+    defer testing.allocator.free(selector);
+    for (selector) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    const arguments = try testing.allocator.alloc([]const u8, selected.arity.minimum);
+    defer testing.allocator.free(arguments);
+    for (arguments) |*argument| argument.* = "value";
+    if (arguments.len > 0) arguments[0] = if (is_child) selector else "key";
+    const frame: protocol.CommandFrame = .{ .name = name, .arguments = arguments };
+    try testing.expect(try registry.resolve(frame) == selected);
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, init(failing.allocator(), frame));
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+    try testing.expectEqual(failing.allocations, failing.deallocations);
+    try testing.expect(try registry.resolve(frame) == selected);
+
+    const command = try init(testing.allocator, frame);
+    const canonical_name = command.canonical_name;
+    @memset(name, 'x');
+    @memset(selector, 'x');
+    command.deinit();
+    try testing.expectEqualStrings(selected.name, canonical_name);
+    try testing.expect(canonical_name.ptr == selected.name.ptr);
 }
 
 fn executeWithMockStore(keyword: []const u8, arguments: []const []const u8, mock_store: *MockStore) anyerror!Commander.Result {
@@ -337,6 +358,61 @@ test "invalid SET options preserve existing values and expiration and do not cre
     }
 }
 
+test "COMMAND binds its bare handler and separate child factories" {
+    const testing = std.testing;
+    const registry = @import("commander/registry.zig");
+    const Factory = @import("commander/definition.zig").Factory;
+    const cases = [_]struct { arguments: []const []const u8, name: []const u8, factory: Factory }{
+        .{ .arguments = &.{}, .name = "command", .factory = @import("commander/command/command.zig").init },
+        .{ .arguments = &.{"cOuNt"}, .name = "command|count", .factory = @import("commander/command/command_count.zig").init },
+        .{ .arguments = &.{"lIsT"}, .name = "command|list", .factory = @import("commander/command/command_list.zig").init },
+        .{ .arguments = &.{"iNfO"}, .name = "command|info", .factory = @import("commander/command/command_info.zig").init },
+        .{ .arguments = &.{ "gEtKeYs", "GET", "key" }, .name = "command|getkeys", .factory = @import("commander/command/command_getkeys.zig").init },
+        .{ .arguments = &.{ "gEtKeYsAnDfLaGs", "GET", "key" }, .name = "command|getkeysandflags", .factory = @import("commander/command/command_getkeysandflags.zig").init },
+    };
+    try testing.expectEqual(@import("commander/definition.zig").Kind.group, registry.find("command").?.kind);
+    var vtables: [cases.len]*const Commander.VTable = undefined;
+    for (cases, 0..) |case, index| {
+        const frame: protocol.CommandFrame = .{ .name = "cOmMaNd", .arguments = case.arguments };
+        const selected = registry.findMetadata(case.name).?;
+        try testing.expect(try registry.resolve(frame) == selected);
+        try testing.expect(selected.factory.? == case.factory);
+
+        var single = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+        {
+            const command = try init(single.allocator(), frame);
+            defer command.deinit();
+            try testing.expectEqual(@as(usize, 1), single.allocations);
+            try testing.expect(command.canonical_name.ptr == selected.name.ptr);
+            try testing.expectEqualStrings(case.name, command.canonical_name);
+            vtables[index] = command.vtable;
+        }
+        try testing.expectEqual(single.allocations, single.deallocations);
+        for (vtables[0..index]) |previous| try testing.expect(previous != vtables[index]);
+    }
+}
+
+test "COMMAND rejects unknown children and structural counts before allocating" {
+    const testing = std.testing;
+    const cases = [_]struct { arguments: []const []const u8, err: Commander.Error }{
+        .{ .arguments = &.{"UNKNOWN"}, .err = error.UnsupportedOption },
+        .{ .arguments = &.{ "UNKNOWN", "extra" }, .err = error.UnsupportedOption },
+        .{ .arguments = &.{""}, .err = error.UnsupportedOption },
+        .{ .arguments = &.{"DOCS"}, .err = error.UnsupportedOption },
+        .{ .arguments = &.{"HELP"}, .err = error.UnsupportedOption },
+        .{ .arguments = &.{"COUNT\x00"}, .err = error.UnsupportedOption },
+        .{ .arguments = &.{ "cOuNt", "extra" }, .err = error.WrongNumberArguments },
+        .{ .arguments = &.{"GETKEYS"}, .err = error.WrongNumberArguments },
+        .{ .arguments = &.{"GETKEYSANDFLAGS"}, .err = error.WrongNumberArguments },
+    };
+    for (cases) |case| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        try testing.expectError(case.err, init(failing.allocator(), .{ .name = "cOmMaNd", .arguments = case.arguments }));
+        try testing.expectEqual(@as(usize, 0), failing.allocations);
+    }
+    try testing.expectError(error.UnknownCommand, init(testing.allocator, .{ .name = "command|count", .arguments = &.{} }));
+}
+
 test "COMMAND, COUNT, and LIST describe the available commands" {
     const testing = std.testing;
     var mock_store = MockStore.init();
@@ -344,6 +420,7 @@ test "COMMAND, COUNT, and LIST describe the available commands" {
     var all = try executeWithMockStore("COMMAND", &.{}, &mock_store);
     defer all.deinit();
     const details = try expectArray(all.value);
+    try testing.expectEqual(@as(usize, 13), details.len);
 
     var count = try executeWithMockStore("COMMAND", &.{"cOuNt"}, &mock_store);
     defer count.deinit();
@@ -403,6 +480,14 @@ test "COMMAND LIST filters names by pattern and ACL category" {
     }, &mock_store);
     defer category.deinit();
     try expectBulkArray(category.value, &.{ "dbsize", "get" });
+
+    var command_names = try executeWithMockStore("COMMAND", &.{ "LIST", "FILTERBY", "PATTERN", "command*" }, &mock_store);
+    defer command_names.deinit();
+    try expectBulkArray(command_names.value, &.{"command"});
+
+    var child_names = try executeWithMockStore("COMMAND", &.{ "LIST", "FILTERBY", "PATTERN", "command|*" }, &mock_store);
+    defer child_names.deinit();
+    try expectBulkArray(child_names.value, &.{});
 }
 
 test "COMMAND INFO reports command metadata and unknown names" {
@@ -513,6 +598,96 @@ test "COMMAND reports CLIENT and supported subcommand metadata" {
     try testing.expect(direct_commands[2] == .null_value);
 }
 
+test "COMMAND metadata includes its children in root replies and full-name lookup" {
+    const testing = std.testing;
+    const names = [_][]const u8{ "command|count", "command|list", "command|info", "command|getkeys", "command|getkeysandflags" };
+    const arities = [_]i64{ 2, -2, -2, -3, -3 };
+    var mock = MockStore.init();
+    const requests = [_][]const []const u8{ &.{}, &.{"INFO"}, &.{ "INFO", "cOmMaNd" } };
+    for (requests) |arguments| {
+        var result = try executeWithMockStore("COMMAND", arguments, &mock);
+        defer result.deinit();
+        const roots = try expectArray(result.value);
+        try testing.expectEqual(@as(usize, if (arguments.len == 2) 1 else 13), roots.len);
+        const fields = try expectArray(roots[if (arguments.len == 2) 0 else 3]);
+        try testing.expectEqual(@as(usize, 10), fields.len);
+        try expectBulk(fields[0], "command");
+        try testing.expectEqual(@as(i64, -1), fields[1].integer);
+        try expectBulkArray(fields[2], &.{"fast"});
+        try expectBulkArray(fields[6], &.{ "@connection", "@fast" });
+        const children = try expectArray(fields[9]);
+        try testing.expectEqual(names.len, children.len);
+        for (children, names, arities) |child, name, arity| {
+            try expectCommandChildMetadata(child, name, arity);
+        }
+    }
+
+    var direct = try executeWithMockStore("cOmMaNd", &.{
+        "iNfO", "cOmMaNd|cOuNt", "command|list", "command|info", "command|getkeys", "command|getkeysandflags", "command|missing",
+    }, &mock);
+    defer direct.deinit();
+    const children = try expectArray(direct.value);
+    try testing.expectEqual(names.len + 1, children.len);
+    for (children[0..names.len], names, arities) |child, name, arity| {
+        try expectCommandChildMetadata(child, name, arity);
+    }
+    try testing.expect(children[names.len] == .null_value and children[names.len].null_value == .array);
+}
+
+fn expectCommandChildMetadata(value: Reply, name: []const u8, arity: i64) !void {
+    const testing = std.testing;
+    const fields = try expectArray(value);
+    try testing.expectEqual(@as(usize, 10), fields.len);
+    try expectBulk(fields[0], name);
+    try testing.expectEqual(arity, fields[1].integer);
+    try expectBulkArray(fields[2], &.{"fast"});
+    for (fields[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
+    try expectBulkArray(fields[6], &.{ "@connection", "@fast" });
+    for (fields[7..10]) |field| try testing.expectEqual(@as(usize, 0), (try expectArray(field)).len);
+}
+
+test "COMMAND reply allocation failures clean up every handler and arena" {
+    const cases = [_][]const []const u8{
+        &.{},
+        &.{"COUNT"},
+        &.{"LIST"},
+        &.{ "LIST", "FILTERBY", "PATTERN", "g*" },
+        &.{ "LIST", "FILTERBY", "ACLCAT", "@read" },
+        &.{"INFO"},
+        &.{ "INFO", "command", "command|count", "get", "missing" },
+        &.{ "GETKEYS", "DEL", "first", "second" },
+        &.{ "GETKEYSANDFLAGS", "SET", "key", "value", "GET" },
+        &.{ "GETKEYSANDFLAGS", "GET", "key" },
+        &.{ "GETKEYSANDFLAGS", "DEL", "first", "second" },
+    };
+    for (cases) |arguments| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, commandReplyLifetime, .{arguments});
+    }
+}
+
+fn commandReplyLifetime(allocator: std.mem.Allocator, arguments: []const []const u8) !void {
+    const testing = std.testing;
+    var mock = MockStore.init();
+    var data_store = mock.store();
+    var state = Commander.ClientState.init();
+    var result = result: {
+        const command = try init(allocator, .{ .name = "COMMAND", .arguments = arguments });
+        defer command.deinit();
+        break :result try command.execute(testing.io, &data_store, &state);
+    };
+    defer result.deinit();
+    for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+        var buffer: [1]u8 = undefined;
+        var failing_writer = std.Io.Writer.fixed(&buffer);
+        try testing.expectError(error.WriteFailed, selected.writeReply(&failing_writer, result.value));
+        var writer: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer writer.deinit();
+        try selected.writeReply(&writer.writer, result.value);
+        try writer.writer.flush();
+        try testing.expect(writer.written().len > 1);
+    }
+}
+
 test "COMMAND GETKEYS extracts keys without changing them" {
     var mock_store = MockStore.init();
 
@@ -537,6 +712,10 @@ test "COMMAND GETKEYS extracts keys without changing them" {
     }, &mock_store);
     defer del.deinit();
     try expectBulkArray(del.value, &.{ "first", "second", "third" });
+
+    try std.testing.expectEqual(@as(usize, 0), mock_store.get_calls);
+    try std.testing.expectEqual(@as(usize, 0), mock_store.set_calls);
+    try std.testing.expectEqual(@as(usize, 0), mock_store.remove_calls);
 }
 
 test "COMMAND GETKEYSANDFLAGS reports access for each key" {
@@ -570,6 +749,14 @@ test "COMMAND GETKEYSANDFLAGS reports access for each key" {
     const set_get_pair = try expectArray((try expectArray(set_get.value))[0]);
     try expectBulkArray(set_get_pair[1], &.{ "RW", "access", "update" });
 
+    var value_get = try executeWithMockStore("COMMAND", &.{
+        "GETKEYSANDFLAGS", "sEt", "value-key", "GET",
+    }, &mock_store);
+    defer value_get.deinit();
+    const value_get_pair = try expectArray((try expectArray(value_get.value))[0]);
+    try expectBulk(value_get_pair[0], "value-key");
+    try expectBulkArray(value_get_pair[1], &.{ "OW", "update" });
+
     var del = try executeWithMockStore("COMMAND", &.{
         "GETKEYSANDFLAGS", "DEL",
         "first",           "second",
@@ -581,6 +768,80 @@ test "COMMAND GETKEYSANDFLAGS reports access for each key" {
         const pair = try expectArray(entry);
         try expectBulk(pair[0], key);
         try expectBulkArray(pair[1], &.{ "RM", "delete" });
+    }
+}
+
+test "COMMAND key helpers resolve CLIENT children before checking for keys" {
+    const testing = std.testing;
+    const cases = [_]struct { target: []const []const u8, err: anyerror }{
+        .{ .target = &.{"CLIENT"}, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "UNKNOWN" }, .err = error.UnsupportedOption },
+        .{ .target = &.{ "CLIENT", "UNKNOWN", "extra" }, .err = error.UnsupportedOption },
+        .{ .target = &.{ "CLIENT", "" }, .err = error.UnsupportedOption },
+        .{ .target = &.{ "CLIENT", "INFO", "extra" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "LIST", "extra" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "SETINFO" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "SETINFO", "LIB-NAME" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "cLiEnT", "iNfO" }, .err = error.Syntax },
+        .{ .target = &.{ "CLIENT", "LIST" }, .err = error.Syntax },
+        .{ .target = &.{ "CLIENT", "sEtInFo", "LIB-NAME", "value" }, .err = error.Syntax },
+        .{ .target = &.{ "CLIENT", "SETINFO", "UNKNOWN", "value" }, .err = error.Syntax },
+        .{ .target = &.{"client|info"}, .err = error.UnknownCommand },
+        .{ .target = &.{"UNKNOWN"}, .err = error.UnknownCommand },
+    };
+    var mock = MockStore.init();
+    for ([_][]const u8{ "GETKEYS", "GETKEYSANDFLAGS" }) |helper| {
+        for (cases) |case| {
+            var arguments: [5][]const u8 = undefined;
+            arguments[0] = helper;
+            @memcpy(arguments[1..][0..case.target.len], case.target);
+            try testing.expectError(case.err, executeWithMockStore("COMMAND", arguments[0 .. case.target.len + 1], &mock));
+        }
+    }
+}
+
+test "COMMAND key helpers resolve COMMAND targets without executing their handlers" {
+    const testing = std.testing;
+    const cases = [_]struct { target: []const []const u8, err: Commander.Error }{
+        .{ .target = &.{"COMMAND"}, .err = error.Syntax },
+        .{ .target = &.{ "COMMAND", "cOuNt" }, .err = error.Syntax },
+        .{ .target = &.{ "COMMAND", "COUNT", "extra" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "COMMAND", "LIST", "bad" }, .err = error.Syntax },
+        .{ .target = &.{ "COMMAND", "INFO" }, .err = error.Syntax },
+        .{ .target = &.{ "COMMAND", "GETKEYS" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "COMMAND", "GETKEYSANDFLAGS" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "COMMAND", "GETKEYS", "GET" }, .err = error.Syntax },
+        .{ .target = &.{ "COMMAND", "GETKEYSANDFLAGS", "MISSING" }, .err = error.Syntax },
+        .{ .target = &.{ "COMMAND", "UNKNOWN" }, .err = error.UnsupportedOption },
+        .{ .target = &.{"command|count"}, .err = error.UnknownCommand },
+    };
+    var mock = MockStore.init();
+    for ([_][]const u8{ "GETKEYS", "GETKEYSANDFLAGS" }) |helper| {
+        for (cases) |case| {
+            var arguments: [5][]const u8 = undefined;
+            arguments[0] = helper;
+            @memcpy(arguments[1..][0..case.target.len], case.target);
+            try testing.expectError(case.err, executeWithMockStore("COMMAND", arguments[0 .. case.target.len + 1], &mock));
+        }
+    }
+}
+
+test "COMMAND key lookup does not allocate target handlers or run their factories" {
+    const testing = std.testing;
+    var mock = MockStore.init();
+    var data_store = mock.store();
+    var state = Commander.ClientState.init();
+    const targets = [_][]const []const u8{ &.{ "CLIENT", "INFO" }, &.{ "COMMAND", "COUNT" }, &.{ "COMMAND", "LIST", "bad" } };
+    for ([_][]const u8{ "GETKEYS", "GETKEYSANDFLAGS" }) |helper| {
+        for (targets) |target| {
+            var arguments: [4][]const u8 = undefined;
+            arguments[0] = helper;
+            @memcpy(arguments[1..][0..target.len], target);
+            var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 2 });
+            try testing.expectError(error.Syntax, executeWithAllocator(failing.allocator(), "COMMAND", arguments[0 .. target.len + 1], &data_store, &state));
+            try testing.expectEqual(@as(usize, 2), failing.allocations);
+            try testing.expectEqual(failing.allocations, failing.deallocations);
+        }
     }
 }
 
@@ -598,6 +859,9 @@ test "COMMAND rejects invalid forms" {
     try testing.expectError(error.WrongNumberArguments, executeWithMockStore("COMMAND", &.{
         "LIST", "FILTERBY",
     }, &mock_store));
+    try testing.expectError(error.WrongNumberArguments, executeWithMockStore("COMMAND", &.{ "LIST", "FILTERBY", "PATTERN" }, &mock_store));
+    try testing.expectError(error.WrongNumberArguments, executeWithMockStore("COMMAND", &.{ "LIST", "FILTERBY", "PATTERN", "*", "extra" }, &mock_store));
+    try testing.expectError(error.Syntax, executeWithMockStore("COMMAND", &.{ "LIST", "bad", "PATTERN", "*" }, &mock_store));
     try testing.expectError(error.Syntax, executeWithMockStore("COMMAND", &.{
         "LIST",   "FILTERBY",
         "ACLCAT", "@missing",

@@ -3,7 +3,7 @@ const Commander = @import("interface.zig");
 
 pub const Arity = @import("../arity.zig");
 
-/// Encode command arity for Redis metadata, including the command name.
+// Encode command arity for Redis metadata, including the command name.
 pub fn redisArity(arity: Arity) i64 {
     const minimum_with_name: i64 = @intCast(arity.minimum + 1);
     if (arity.maximum) |maximum| {
@@ -62,10 +62,17 @@ pub const Factory = *const fn (
 
 pub const Definition = struct {
     name: []const u8,
+    kind: Kind,
     arity: Arity,
     flags: []const Flag,
     categories: []const Category,
     keys: KeySpec,
-    factory: Factory,
+    factory: ?Factory,
     subcommands: []const Definition = &.{},
+};
+
+pub const Kind = enum {
+    command,
+    namespace,
+    group,
 };

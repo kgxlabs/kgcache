@@ -135,6 +135,35 @@ test "CLIENT resolves supported subcommands and exact arity before allocation" {
     }
 }
 
+test "CLIENT binds separate child factories and vtables with one handler allocation" {
+    const registry = @import("registry.zig");
+    const Factory = @import("definition.zig").Factory;
+    const cases = [_]struct { arguments: []const []const u8, name: []const u8, factory: Factory }{
+        .{ .arguments = &.{"iNfO"}, .name = "client|info", .factory = @import("client/client_info.zig").init },
+        .{ .arguments = &.{ "sEtInFo", "LIB-NAME", "value" }, .name = "client|setinfo", .factory = @import("client/client_setinfo.zig").init },
+        .{ .arguments = &.{"lIsT"}, .name = "client|list", .factory = @import("client/client_list.zig").init },
+    };
+    var vtables: [cases.len]*const commander.Commander.VTable = undefined;
+    for (cases, 0..) |case, index| {
+        const definition = registry.findMetadata(case.name).?;
+        try testing.expect(definition.factory.? == case.factory);
+
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        try testing.expectError(error.OutOfMemory, commander.init(failing.allocator(), .{ .name = "CLIENT", .arguments = case.arguments }));
+
+        var single = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+        {
+            const command = try commander.init(single.allocator(), .{ .name = "cLiEnT", .arguments = case.arguments });
+            defer command.deinit();
+            try testing.expectEqual(@as(usize, 1), single.allocations);
+            try testing.expect(command.canonical_name.ptr == definition.name.ptr);
+            vtables[index] = command.vtable;
+        }
+        try testing.expectEqual(single.allocations, single.deallocations);
+        for (vtables[0..index]) |previous| try testing.expect(previous != vtables[index]);
+    }
+}
+
 test "CLIENT INFO owns its snapshot text through output in both protocols" {
     for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
         var provider = Provider.init();
