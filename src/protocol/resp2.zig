@@ -15,6 +15,7 @@ const vtable: Resp.VTable = .{
     .writeError = Resp.writeErrorShared,
     .writeInteger = Resp.writeIntegerShared,
     .writeBlobString = Resp.writeBlobStringShared,
+    .writeVerbatim = Resp.writeBlobStringShared,
     .writeNull = writeNull,
     .writeArray = Resp.writeArrayShared,
     .writeMap = writeMap,

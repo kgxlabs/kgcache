@@ -67,4 +67,5 @@ pub const Definition = struct {
     categories: []const Category,
     keys: KeySpec,
     factory: Factory,
+    subcommands: []const Definition = &.{},
 };

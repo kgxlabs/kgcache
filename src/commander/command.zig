@@ -112,11 +112,13 @@ fn info(allocator: std.mem.Allocator, names: []const []const u8) Commander.Error
     const items = try allocator.alloc(Value, names.len);
     for (names, 0..) |name, index| {
         const command_name = name;
-        items[index] = if (registry.find(command_name)) |item|
+
+        items[index] = if (registry.findMetadata(command_name)) |item|
             try describe(allocator, item)
         else
             .{ .null_value = .array };
     }
+
     return .{ .array = items };
 }
 
@@ -130,9 +132,12 @@ fn list(allocator: std.mem.Allocator, args: []const []const u8) Commander.Error!
     var filter: ListFilter = .all;
     if (args.len != 0) {
         if (args.len != 3) return error.WrongNumberArguments;
+
         if (!std.ascii.eqlIgnoreCase(args[0], "FILTERBY")) return error.Syntax;
+
         const kind = args[1];
         const value = args[2];
+
         if (std.ascii.eqlIgnoreCase(kind, "PATTERN")) {
             filter = .{ .pattern = value };
         } else if (std.ascii.eqlIgnoreCase(kind, "ACLCAT")) {
@@ -150,8 +155,10 @@ fn list(allocator: std.mem.Allocator, args: []const []const u8) Commander.Error!
             .pattern => |pattern| matchesPattern(pattern, item.name),
             .category => |category| std.mem.indexOfScalar(definition.Category, item.categories, category) != null,
         };
+
         if (matches) try names.append(allocator, bulk(item.name));
     }
+
     return .{ .array = try names.toOwnedSlice(allocator) };
 }
 
@@ -167,6 +174,7 @@ fn matchesPattern(pattern: []const u8, name: []const u8) bool {
     var name_index: usize = 0;
     var star_pattern: ?usize = null;
     var star_name: usize = 0;
+
     while (name_index < name.len) {
         if (pattern_index < pattern.len and (pattern[pattern_index] == '?' or pattern[pattern_index] == name[name_index])) {
             pattern_index += 1;
@@ -181,7 +189,9 @@ fn matchesPattern(pattern: []const u8, name: []const u8) bool {
             name_index = star_name;
         } else return false;
     }
+
     while (pattern_index < pattern.len and pattern[pattern_index] == '*') : (pattern_index += 1) {}
+
     return pattern_index == pattern.len;
 }
 
@@ -269,6 +279,9 @@ fn describe(allocator: std.mem.Allocator, item: *const definition.Definition) Co
         },
     }
 
+    const subcommands = try allocator.alloc(Value, item.subcommands.len);
+    for (item.subcommands, 0..) |*subcommand, index| subcommands[index] = try describe(allocator, subcommand);
+
     return array(allocator, &.{
         bulk(item.name),
         .{ .integer = definition.redisArity(item.arity) },
@@ -279,7 +292,7 @@ fn describe(allocator: std.mem.Allocator, item: *const definition.Definition) Co
         .{ .array = categories },
         try array(allocator, &.{}),
         specs,
-        try array(allocator, &.{}),
+        .{ .array = subcommands },
     });
 }
 

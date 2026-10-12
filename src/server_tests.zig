@@ -111,11 +111,21 @@ const BlockingCommandIo = struct {
         self.vtable.netWrite = netWrite;
         self.vtable.netClose = netClose;
         self.vtable.netShutdown = netShutdown;
+        self.vtable.now = now;
         return .{ .userdata = self, .vtable = &self.vtable };
     }
 
     fn stream() std.Io.net.Stream {
-        return .{ .socket = .{ .handle = 1, .address = undefined } };
+        return .{ .socket = .{ .handle = 1, .address = .{ .ip4 = .loopback(40000) } } };
+    }
+
+    fn localEndpoint(_: std.Io, _: std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress {
+        return .{ .ip4 = .loopback(6379) };
+    }
+
+    fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+        const self: *BlockingCommandIo = @ptrCast(@alignCast(userdata));
+        return self.base_io.vtable.now(self.base_io.userdata, clock);
     }
 
     fn netRead(
@@ -275,6 +285,7 @@ test "server destroy keeps Store alive until a connection command finishes" {
 
     var connection_io: BlockingCommandIo = .{ .base_io = testing.io };
     server._connection_manager._io = connection_io.io();
+    server._connection_manager._local_endpoint = BlockingCommandIo.localEndpoint;
     try server._connection_manager.start(BlockingCommandIo.stream());
     blocking_store.command_entered.waitUncancelable(testing.io);
 

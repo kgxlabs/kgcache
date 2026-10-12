@@ -3,6 +3,10 @@ const std = @import("std");
 // Learn more about this file here: https://ziglang.org/learn/build-system
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
+    const build_options = b.addOptions();
+
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+
     const exe = b.addExecutable(.{
         .name = "kgcache",
         .root_module = b.createModule(.{
@@ -13,6 +17,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    exe.root_module.addOptions("build_options", build_options);
 
     // Share the install step with the integration runner so it receives the
     // absolute path of the executable that was just built.
@@ -39,6 +44,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    unit_tests.root_module.addOptions("build_options", build_options);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
@@ -54,6 +60,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    integration_runner.root_module.addOptions("build_options", build_options);
 
     integration_runner.root_module.addImport("server_process", b.createModule(.{
         .root_source_file = b.path("tests/integration/harness/server_process.zig"),

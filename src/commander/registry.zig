@@ -1,11 +1,13 @@
 const std = @import("std");
 const BgRewriteAof = @import("bgrewriteaof.zig");
 const BgSave = @import("bgsave.zig");
+const Client = @import("client.zig");
 const Command = @import("command.zig");
 const DBSize = @import("dbsize.zig");
 const Del = @import("del.zig");
 const Echo = @import("echo.zig");
 const Get = @import("get.zig");
+const Hello = @import("hello.zig");
 const Commander = @import("interface.zig");
 const Ping = @import("ping.zig");
 const Save = @import("save.zig");
@@ -27,6 +29,16 @@ pub fn find(name: []const u8) ?*const Definition {
 
 pub fn all() []const Definition {
     return definitions[0..];
+}
+
+pub fn findMetadata(name: []const u8) ?*const Definition {
+    if (find(name)) |definition| return definition;
+    for (definitions) |definition| {
+        for (definition.subcommands) |*subcommand| {
+            if (std.ascii.eqlIgnoreCase(name, subcommand.name)) return subcommand;
+        }
+    }
+    return null;
 }
 
 fn factoryFor(comptime T: type) Factory {
@@ -58,6 +70,40 @@ const definitions = [_]Definition{
         .categories = &.{ .admin, .slow, .dangerous },
         .keys = .none,
         .factory = factoryFor(BgSave),
+    },
+    .{
+        .name = "client",
+        .arity = Arity.atLeast(1),
+        .flags = &.{},
+        .categories = &.{ .connection, .slow },
+        .keys = .none,
+        .factory = Client.init,
+        .subcommands = &.{
+            .{
+                .name = "client|info",
+                .arity = Arity.exact(1),
+                .flags = &.{.fast},
+                .categories = &.{ .connection, .fast },
+                .keys = .none,
+                .factory = Client.init,
+            },
+            .{
+                .name = "client|setinfo",
+                .arity = Arity.exact(3),
+                .flags = &.{},
+                .categories = &.{ .connection, .slow },
+                .keys = .none,
+                .factory = Client.init,
+            },
+            .{
+                .name = "client|list",
+                .arity = Arity.exact(1),
+                .flags = &.{.admin},
+                .categories = &.{ .admin, .connection, .slow, .dangerous },
+                .keys = .none,
+                .factory = Client.init,
+            },
+        },
     },
     .{
         .name = "command",
@@ -114,6 +160,14 @@ const definitions = [_]Definition{
         .factory = factoryFor(Get),
     },
     .{
+        .name = "hello",
+        .arity = Arity.atLeast(0),
+        .flags = &.{.fast},
+        .categories = &.{ .connection, .fast },
+        .keys = .none,
+        .factory = factoryFor(Hello),
+    },
+    .{
         .name = "ping",
         .arity = Arity.range(0, 1),
         .flags = &.{.fast},
@@ -163,6 +217,21 @@ fn validateDefinitions() void {
         validateName(definition);
         validateArity(definition);
         validateKeys(definition);
+        inline for (definition.subcommands, 0..) |subcommand, sub_index| {
+            const prefix = definition.name ++ "|";
+            if (!std.mem.startsWith(u8, subcommand.name, prefix)) invalidDefinition(subcommand.name, "must include its parent command name");
+            var leaf = subcommand;
+            leaf.name = subcommand.name[prefix.len..];
+            validateName(leaf);
+            validateArity(subcommand);
+            validateKeys(subcommand);
+            if (subcommand.subcommands.len != 0) invalidDefinition(subcommand.name, "nested subcommands are unsupported");
+            inline for (definition.subcommands, 0..) |other, other_index| {
+                if (other_index > sub_index and std.ascii.eqlIgnoreCase(subcommand.name, other.name)) {
+                    invalidDefinition(subcommand.name, "duplicates a subcommand");
+                }
+            }
+        }
 
         inline for (definitions, 0..) |other, other_index| {
             if (other_index > index and std.ascii.eqlIgnoreCase(definition.name, other.name)) {

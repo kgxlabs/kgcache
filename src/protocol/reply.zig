@@ -11,6 +11,7 @@ pub const Reply = union(enum) {
     error_reply: []const u8,
     integer: i64,
     blob_string: []const u8,
+    verbatim: []const u8,
     array: []const Reply,
     map: []const MapEntry,
 };

@@ -26,8 +26,14 @@ name. Their bodies borrow the input buffer; the caller owns their slice table.
 
 Commands return semantic `Reply` values. The connection reads `ClientState.resp`
 after execution and uses its selected vtable to encode the reply. Each client
-starts in RESP2. Both RESP2 and RESP3 encoders are implemented, but network
-negotiation is not available. AOF uses a separate command writer.
+starts in RESP2 and can select RESP2 or RESP3 through HELLO. AOF uses a separate
+command writer.
+
+Semantic `verbatim` replies encode as bulk text in RESP2 and `txt:`
+verbatim strings in RESP3. The RESP3 length includes the four prefix bytes.
+Reply lengths are checked before output, including nested values. Handlers
+keep dynamically built text in one owned `Commander.Result` through encoding
+and writer flush.
 
 The TCP server has three layers for client connections:
 
@@ -147,15 +153,18 @@ and trace availability.
 ├── src/
 │   ├── main.zig                 # Entry point: load config, create/destroy Server
 │   ├── server.zig               # Owns the object graph; create/destroy/run
-│   ├── connection.zig           # One client session and request loop
-│   ├── connection_manager.zig   # Worker ownership, shutdown, joining, reaping
+│   ├── connection.zig           # Connection types and session entry point exports
+│   ├── connection/
+│   │   ├── client_state.zig     # Per-client database and selected Resp handle
+│   │   ├── context.zig          # Manager-owned connection identity
+│   │   ├── manager.zig          # Worker ownership, shutdown, joining, reaping
+│   │   └── session.zig          # One client session and request loop
 │   ├── cron.zig                 # Background housekeeping loop (tick schedule)
 │   ├── expiration.zig           # Active expiration round/batch policy
 │   ├── cli.zig                  # Process options and owned prepared config overrides
 │   ├── config.zig               # Config struct, defaults, and path helpers
 │   ├── config_parser.zig        # kgcache.conf parser
 │   ├── config/                  # Definitions, preparation, registry, builder, loader
-│   ├── client_state.zig         # Per-client database and selected Resp handle
 │   ├── protocol.zig             # Protocol types and module exports
 │   ├── protocol/                # Command decoding/writing and RESP2/RESP3 replies
 │   ├── resp.zig                 # Legacy parser/serializer outside live paths

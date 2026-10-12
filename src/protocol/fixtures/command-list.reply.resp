@@ -1,8 +1,10 @@
-*11
+*13
 $12
 bgrewriteaof
 $6
 bgsave
+$6
+client
 $7
 command
 $6
@@ -13,6 +15,8 @@ $4
 echo
 $3
 get
+$5
+hello
 $4
 ping
 $4

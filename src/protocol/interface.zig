@@ -11,6 +11,7 @@ pub const MapEntry = reply.MapEntry;
 pub const Resp2NullKind = reply.Resp2NullKind;
 pub const Version = enum(u8) { resp2 = 2, resp3 = 3 };
 pub const EncodeError = std.Io.Writer.Error || error{ InvalidLineText, LengthOverflow };
+pub const verbatim_prefix = "txt:";
 
 pub const VTable = struct {
     version: Version,
@@ -18,6 +19,7 @@ pub const VTable = struct {
     writeError: *const fn (*anyopaque, *std.Io.Writer, []const u8) EncodeError!void,
     writeInteger: *const fn (*anyopaque, *std.Io.Writer, i64) EncodeError!void,
     writeBlobString: *const fn (*anyopaque, *std.Io.Writer, []const u8) EncodeError!void,
+    writeVerbatim: *const fn (*anyopaque, *std.Io.Writer, []const u8) EncodeError!void,
     writeNull: *const fn (*anyopaque, *std.Io.Writer, Resp2NullKind) EncodeError!void,
     writeArray: *const fn (*anyopaque, Resp, *std.Io.Writer, []const Reply) EncodeError!void,
     writeMap: *const fn (*anyopaque, Resp, *std.Io.Writer, []const MapEntry) EncodeError!void,
@@ -28,27 +30,34 @@ pub fn version(self: Resp) Version {
 }
 
 pub fn writeReply(self: Resp, writer: *std.Io.Writer, value: Reply) EncodeError!void {
-    try validateReply(value);
+    try validateReply(self, value);
     try writeValue(self, writer, value);
 }
 
-fn validateReply(value: Reply) EncodeError!void {
+fn validateReply(self: Resp, value: Reply) EncodeError!void {
     switch (value) {
         .simple_string, .error_reply => |text| {
             if (std.mem.indexOfAny(u8, text, "\r\n") != null) return error.InvalidLineText;
         },
         .blob_string => |bytes| try validateLength(bytes.len),
+        .verbatim => |text| {
+            if (self.version() == .resp3) {
+                _ = try verbatimLength(text.len);
+            } else {
+                try validateLength(text.len);
+            }
+        },
         .array => |items| {
             try validateLength(items.len);
-            for (items) |item| try validateReply(item);
+            for (items) |item| try validateReply(self, item);
         },
         .map => |entries| {
             const flattened_count = std.math.mul(usize, entries.len, 2) catch return error.LengthOverflow;
             try validateLength(flattened_count);
 
             for (entries) |entry| {
-                try validateReply(entry.key);
-                try validateReply(entry.value);
+                try validateReply(self, entry.key);
+                try validateReply(self, entry.value);
             }
         },
         .null_value, .integer => {},
@@ -59,12 +68,19 @@ fn validateLength(length: usize) EncodeError!void {
     if (std.math.cast(i64, length) == null) return error.LengthOverflow;
 }
 
+pub fn verbatimLength(text_length: usize) EncodeError!usize {
+    const length = std.math.add(usize, text_length, verbatim_prefix.len) catch return error.LengthOverflow;
+    try validateLength(length);
+    return length;
+}
+
 fn writeValue(self: Resp, writer: *std.Io.Writer, value: Reply) EncodeError!void {
     switch (value) {
         .simple_string => |text| try self.vtable.writeSimpleString(self.ptr, writer, text),
         .error_reply => |text| try self.vtable.writeError(self.ptr, writer, text),
         .integer => |integer| try self.vtable.writeInteger(self.ptr, writer, integer),
         .blob_string => |bytes| try self.vtable.writeBlobString(self.ptr, writer, bytes),
+        .verbatim => |text| try self.vtable.writeVerbatim(self.ptr, writer, text),
         .null_value => |kind| try self.vtable.writeNull(self.ptr, writer, kind),
         .array => |items| try self.vtable.writeArray(self.ptr, self, writer, items),
         .map => |entries| try self.vtable.writeMap(self.ptr, self, writer, entries),

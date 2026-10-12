@@ -34,6 +34,61 @@ test "RESP null hints retain RESP2 shape and become RESP3 null" {
     try expectReply(protocol.Resp3.resp(), .{ .null_value = .array }, "_\r\n");
 }
 
+test "verbatim has exact RESP2 bulk and RESP3 txt framing" {
+    const cases = [_]struct { text: []const u8, resp2: []const u8, resp3: []const u8 }{
+        .{ .text = "x\n", .resp2 = "$2\r\nx\n\r\n", .resp3 = "=6\r\ntxt:x\n\r\n" },
+        .{ .text = "", .resp2 = "$0\r\n\r\n", .resp3 = "=4\r\ntxt:\r\n" },
+        .{ .text = "a\r\nb\n", .resp2 = "$5\r\na\r\nb\n\r\n", .resp3 = "=9\r\ntxt:a\r\nb\n\r\n" },
+        .{ .text = "\xc3\xa9\n", .resp2 = "$3\r\n\xc3\xa9\n\r\n", .resp3 = "=7\r\ntxt:\xc3\xa9\n\r\n" },
+    };
+    for (cases) |case| {
+        try expectReply(protocol.Resp2.resp(), .{ .verbatim = case.text }, case.resp2);
+        try expectReply(protocol.Resp3.resp(), .{ .verbatim = case.text }, case.resp3);
+    }
+}
+
+test "nested verbatim retains the selected RESP implementation" {
+    const entries = [_]MapEntry{.{
+        .key = .{ .blob_string = "info" },
+        .value = .{ .verbatim = "x\n" },
+    }};
+    const value: Reply = .{ .array = &.{.{ .map = &entries }} };
+    try expectReply(protocol.Resp2.resp(), value, "*1\r\n*2\r\n$4\r\ninfo\r\n$2\r\nx\n\r\n");
+    try expectReply(protocol.Resp3.resp(), value, "*1\r\n%1\r\n$4\r\ninfo\r\n=6\r\ntxt:x\n\r\n");
+}
+
+test "verbatim length includes the prefix and rejects arithmetic overflow" {
+    try testing.expectEqual(4, try Resp.verbatimLength(0));
+    try testing.expectEqual(6, try Resp.verbatimLength(2));
+    try testing.expectError(error.LengthOverflow, Resp.verbatimLength(std.math.maxInt(usize)));
+    if (@bitSizeOf(usize) >= 64) {
+        const signed_max: usize = @intCast(std.math.maxInt(i64));
+        try testing.expectEqual(signed_max, try Resp.verbatimLength(signed_max - 4));
+        try testing.expectError(error.LengthOverflow, Resp.verbatimLength(signed_max - 3));
+    }
+}
+
+test "oversized nested verbatim is rejected before any output" {
+    if (@bitSizeOf(usize) < 64) return;
+    const signed_max: usize = @intCast(std.math.maxInt(i64));
+    const cases = [_]struct { selected: Resp, length: usize }{
+        .{ .selected = protocol.Resp2.resp(), .length = signed_max + 1 },
+        .{ .selected = protocol.Resp3.resp(), .length = signed_max - 3 },
+    };
+    for (cases) |case| {
+        const text = "x".ptr[0..case.length];
+        const entries = [_]MapEntry{.{
+            .key = .{ .blob_string = "info" },
+            .value = .{ .verbatim = text },
+        }};
+        const value: Reply = .{ .array = &.{ .{ .simple_string = "OK" }, .{ .map = &entries } } };
+        var buffer: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try testing.expectError(error.LengthOverflow, case.selected.writeReply(&writer, value));
+        try testing.expectEqualStrings("", writer.buffered());
+    }
+}
+
 test "nested arrays and maps retain the selected RESP implementation" {
     const entries = [_]MapEntry{.{
         .key = .{ .blob_string = "value" },
@@ -127,5 +182,24 @@ test "RESP output failure returns the partial prefix without appending a reply" 
         var sink: ShortSink = .{ .fail_after = 7 };
         try testing.expectError(error.WriteFailed, selected.writeReply(&sink.writer, value));
         try testing.expectEqualStrings(expected[0..7], sink.bytes[0..sink.len]);
+    }
+}
+
+test "verbatim finishes short writes and preserves failed prefixes" {
+    const cases = [_]struct { selected: Resp, expected: []const u8 }{
+        .{ .selected = protocol.Resp2.resp(), .expected = "$2\r\nx\n\r\n" },
+        .{ .selected = protocol.Resp3.resp(), .expected = "=6\r\ntxt:x\n\r\n" },
+    };
+    for (cases) |case| {
+        var sink: ShortSink = .{};
+        try case.selected.writeReply(&sink.writer, .{ .verbatim = "x\n" });
+        try sink.writer.flush();
+        try testing.expectEqualStrings(case.expected, sink.bytes[0..sink.len]);
+
+        for ([_]usize{ 1, 5, case.expected.len - 1 }) |limit| {
+            var failing: ShortSink = .{ .fail_after = limit };
+            try testing.expectError(error.WriteFailed, case.selected.writeReply(&failing.writer, .{ .verbatim = "x\n" }));
+            try testing.expectEqualStrings(case.expected[0..limit], failing.bytes[0..failing.len]);
+        }
     }
 }

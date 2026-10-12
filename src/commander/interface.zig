@@ -3,7 +3,7 @@ const store = @import("../store.zig");
 const std = @import("std");
 const object = @import("../object.zig");
 
-pub const ClientState = @import("../client_state.zig");
+pub const ClientState = @import("../connection.zig").ClientState;
 
 const Commander = @This();
 
@@ -14,12 +14,14 @@ pub const Error = std.mem.Allocator.Error || error{
     MalformedCommandRequest,
     WrongNumberArguments,
     UnsupportedOption,
+    UnsupportedProtocolVersion,
     Syntax,
     DbIndexOutOfRange,
 };
 
 ptr: *anyopaque,
 vtable: *const VTable,
+canonical_name: []const u8 = "",
 
 pub const VTable = struct {
     execute: *const fn (*anyopaque, std.Io, *store.Store, *ClientState) anyerror!Result,

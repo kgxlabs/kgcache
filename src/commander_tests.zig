@@ -7,9 +7,65 @@ const store = @import("store.zig");
 const MockStore = @import("store/mock_store.zig");
 const init = commander.init;
 
+test "command handlers borrow their client's connection identity" {
+    const testing = std.testing;
+    const ConnectionContext = @import("connection.zig").ConnectionContext;
+    const IdentityCommand = struct {
+        expected_context: *const ConnectionContext,
+
+        fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, state: *Commander.ClientState) anyerror!Commander.Result {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const context = state.connection_context orelse return error.TestUnexpectedResult;
+            try testing.expect(context == self.expected_context);
+            return Commander.Result.borrowed(.{ .integer = @intCast(context.id) });
+        }
+
+        fn deinit(_: *anyopaque) void {}
+
+        const vtable: Commander.VTable = .{ .execute = execute, .deinit = deinit };
+    };
+    const TestNetwork = @import("connection/test_network.zig");
+    const contexts = [_]ConnectionContext{ TestNetwork.identityContext(1), TestNetwork.identityContext(2) };
+    var mock = MockStore.init();
+    var data_store = mock.store();
+
+    for (&contexts) |*context| {
+        var implementation: IdentityCommand = .{ .expected_context = context };
+        const command: Commander = .{ .ptr = &implementation, .vtable = &IdentityCommand.vtable };
+        defer command.deinit();
+        var state = Commander.ClientState.initWithConnection(context);
+        var result = try command.execute(testing.io, &data_store, &state);
+        defer result.deinit();
+        try testing.expectEqual(@as(i64, @intCast(context.id)), result.value.integer);
+        try testing.expectEqual(@as(u32, 0), state.db_index);
+        try testing.expectEqual(protocol.Resp.Version.resp2, state.resp.version());
+    }
+    try testing.expectEqual(null, Commander.ClientState.init().connection_context);
+}
+
 test "reject unknown command" {
-    for ([_][]const u8{ "UNKNOWN", "" }) |name| {
+    for ([_][]const u8{ "UNKNOWN", "AUTH", "" }) |name| {
         try std.testing.expectError(error.UnknownCommand, init(std.testing.allocator, .{ .name = name, .arguments = &.{} }));
+    }
+}
+
+test "bound commands keep static canonical names after caller input and handlers are released" {
+    const testing = std.testing;
+    const registry = @import("commander/registry.zig");
+    for (registry.all()) |definition| {
+        var name: [32]u8 = undefined;
+        for (definition.name, 0..) |byte, index| name[index] = std.ascii.toUpper(byte);
+        const is_client = std.mem.eql(u8, definition.name, "client");
+        const arguments = [_][]const u8{ "key", "value" };
+        const command = try init(testing.allocator, .{
+            .name = name[0..definition.name.len],
+            .arguments = if (is_client) &.{"iNfO"} else arguments[0..definition.arity.minimum],
+        });
+        const canonical_name = command.canonical_name;
+        command.deinit();
+        @memset(&name, 'x');
+        try testing.expectEqualStrings(if (is_client) "client|info" else definition.name, canonical_name);
+        if (!is_client) try testing.expect(canonical_name.ptr == definition.name.ptr);
     }
 }
 
@@ -66,6 +122,44 @@ fn replyLifetime(allocator: std.mem.Allocator) !void {
             try writer.flush();
             try testing.expectEqualStrings("$3\r\n\x00\r\n\r\n", writer.buffered());
         }
+    }
+}
+
+test "one owned verbatim Result survives output failures through flush" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, verbatimResultLifetime, .{});
+}
+
+fn verbatimResultLifetime(allocator: std.mem.Allocator) !void {
+    const testing = std.testing;
+    var source = [_]u8{ 'x', '\n' };
+    var result = owned: {
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        arena.* = std.heap.ArenaAllocator.init(allocator);
+        errdefer {
+            arena.deinit();
+            allocator.destroy(arena);
+        }
+        const text = try arena.allocator().dupe(u8, &source);
+        break :owned Commander.Result.inArena(.{ .verbatim = text }, arena);
+    };
+    defer result.deinit();
+    @memset(&source, 'z');
+    try testing.expect(result.owned_arena != null);
+    try testing.expectEqualStrings("x\n", result.value.verbatim);
+
+    for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
+        var small_buffer: [1]u8 = undefined;
+        var failing_writer = std.Io.Writer.fixed(&small_buffer);
+        try testing.expectError(error.WriteFailed, selected.writeReply(&failing_writer, result.value));
+
+        var buffer: [32]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try selected.writeReply(&writer, result.value);
+        try writer.flush();
+        const expected = if (selected.version() == .resp2) "$2\r\nx\n\r\n" else "=6\r\ntxt:x\n\r\n";
+        try testing.expectEqualStrings(expected, writer.buffered());
+        try testing.expect(result.owned_arena != null);
+        try testing.expectEqualStrings("x\n", result.value.verbatim);
     }
 }
 
@@ -351,6 +445,72 @@ test "COMMAND INFO reports command metadata and unknown names" {
     defer writer.deinit();
     try protocol.Resp2.resp().writeReply(&writer.writer, result.value);
     try testing.expect(std.mem.indexOf(u8, writer.written(), "*-1\r\n") != null);
+}
+
+test "COMMAND reports HELLO arity and connection metadata" {
+    const testing = std.testing;
+    var mock = MockStore.init();
+    var result = try executeWithMockStore("COMMAND", &.{ "INFO", "hElLo" }, &mock);
+    defer result.deinit();
+    const commands = try expectArray(result.value);
+    try testing.expectEqual(1, commands.len);
+    const fields = try expectArray(commands[0]);
+    try testing.expectEqual(10, fields.len);
+    try expectBulk(fields[0], "hello");
+    try testing.expectEqual(@as(i64, -1), fields[1].integer);
+    try expectBulkArray(fields[2], &.{"fast"});
+    for (fields[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
+    try expectBulkArray(fields[6], &.{ "@connection", "@fast" });
+    for (fields[7..10]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
+
+    var list = try executeWithMockStore("COMMAND", &.{ "LIST", "FILTERBY", "ACLCAT", "connection" }, &mock);
+    defer list.deinit();
+    try expectBulkArray(list.value, &.{ "client", "command", "echo", "hello", "ping", "select" });
+}
+
+test "COMMAND reports CLIENT and supported subcommand metadata" {
+    const testing = std.testing;
+    var mock = MockStore.init();
+    var result = try executeWithMockStore("COMMAND", &.{ "INFO", "cLiEnT" }, &mock);
+    defer result.deinit();
+    const commands = try expectArray(result.value);
+    try testing.expectEqual(1, commands.len);
+    const fields = try expectArray(commands[0]);
+    try testing.expectEqual(10, fields.len);
+    try expectBulk(fields[0], "client");
+    try testing.expectEqual(@as(i64, -2), fields[1].integer);
+    try expectBulkArray(fields[2], &.{});
+    for (fields[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
+    try expectBulkArray(fields[6], &.{ "@connection", "@slow" });
+    for (fields[7..9]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
+    const subcommands = try expectArray(fields[9]);
+    try testing.expectEqual(3, subcommands.len);
+    const info = try expectArray(subcommands[0]);
+    try expectBulk(info[0], "client|info");
+    try testing.expectEqual(@as(i64, 2), info[1].integer);
+    try expectBulkArray(info[2], &.{"fast"});
+    try expectBulkArray(info[6], &.{ "@connection", "@fast" });
+    const setinfo = try expectArray(subcommands[1]);
+    try expectBulk(setinfo[0], "client|setinfo");
+    try testing.expectEqual(@as(i64, 4), setinfo[1].integer);
+    try expectBulkArray(setinfo[2], &.{});
+    try expectBulkArray(setinfo[6], &.{ "@connection", "@slow" });
+    const list = try expectArray(subcommands[2]);
+    try expectBulk(list[0], "client|list");
+    try testing.expectEqual(@as(i64, 2), list[1].integer);
+    try expectBulkArray(list[2], &.{"admin"});
+    try expectBulkArray(list[6], &.{ "@admin", "@connection", "@slow", "@dangerous" });
+    for (subcommands) |subcommand| {
+        const child = try expectArray(subcommand);
+        for (child[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
+        for (child[7..10]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
+    }
+    var direct = try executeWithMockStore("COMMAND", &.{ "INFO", "cLiEnT|sEtInFo", "cLiEnT|lIsT", "client|missing" }, &mock);
+    defer direct.deinit();
+    const direct_commands = try expectArray(direct.value);
+    try expectBulk((try expectArray(direct_commands[0]))[0], "client|setinfo");
+    try expectBulk((try expectArray(direct_commands[1]))[0], "client|list");
+    try testing.expect(direct_commands[2] == .null_value);
 }
 
 test "COMMAND GETKEYS extracts keys without changing them" {

@@ -2,8 +2,8 @@
 
 This reference covers the commands currently implemented by kgcache. Command
 names and subcommand names are case-insensitive. kgcache supports a subset of
-Redis commands over RESP2, but full Redis compatibility is still a development
-goal. For connection behavior and other server limitations, see
+Redis commands over RESP2 and RESP3, but full Redis compatibility is still a
+development goal. For connection behavior and other server limitations, see
 [Current status and compatibility](../README.md#current-status-and-compatibility).
 
 The commands below start with connection and database selection, move through
@@ -24,6 +24,123 @@ string argument, returns that message as a bulk string.
 `ECHO <message>`
 
 Returns the non-null bulk string argument unchanged.
+
+## `HELLO`
+
+`HELLO [2|3]`
+
+Returns seven ordered metadata fields for the requesting connection. New
+connections start in RESP2. `HELLO 2` selects RESP2 and returns a flat key/value
+array. `HELLO 3` selects RESP3 and returns a map. Bare `HELLO` reports the current
+mode without changing it. The selected mode applies to HELLO's own reply and
+subsequent commands, including commands in the same pipeline. HELLO preserves
+the selected database.
+
+| Field | Value |
+| --- | --- |
+| `server` | `kgcache` |
+| `version` | The kgcache package version used for this build |
+| `proto` | The connection's current protocol version, initially `2` |
+| `id` | The connection's positive integer ID, never reused within a server run |
+| `mode` | `standalone` |
+| `role` | `master` |
+| `modules` | An empty array |
+
+IDs may restart after a server restart. Unsupported integer versions return
+`NOPROTO unsupported protocol version`. Invalid or out-of-range integers return
+`ERR malformed command request`. Additional arguments, including `AUTH` and
+`SETNAME` options, return `ERR unsupported option`. Rejected requests preserve
+the current mode and leave the connection usable.
+
+`COMMAND INFO HELLO` reports arity `-1`, the `fast` flag, the `@connection`
+and `@fast` categories, and no keys.
+
+## `CLIENT`
+
+`CLIENT INFO`
+
+Returns one space-separated row with a trailing LF. RESP2 sends a bulk string;
+RESP3 sends a `txt:` verbatim string. Identity, peer/local endpoints, descriptor,
+age, and idle time come from the requesting connection's owned snapshot.
+IPv6 endpoints use `[address]:port`. Age and idle use whole monotonic seconds,
+with negative durations clamped to zero.
+
+The field order is `id`, `addr`, `laddr`, `fd`, `age`, `idle`, `db`, `cmd`,
+`resp`, `lib-name`, `lib-ver`, `tot-net-in`, `tot-net-out`, `tot-cmds`, then
+`name`, `sub`, `psub`, `ssub`, `watch`, `multi`, `multi-mem`, and `redir`.
+The fixed indicators are an empty `name`, zero subscription/watch counts,
+`multi=-1`, `multi-mem=0`, and `redir=-1`.
+
+`tot-net-in` counts successful network read bytes once, before dispatch,
+including received pipeline tails. `tot-net-out` counts bytes actually sent,
+including prefixes sent before a later write failure. INFO includes its received
+bytes and excludes its current reply bytes. Successful positive reads and writes
+update activity; idle measures the time since the last such transfer. Byte and
+command totals saturate at `18446744073709551615` (`maxInt(u64)`).
+
+`cmd` is the canonical registered handler name, such as `get`, `hello`,
+`client|info`, `client|list`, or `client|setinfo`. `tot-cmds` increments immediately
+before each successfully bound handler call, including calls that return an
+error. Unknown commands, binding arity errors, unsupported CLIENT forms,
+incomplete input, and malformed frames do not change the count or last command.
+INFO includes its own dispatch.
+
+`db` and `resp` report the selected database and protocol, initially `0` and `2`.
+The session publishes their current values after handler execution and before
+reply output, including expected command errors. A valid HELLO or SELECT is
+visible to the next INFO in the same pipeline. Rejected changes preserve the
+previous selection. Library labels start empty and reflect successful SETINFO
+calls on this connection.
+
+`CLIENT LIST`
+
+Returns one text payload containing a row for each live connection, including
+the caller, sorted by ascending connection ID. Each row uses INFO's 22 fields
+and trailing LF, with the same RESP2 bulk and RESP3 `txt:` verbatim encoding.
+LIST takes no filters. Additional arguments, including ID and TYPE filters,
+return `ERR wrong number of arguments` before dispatch.
+
+LIST includes registered connections until their worker finishes. Finished
+workers are excluded even before cleanup removes their records. A connection
+captured before it closes can still appear in that response. Each row is
+consistent at its own capture time; the rows are not one simultaneous snapshot
+of all connections. Owned copies preserve row data through disconnects and
+library-label replacement. All collection and report locks are released before
+sorting, formatting, or sending the reply.
+
+The caller's row includes LIST's own dispatch as `cmd=client|list` and in
+`tot-cmds`. Its incoming bytes are counted, and its current reply bytes are
+excluded. Other rows contain their most recently published database, protocol,
+labels, command name, and counters.
+
+`CLIENT SETINFO LIB-NAME <value>`
+
+`CLIENT SETINFO LIB-VER <value>`
+
+Retains the library name or version and returns `OK`. Command, subcommand, and
+attribute names are case-insensitive; valid value bytes are preserved exactly.
+Values may be empty or contain printable ASCII bytes from `!` through `~`.
+Whitespace, control bytes, NUL, and non-ASCII bytes return `ERR syntax error`.
+Unknown attributes return `ERR unsupported option`. Invalid values or failed
+replacement allocation preserve the previous label. Repeated calls replace a
+label; an empty value clears it. The next INFO in a pipeline sees the change.
+Labels belong to one connection and are not stored in cache data or persistence
+files. The existing encoded-request limit applies, with no shorter label limit.
+
+SETINFO takes exactly an attribute and a value. Wrong arity is rejected before
+dispatch and does not change `cmd` or `tot-cmds`. Attribute and content errors
+occur in the recognized handler and count as `client|setinfo` dispatches.
+
+Bare `CLIENT` and extra INFO/LIST arguments return `ERR wrong number of arguments`.
+Unknown subcommands, including `SETNAME`, `GETNAME`, `ID`, and `TRACKING`,
+return `ERR unsupported option`. These errors leave the connection usable.
+`COMMAND INFO CLIENT` reports container arity `-2`, no flags or keys, the
+`@connection` and `@slow` categories, and its supported subcommand metadata.
+`COMMAND INFO client|info` reports arity `2`, the `fast` flag, and `@connection`
+and `@fast`. `COMMAND INFO client|setinfo` reports arity `4`, no flags or keys,
+and `@connection` and `@slow`.
+`COMMAND INFO client|list` reports arity `2`, the `admin` flag, no keys, and
+`@admin`, `@connection`, `@slow`, and `@dangerous`.
 
 ## `SELECT`
 
@@ -124,12 +241,13 @@ repeated requests of that kind coalesce into it. With
 Without a subcommand, returns registry metadata for every supported command.
 Each RESP2 metadata entry has ten fields: name, arity, flags, first key, last
 key, key step, ACL categories, tips, key specifications, and subcommands. Tips
-and subcommand details are currently empty.
+are empty. CLIENT includes INFO, LIST, and SETINFO subcommand details, also
+available by their case-insensitive full names through COMMAND INFO.
 
 | Subcommand | Behavior |
 | --- | --- |
-| `COUNT` | Returns the number of supported commands as an integer. |
-| `LIST [FILTERBY PATTERN <pattern> \| FILTERBY ACLCAT <category>]` | Returns supported command names as an array. `PATTERN` supports `*` and `?`; `ACLCAT` accepts a category with or without a leading `@`. |
+| `COUNT` | Returns the number of supported top-level commands as an integer. |
+| `LIST [FILTERBY PATTERN <pattern> \| FILTERBY ACLCAT <category>]` | Returns supported top-level command names as an array. `PATTERN` supports `*` and `?`; `ACLCAT` accepts a category with or without a leading `@`. |
 | `INFO [name ...]` | Returns metadata for the named commands, or all commands when no names are given. Unknown names produce a null array entry. |
 | `GETKEYS <command> [arguments ...]` | Returns the key arguments of a supported command. |
 | `GETKEYSANDFLAGS <command> [arguments ...]` | Returns each key with its access flags as a `[key, flags]` entry. |

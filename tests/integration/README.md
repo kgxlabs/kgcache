@@ -16,6 +16,32 @@ the error, then send PING on the same TCP connection and require PONG. They also
 check that invalid SET requests leave the stored value intact and that binary
 option bytes do not appear in the error response.
 
+The CLIENT INFO cases check RESP2 bulk and RESP3 `txt:` verbatim replies,
+the 22 fields in order, endpoint formatting, fixed indicators, empty labels,
+and identity agreement with HELLO on two connections. They pipeline invalid
+CLIENT forms with PING in both modes to check mapped errors and recovery.
+Consecutive INFO replies verify exact read and write byte deltas, including the
+previous INFO reply and PONG, without depending on socket read grouping.
+They also verify `cmd=client|info`, INFO's own dispatch, handler-error counts,
+unchanged counts for rejected bindings, and separate totals for each connection.
+HELLO, SELECT, expected errors, versionless HELLO, INFO, and PING in one pipeline
+verify the latest valid database/protocol and independent connection defaults.
+SETINFO cases pipeline both labels with INFO and PING in both modes. They check
+case handling, exact value bytes, replacement, clearing, rejected attributes
+and invalid bytes, handler-error counts, separate connection labels, and
+COMMAND's SETINFO metadata. Unit tests also cover replacement/snapshot allocation
+failures, input-buffer reuse, concurrent snapshots, partial output failure,
+worker startup failure, reaping, and shutdown cleanup.
+
+CLIENT LIST cases verify the same 22 fields in RESP2 and RESP3, caller inclusion,
+ascending IDs, independent database/protocol/labels, replacement and clearing,
+pipeline visibility, rejected filters without dispatch, disconnect exclusion,
+and new IDs after reconnect. Manager tests copy reports during concurrent label
+updates and worker registration/reaping, inject allocation failures, and keep
+owned rows after manager destruction. A real socket test leaves a 1 MiB LIST
+reply unread, verifies another client still answers PING and the collection lock
+is free, and requires shutdown to join the blocked writer within five seconds.
+
 The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
 and `appendfilename` with a real process. They check the first and last valid
 database indices and reject the next index. Snapshot cases call `SAVE`, then
