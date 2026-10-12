@@ -15,6 +15,7 @@ test "session state exposes current snapshots through a borrowed report provider
             .record_write = recordWrite,
             .record_dispatch = recordDispatch,
             .record_db_and_proto = recordDbAndProto,
+            .set_library_info = setLibraryInfo,
         };
 
         fn recordRead(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
@@ -37,6 +38,11 @@ test "session state exposes current snapshots through a borrowed report provider
             self.report.recordDbAndProto(db_index, resp);
         }
 
+        fn setLibraryInfo(ptr: *anyopaque, attribute: connection.ConnectionReport.LibraryAttribute, value: []const u8) connection.ConnectionContext.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.report.setLibraryInfo(attribute, value);
+        }
+
         fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.Snapshot {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.calls += 1;
@@ -56,7 +62,7 @@ test "session state exposes current snapshots through a borrowed report provider
     var network = TestNetwork.init(testing.io, 0);
     network.registration_time = .fromNanoseconds(500);
     const io = network.io();
-    var provider: Provider = .{ .report = connection.ConnectionReport.init(io, .fromNanoseconds(100)) };
+    var provider: Provider = .{ .report = connection.ConnectionReport.init(io, testing.allocator, .fromNanoseconds(100)) };
     const context: connection.ConnectionContext = .{
         .id = 42,
         .ptr = &provider,

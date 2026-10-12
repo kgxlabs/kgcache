@@ -49,6 +49,7 @@ pub const ClientWorker = struct {
         .record_write = recordWrite,
         .record_dispatch = recordDispatch,
         .record_db_and_proto = recordDbAndProto,
+        .set_library_info = setLibraryInfo,
     };
 
     fn recordRead(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
@@ -69,6 +70,11 @@ pub const ClientWorker = struct {
     fn recordDbAndProto(ptr: *anyopaque, db_index: u32, resp: protocol.Resp.Version) void {
         const self: *ClientWorker = @ptrCast(@alignCast(ptr));
         self.report.recordDbAndProto(db_index, resp);
+    }
+
+    fn setLibraryInfo(ptr: *anyopaque, attribute: ConnectionReport.LibraryAttribute, value: []const u8) ConnectionContext.Error!void {
+        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
+        return self.report.setLibraryInfo(attribute, value);
     }
 
     fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
@@ -163,8 +169,9 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
         .local_endpoint = local_endpoint,
         .descriptor = stream.socket.handle,
         .registered_at = registered_at,
-        .report = ConnectionReport.init(self._io, registered_at),
+        .report = ConnectionReport.init(self._io, self._allocator, registered_at),
     };
+    errdefer worker.report.deinit();
     self._next_connection_id += 1;
 
     try self._workers.append(self._allocator, worker);
@@ -197,6 +204,7 @@ pub fn reapFinished(self: *ConnectionManager) !void {
 
     for (finished_workers[0..finished_count]) |finished_worker| {
         finished_worker.thread.?.join();
+        finished_worker.report.deinit();
         self._allocator.destroy(finished_worker);
     }
 }
@@ -237,6 +245,7 @@ pub fn deinit(self: *ConnectionManager) !void {
 
     for (draining_workers.items) |worker| {
         worker.thread.?.join();
+        worker.report.deinit();
         self._allocator.destroy(worker);
     }
     draining_workers.deinit(self._allocator);
@@ -276,7 +285,11 @@ test "thread spawn failure consumes its ID and closes the stream once" {
     const testing = std.testing;
     const failSpawn = struct {
         fn spawn(manager: *ConnectionManager, worker: *ClientWorker) std.Thread.SpawnError!std.Thread {
-            if (worker.context.id == 1) return error.ThreadQuotaExceeded;
+            if (worker.context.id == 1) {
+                worker.context.setLibraryInfo(.lib_name, "failed-worker") catch return error.SystemResources;
+                worker.context.setLibraryInfo(.lib_ver, "V1") catch return error.SystemResources;
+                return error.ThreadQuotaExceeded;
+            }
             return spawnWorkerThread(manager, worker);
         }
     }.spawn;

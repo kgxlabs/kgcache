@@ -79,8 +79,8 @@ update activity; idle measures the time since the last such transfer. Byte and
 command totals saturate at `18446744073709551615` (`maxInt(u64)`).
 
 `cmd` is the canonical registered handler name, such as `get`, `hello`, or
-`client|info`. `tot-cmds` increments immediately before each successfully bound
-handler call, including calls that return an error. Unknown commands, binding
+`client|info`, or `client|setinfo`. `tot-cmds` increments immediately before each
+successfully bound handler call, including calls that return an error. Unknown commands, binding
 arity errors, unsupported CLIENT forms, incomplete input, and malformed frames
 do not change the count or last command. INFO includes its own dispatch.
 
@@ -88,13 +88,35 @@ do not change the count or last command. INFO includes its own dispatch.
 The session publishes their current values after handler execution and before
 reply output, including expected command errors. A valid HELLO or SELECT is
 visible to the next INFO in the same pipeline. Rejected changes preserve the
-previous selection. Both library labels are empty at this checkpoint.
+previous selection. Library labels start empty and reflect successful SETINFO
+calls on this connection.
+
+`CLIENT SETINFO LIB-NAME <value>`
+
+`CLIENT SETINFO LIB-VER <value>`
+
+Retains the library name or version and returns `OK`. Command, subcommand, and
+attribute names are case-insensitive; valid value bytes are preserved exactly.
+Values may be empty or contain printable ASCII bytes from `!` through `~`.
+Whitespace, control bytes, NUL, and non-ASCII bytes return `ERR syntax error`.
+Unknown attributes return `ERR unsupported option`. Invalid values or failed
+replacement allocation preserve the previous label. Repeated calls replace a
+label; an empty value clears it. The next INFO in a pipeline sees the change.
+Labels belong to one connection and are not stored in cache data or persistence
+files. The existing encoded-request limit applies, with no shorter label limit.
+
+SETINFO takes exactly an attribute and a value. Wrong arity is rejected before
+dispatch and does not change `cmd` or `tot-cmds`. Attribute and content errors
+occur in the recognized handler and count as `client|setinfo` dispatches.
 
 Bare `CLIENT` and extra INFO arguments return `ERR wrong number of arguments`.
-Unknown subcommands, including `SETINFO` and `LIST`, return `ERR unsupported
-option`. These errors leave the connection usable. `COMMAND INFO CLIENT`
-reports container arity `-2`, the `fast` flag, `@connection` and `@fast`
-categories, and no keys. INFO itself accepts exactly one subcommand argument.
+Unknown subcommands, including `LIST`, `SETNAME`, `GETNAME`, `ID`, and `TRACKING`,
+return `ERR unsupported option`. These errors leave the connection usable.
+`COMMAND INFO CLIENT` reports container arity `-2`, no flags or keys, the
+`@connection` and `@slow` categories, and its supported subcommand metadata.
+`COMMAND INFO client|info` reports arity `2`, the `fast` flag, and `@connection`
+and `@fast`. `COMMAND INFO client|setinfo` reports arity `4`, no flags or keys,
+and `@connection` and `@slow`.
 
 ## `SELECT`
 
@@ -195,12 +217,13 @@ repeated requests of that kind coalesce into it. With
 Without a subcommand, returns registry metadata for every supported command.
 Each RESP2 metadata entry has ten fields: name, arity, flags, first key, last
 key, key step, ACL categories, tips, key specifications, and subcommands. Tips
-and subcommand details are currently empty.
+are empty. CLIENT includes INFO and SETINFO subcommand details, also available
+by their case-insensitive full names through COMMAND INFO.
 
 | Subcommand | Behavior |
 | --- | --- |
-| `COUNT` | Returns the number of supported commands as an integer. |
-| `LIST [FILTERBY PATTERN <pattern> \| FILTERBY ACLCAT <category>]` | Returns supported command names as an array. `PATTERN` supports `*` and `?`; `ACLCAT` accepts a category with or without a leading `@`. |
+| `COUNT` | Returns the number of supported top-level commands as an integer. |
+| `LIST [FILTERBY PATTERN <pattern> \| FILTERBY ACLCAT <category>]` | Returns supported top-level command names as an array. `PATTERN` supports `*` and `?`; `ACLCAT` accepts a category with or without a leading `@`. |
 | `INFO [name ...]` | Returns metadata for the named commands, or all commands when no names are given. Unknown names produce a null array entry. |
 | `GETKEYS <command> [arguments ...]` | Returns the key arguments of a supported command. |
 | `GETKEYSANDFLAGS <command> [arguments ...]` | Returns each key with its access flags as a `[key, flags]` entry. |

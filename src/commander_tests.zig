@@ -468,7 +468,7 @@ test "COMMAND reports HELLO arity and connection metadata" {
     try expectBulkArray(list.value, &.{ "client", "command", "echo", "hello", "ping", "select" });
 }
 
-test "COMMAND reports CLIENT container arity and connection metadata" {
+test "COMMAND reports CLIENT and supported subcommand metadata" {
     const testing = std.testing;
     var mock = MockStore.init();
     var result = try executeWithMockStore("COMMAND", &.{ "INFO", "cLiEnT" }, &mock);
@@ -479,10 +479,32 @@ test "COMMAND reports CLIENT container arity and connection metadata" {
     try testing.expectEqual(10, fields.len);
     try expectBulk(fields[0], "client");
     try testing.expectEqual(@as(i64, -2), fields[1].integer);
-    try expectBulkArray(fields[2], &.{"fast"});
+    try expectBulkArray(fields[2], &.{});
     for (fields[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
-    try expectBulkArray(fields[6], &.{ "@connection", "@fast" });
-    for (fields[7..10]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
+    try expectBulkArray(fields[6], &.{ "@connection", "@slow" });
+    for (fields[7..9]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
+    const subcommands = try expectArray(fields[9]);
+    try testing.expectEqual(2, subcommands.len);
+    const info = try expectArray(subcommands[0]);
+    try expectBulk(info[0], "client|info");
+    try testing.expectEqual(@as(i64, 2), info[1].integer);
+    try expectBulkArray(info[2], &.{"fast"});
+    try expectBulkArray(info[6], &.{ "@connection", "@fast" });
+    const setinfo = try expectArray(subcommands[1]);
+    try expectBulk(setinfo[0], "client|setinfo");
+    try testing.expectEqual(@as(i64, 4), setinfo[1].integer);
+    try expectBulkArray(setinfo[2], &.{});
+    try expectBulkArray(setinfo[6], &.{ "@connection", "@slow" });
+    for (subcommands) |subcommand| {
+        const child = try expectArray(subcommand);
+        for (child[3..6]) |field| try testing.expectEqual(@as(i64, 0), field.integer);
+        for (child[7..10]) |field| try testing.expectEqual(0, (try expectArray(field)).len);
+    }
+    var direct = try executeWithMockStore("COMMAND", &.{ "INFO", "cLiEnT|sEtInFo", "client|list" }, &mock);
+    defer direct.deinit();
+    const direct_commands = try expectArray(direct.value);
+    try expectBulk((try expectArray(direct_commands[0]))[0], "client|setinfo");
+    try testing.expect(direct_commands[1] == .null_value);
 }
 
 test "COMMAND GETKEYS extracts keys without changing them" {

@@ -64,12 +64,8 @@ test "current snapshots use request storage and survive manager destruction" {
         worker.report.recordRead(12, .fromNanoseconds(200));
         worker.report.recordWrite(34, .fromNanoseconds(300));
         worker.report.recordDispatch("client|info");
-        {
-            var tx = worker.report._lock.beginUncancelable();
-            defer tx.end();
-            worker.report._values.lib_name = "test-library";
-            worker.report._values.lib_ver = "1.2.3";
-        }
+        try worker.context.setLibraryInfo(.lib_name, "test-library");
+        try worker.context.setLibraryInfo(.lib_ver, "1.2.3");
         network.registration_time = .fromNanoseconds(500);
         const state = @import("client_state.zig").initWithConnection(&worker.context);
         var owned = try state.connection_context.?.snapshotCurrent(io, request_arena.allocator());
@@ -98,6 +94,37 @@ test "current snapshots use request storage and survive manager destruction" {
     try testing.expectEqual(1, snapshot.report.values.total_cmds);
     try testing.expectEqual(std.Io.Timestamp.fromNanoseconds(300), snapshot.report.values.last_activity);
     try testing.expectEqual(1, network.close_calls.load(.acquire));
+    try testing.expectEqual(1, network.shutdown_calls.load(.acquire));
+}
+
+test "owned labels are freed during repeated reaping and shutdown" {
+    const testing = std.testing;
+    var network = TestNetwork.init(testing.io, 1);
+    network.immediate_eof_handle = 7;
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    defer manager.deinit() catch unreachable;
+    try manager.start(TestNetwork.stream(7));
+    const first = manager._workers.items[0];
+    try first.context.setLibraryInfo(.lib_name, "First");
+    try first.context.setLibraryInfo(.lib_name, "Replacement");
+    try first.context.setLibraryInfo(.lib_ver, "V1");
+    var snapshot = try first.context.snapshotCurrent(manager._io, testing.allocator);
+    defer snapshot.deinit();
+    network.immediate_closed.waitUncancelable(testing.io);
+    try manager.reapFinished();
+    try manager.reapFinished();
+    try testing.expectEqual(0, manager._workers.items.len);
+    try testing.expectEqualStrings("Replacement", snapshot.report.values.lib_name);
+    try testing.expectEqualStrings("V1", snapshot.report.values.lib_ver);
+    try manager.start(TestNetwork.stream(8));
+    const second = manager._workers.items[0];
+    try second.context.setLibraryInfo(.lib_name, "Second");
+    try second.context.setLibraryInfo(.lib_ver, "V2");
+    network.all_reads_started.waitUncancelable(testing.io);
+    try manager.deinit();
+    try testing.expectEqual(2, network.close_calls.load(.acquire));
     try testing.expectEqual(1, network.shutdown_calls.load(.acquire));
 }
 

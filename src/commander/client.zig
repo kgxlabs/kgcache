@@ -6,24 +6,62 @@ const Commander = @import("interface.zig");
 const Client = @This();
 
 allocator: std.mem.Allocator,
+arguments: []const []const u8,
+subcommand: enum { info, setinfo },
 
 pub fn init(allocator: std.mem.Allocator, arguments: []const []const u8) Commander.Error!Commander {
     if (arguments.len == 0) return error.WrongNumberArguments;
 
-    if (!std.ascii.eqlIgnoreCase(arguments[0], "info")) return error.UnsupportedOption;
+    const subcommand: @FieldType(Client, "subcommand") = if (std.ascii.eqlIgnoreCase(arguments[0], "info"))
+        .info
+    else if (std.ascii.eqlIgnoreCase(arguments[0], "setinfo"))
+        .setinfo
+    else
+        return error.UnsupportedOption;
 
-    if (arguments.len != 1) return error.WrongNumberArguments;
+    const arity: usize = switch (subcommand) {
+        .info => 1,
+        .setinfo => 3,
+    };
+
+    if (arguments.len != arity) return error.WrongNumberArguments;
 
     const self = try allocator.create(Client);
-    self.* = .{ .allocator = allocator };
+    self.* = .{ .allocator = allocator, .arguments = arguments, .subcommand = subcommand };
 
-    return .{ .ptr = self, .vtable = &vtable, .canonical_name = "client|info" };
+    return .{ .ptr = self, .vtable = &vtable, .canonical_name = switch (subcommand) {
+        .info => "client|info",
+        .setinfo => "client|setinfo",
+    } };
 }
 
 const vtable: Commander.VTable = .{ .execute = execute, .deinit = deinit };
 
 fn execute(ptr: *anyopaque, io: std.Io, _: *store.Store, state: *Commander.ClientState) anyerror!Commander.Result {
     const self: *Client = @ptrCast(@alignCast(ptr));
+
+    // using simple if else because we only have two subcommands `info` and `setinfo`
+    // TODO: Refactor this with proper Subcommand design. tracked here: https://github.com/kgxlabs/kgcache/issues/182
+    if (self.subcommand == .setinfo) {
+        const attribute: connection.ConnectionReport.LibraryAttribute = if (std.ascii.eqlIgnoreCase(self.arguments[1], "lib-name"))
+            .lib_name
+        else if (std.ascii.eqlIgnoreCase(self.arguments[1], "lib-ver"))
+            .lib_ver
+        else
+            return error.UnsupportedOption;
+
+        const value = self.arguments[2];
+        for (value) |byte| {
+            if (byte < '!' or byte > '~') return error.Syntax;
+        }
+
+        const context = state.connection_context orelse return error.MissingConnectionContext;
+
+        try context.setLibraryInfo(attribute, value);
+
+        return Commander.Result.borrowed(.{ .simple_string = "OK" });
+    }
+
     const context = state.connection_context orelse return error.MissingConnectionContext;
 
     const arena = try self.allocator.create(std.heap.ArenaAllocator);

@@ -15,9 +15,10 @@ const Provider = struct {
     library_name: [9]u8 = "my-client".*,
     library_version: [5]u8 = "1.2.3".*,
     calls: usize = 0,
+    label_calls: usize = 0,
 
     fn init() Provider {
-        return .{ .report = connection.ConnectionReport.init(testing.io, .fromNanoseconds(10_500_000_000)) };
+        return .{ .report = connection.ConnectionReport.init(testing.io, testing.allocator, .fromNanoseconds(10_500_000_000)) };
     }
 
     fn context(self: *Provider) connection.ConnectionContext {
@@ -41,6 +42,7 @@ const Provider = struct {
         .record_write = recordWrite,
         .record_dispatch = recordDispatch,
         .record_db_and_proto = recordDbAndProto,
+        .set_library_info = setLibraryInfo,
     };
 
     fn recordRead(ptr: *anyopaque, count: u64, at: std.Io.Timestamp) void {
@@ -63,6 +65,12 @@ const Provider = struct {
         self.report.recordDbAndProto(db_index, resp);
     }
 
+    fn setLibraryInfo(ptr: *anyopaque, attribute: connection.ConnectionReport.LibraryAttribute, value: []const u8) connection.ConnectionContext.Error!void {
+        const self: *Provider = @ptrCast(@alignCast(ptr));
+        self.label_calls += 1;
+        return self.report.setLibraryInfo(attribute, value);
+    }
+
     fn snapshotCurrent(ptr: *anyopaque, _: std.Io, allocator: std.mem.Allocator) connection.ConnectionContext.Error!connection.ConnectionContext.Snapshot {
         const self: *Provider = @ptrCast(@alignCast(ptr));
         self.calls += 1;
@@ -82,7 +90,7 @@ const expected_row = "id=42 addr=127.0.0.1:40000 laddr=127.0.0.1:6379 fd=7 age=1
     "lib-name=my-client lib-ver=1.2.3 tot-net-in=500 tot-net-out=400 tot-cmds=8 " ++
     "name= sub=0 psub=0 ssub=0 watch=0 multi=-1 multi-mem=0 redir=-1\n";
 
-test "CLIENT binds only INFO with exact arity before allocation" {
+test "CLIENT resolves supported subcommands and exact arity before allocation" {
     const cases = [_]struct { arguments: []const []const u8, err: anyerror }{
         .{ .arguments = &.{}, .err = error.WrongNumberArguments },
         .{ .arguments = &.{ "INFO", "extra" }, .err = error.WrongNumberArguments },
@@ -92,8 +100,10 @@ test "CLIENT binds only INFO with exact arity before allocation" {
         .{ .arguments = &.{ "UNKNOWN", "extra" }, .err = error.UnsupportedOption },
         .{ .arguments = &.{"lIsT"}, .err = error.UnsupportedOption },
         .{ .arguments = &.{ "LIST", "ID", "42" }, .err = error.UnsupportedOption },
-        .{ .arguments = &.{"SETINFO"}, .err = error.UnsupportedOption },
-        .{ .arguments = &.{ "setinfo", "LIB-NAME", "client" }, .err = error.UnsupportedOption },
+        .{ .arguments = &.{"SETINFO"}, .err = error.WrongNumberArguments },
+        .{ .arguments = &.{ "setinfo", "LIB-NAME" }, .err = error.WrongNumberArguments },
+        .{ .arguments = &.{ "setinfo", "LIB-NAME", "client", "extra" }, .err = error.WrongNumberArguments },
+        .{ .arguments = &.{ "setinfo", "unknown" }, .err = error.WrongNumberArguments },
         .{ .arguments = &.{ "SETNAME", "name" }, .err = error.UnsupportedOption },
         .{ .arguments = &.{"ID"}, .err = error.UnsupportedOption },
         .{ .arguments = &.{"INFO\x00"}, .err = error.UnsupportedOption },
@@ -145,6 +155,74 @@ test "CLIENT INFO owns its snapshot text through output in both protocols" {
             try std.fmt.bufPrint(&expected_buffer, "={d}\r\ntxt:{s}\r\n", .{ expected_row.len + 4, expected_row });
         try testing.expectEqualStrings(expected, writer.buffered());
     }
+}
+
+test "SETINFO retains exact printable bytes and clears each label independently" {
+    for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |resp| {
+        var provider = Provider.init();
+        defer provider.report.deinit();
+        const context: connection.ConnectionContext = .{ .id = 42, .ptr = &provider, .vtable = &Provider.vtable };
+        var state = connection.ClientState.initWithConnection(&context);
+        state.resp = resp;
+        var unused_store: @import("../store.zig").Store = undefined;
+        var value: [94]u8 = undefined;
+        for (&value, 0..) |*byte, index| byte.* = @intCast('!' + index);
+        const expected = value;
+        const command = try commander.init(testing.allocator, .{ .name = "cLiEnT", .arguments = &.{ "sEtInFo", "lIb-NaMe", &value } });
+        try testing.expectEqualStrings("client|setinfo", command.canonical_name);
+        var result = command.execute(testing.io, &unused_store, &state) catch |err| {
+            command.deinit();
+            return err;
+        };
+        command.deinit();
+        defer result.deinit();
+        try testing.expectEqualStrings("OK", result.value.simple_string);
+        @memset(&value, 'x');
+        const version = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{ "SETINFO", "LiB-vEr", "AbC!~" } });
+        defer version.deinit();
+        var version_result = try version.execute(testing.io, &unused_store, &state);
+        defer version_result.deinit();
+        var snapshot = try context.snapshotCurrent(testing.io, testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqualStrings(&expected, snapshot.report.values.lib_name);
+        try testing.expectEqualStrings("AbC!~", snapshot.report.values.lib_ver);
+        const clear = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{ "SETINFO", "LIB-NAME", "" } });
+        defer clear.deinit();
+        var clear_result = try clear.execute(testing.io, &unused_store, &state);
+        defer clear_result.deinit();
+        try testing.expectEqualStrings("", provider.report._values.lib_name);
+        try testing.expectEqualStrings("AbC!~", provider.report._values.lib_ver);
+        try testing.expectEqualStrings(&expected, snapshot.report.values.lib_name);
+        try testing.expectEqual(resp, state.resp);
+    }
+}
+
+test "SETINFO validates attributes and every invalid byte in its recognized handler" {
+    var provider = Provider.init();
+    defer provider.report.deinit();
+    try provider.report.setLibraryInfo(.lib_name, "OldName");
+    try provider.report.setLibraryInfo(.lib_ver, "OldVersion");
+    const context: connection.ConnectionContext = .{ .id = 42, .ptr = &provider, .vtable = &Provider.vtable };
+    var state = connection.ClientState.initWithConnection(&context);
+    var unused_store: @import("../store.zig").Store = undefined;
+    for ([_][]const u8{ "", "UNKNOWN", "LIB-NAME\x00", "LIB-VER\xff" }) |attribute| {
+        const command = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{ "SETINFO", attribute, "valid" } });
+        defer command.deinit();
+        try testing.expectEqualStrings("client|setinfo", command.canonical_name);
+        try testing.expectError(error.UnsupportedOption, command.execute(testing.io, &unused_store, &state));
+    }
+    for (0..256) |number| {
+        if (number >= '!' and number <= '~') continue;
+        const bytes = [_]u8{@intCast(number)};
+        for ([_][]const u8{ "LIB-NAME", "LIB-VER" }) |attribute| {
+            const command = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{ "SETINFO", attribute, &bytes } });
+            defer command.deinit();
+            try testing.expectError(error.Syntax, command.execute(testing.io, &unused_store, &state));
+        }
+    }
+    try testing.expectEqual(0, provider.label_calls);
+    try testing.expectEqualStrings("OldName", provider.report._values.lib_name);
+    try testing.expectEqualStrings("OldVersion", provider.report._values.lib_ver);
 }
 
 test "CLIENT INFO releases owners and report locks on every allocation failure" {

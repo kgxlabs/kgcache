@@ -21,7 +21,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
             .{ .request = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n", .response = "-ERR unsupported option\r\n" },
             .{ .request = "*4\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$2\r\nID\r\n$1\r\n1\r\n", .response = "-ERR unsupported option\r\n" },
-            .{ .request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$4\r\ntest\r\n", .response = "-ERR unsupported option\r\n" },
+            .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n", .response = "-ERR wrong number of arguments\r\n" },
             .{ .request = "*1\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unknown command\r\n" },
             .{ .request = "*1\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n" },
             .{ .request = "*2\r\n$6\r\nSELECT\r\n$4\r\n9999\r\n", .response = "-ERR DB index is out of range\r\n", .dispatches = 1 },
@@ -42,7 +42,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
                 "*1\r\n$5\r\nHELLO\r\n{s}{s}", .{ version, db_index, @as(u8, if (version == 2) 3 else 2), info_request, ping_request });
             const previous_replies = try std.fmt.bufPrint(&reply_buffer, "{s}+OK\r\n-ERR unsupported option\r\n-ERR DB index is out of range\r\n{s}{s}", .{ metadata, metadata, if (version == 2) "$" else "=" });
             try resp_client.sendAndExpect(io, server, client.socket.handle, pipeline, previous_replies);
-            const pipelined_info = try readInfo(server, client.socket.handle, 1, version, db_index);
+            const pipelined_info = try readInfo(server, client.socket.handle, 1, version, db_index, .{});
             if (pipelined_info.commands != dispatches + 6) return error.UnexpectedDispatchAccounting;
             var pong: [pong_reply.len]u8 = undefined;
             try server.readExact(client.socket.handle, &pong);
@@ -54,21 +54,66 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
                 try resp_client.sendAndExpect(io, server, client.socket.handle, request, response);
                 dispatches += case.dispatches + 1;
             }
-            const first = try expectInfo(io, server, client.socket.handle, 1, version, db_index);
-            const second = try expectInfo(io, server, client.socket.handle, 1, version, db_index);
+            const first = try expectInfo(io, server, client.socket.handle, 1, version, db_index, .{});
+            const second = try expectInfo(io, server, client.socket.handle, 1, version, db_index, .{});
             if (first.commands != dispatches + 1 or second.commands != dispatches + 3) return error.UnexpectedDispatchAccounting;
             dispatches += 4;
             if (second.net_in - first.net_in != ping_request.len + info_request.len) return error.UnexpectedReadAccounting;
             if (second.net_out - first.net_out != first.reply_bytes + pong_reply.len) return error.UnexpectedWriteAccounting;
+
+            try resp_client.sendAndExpect(io, server, client.socket.handle, "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$14\r\ncLiEnT|sEtInFo\r\n", "*1\r\n*10\r\n$14\r\nclient|setinfo\r\n:4\r\n*0\r\n:0\r\n:0\r\n:0\r\n*2\r\n$11\r\n@connection\r\n$5\r\n@slow\r\n*0\r\n*0\r\n*0\r\n");
+            dispatches += 1;
+            const metadata_pipeline = try std.fmt.bufPrint(&request_buffer, "*4\r\n$6\r\ncLiEnT\r\n$7\r\nsEtInFo\r\n$8\r\nlIb-NaMe\r\n$10\r\nMyClient~!\r\n" ++
+                "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nLiB-vEr\r\n$4\r\nV1.2\r\n{s}{s}", .{ info_request, ping_request });
+            const ok_prefix = try std.fmt.bufPrint(&reply_buffer, "+OK\r\n+OK\r\n{s}", .{if (version == 2) "$" else "="});
+            try resp_client.sendAndExpect(io, server, client.socket.handle, metadata_pipeline, ok_prefix);
+            var labels: LibraryInfo = .{ .name = "MyClient~!", .version = "V1.2" };
+            const labeled = try readInfo(server, client.socket.handle, 1, version, db_index, labels);
+            if (labeled.commands != dispatches + 3) return error.UnexpectedDispatchAccounting;
+            try server.readExact(client.socket.handle, &pong);
+            if (!std.mem.eql(u8, &pong, pong_reply)) return error.UnexpectedReply;
+            dispatches += 4;
+            const changes = [_]struct { attribute: []const u8, value: []const u8, response: []const u8 = "+OK\r\n", applied: bool = true }{
+                .{ .attribute = "LIB-NAME", .value = "Replacement" },
+                .{ .attribute = "lIb-VeR", .value = "V2~!" },
+                .{ .attribute = "UNKNOWN", .value = "value", .response = "-ERR unsupported option\r\n", .applied = false },
+                .{ .attribute = "LIB-NAME", .value = "bad value", .response = "-ERR syntax error\r\n", .applied = false },
+                .{ .attribute = "LIB-VER", .value = "\x00", .response = "-ERR syntax error\r\n", .applied = false },
+                .{ .attribute = "LIB-VER", .value = "\r\n", .response = "-ERR syntax error\r\n", .applied = false },
+                .{ .attribute = "LIB-VER", .value = "\xff", .response = "-ERR syntax error\r\n", .applied = false },
+                .{ .attribute = "LIB-NAME", .value = "" },
+                .{ .attribute = "LIB-VER", .value = "" },
+            };
+            for (changes) |change| {
+                const request = try std.fmt.bufPrint(&request_buffer, "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n${d}\r\n{s}\r\n${d}\r\n{s}\r\n{s}{s}", .{ change.attribute.len, change.attribute, change.value.len, change.value, info_request, ping_request });
+                const reply = try std.fmt.bufPrint(&reply_buffer, "{s}{s}", .{ change.response, if (version == 2) "$" else "=" });
+                try resp_client.sendAndExpect(io, server, client.socket.handle, request, reply);
+                if (change.applied) {
+                    if (std.ascii.eqlIgnoreCase(change.attribute, "LIB-NAME")) labels.name = change.value else labels.version = change.value;
+                }
+                const report = try readInfo(server, client.socket.handle, 1, version, db_index, labels);
+                if (report.commands != dispatches + 2) return error.UnexpectedDispatchAccounting;
+                try server.readExact(client.socket.handle, &pong);
+                if (!std.mem.eql(u8, &pong, pong_reply)) return error.UnexpectedReply;
+                dispatches += 3;
+            }
         }
 
+        try resp_client.sendAndExpect(io, server, client.socket.handle, "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$5\r\nFirst\r\n" ++
+            "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nLIB-VER\r\n$2\r\nV1\r\n", "+OK\r\n+OK\r\n");
+        dispatches += 2;
         const second = try server.address.?.connect(io, .{ .mode = .stream });
         defer second.close(io);
         var metadata_buffer: [512]u8 = undefined;
         const metadata = try hello_metadata.expectedMetadata(&metadata_buffer, 2, 2);
         try resp_client.sendAndExpect(io, server, second.socket.handle, "*1\r\n$5\r\nHELLO\r\n", metadata);
-        const report = try expectInfo(io, server, second.socket.handle, 2, 2, 0);
+        const report = try expectInfo(io, server, second.socket.handle, 2, 2, 0, .{});
         if (report.commands != 2) return error.UnexpectedDispatchAccounting;
+        try resp_client.sendAndExpect(io, server, second.socket.handle, "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$6\r\nSecond\r\n", "+OK\r\n");
+        const second_report = try expectInfo(io, server, second.socket.handle, 2, 2, 0, .{ .name = "Second" });
+        if (second_report.commands != 5) return error.UnexpectedDispatchAccounting;
+        const first_report = try expectInfo(io, server, client.socket.handle, 1, 3, 2, .{ .name = "First", .version = "V1" });
+        if (first_report.commands != dispatches + 1) return error.UnexpectedDispatchAccounting;
     }
     try server.stop();
     std.log.info("integration: CLIENT INFO binding and accounting passed", .{});
@@ -81,14 +126,19 @@ const InfoCounts = struct {
     reply_bytes: u64,
 };
 
-fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8, db_index: u32) !InfoCounts {
+const LibraryInfo = struct {
+    name: []const u8 = "",
+    version: []const u8 = "",
+};
+
+fn expectInfo(io: std.Io, server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8, db_index: u32, labels: LibraryInfo) !InfoCounts {
     try resp_client.sendAndExpect(io, server, fd, info_request, if (version == 2) "$" else "=");
-    const counts = try readInfo(server, fd, id, version, db_index);
+    const counts = try readInfo(server, fd, id, version, db_index, labels);
     try resp_client.sendAndExpect(io, server, fd, ping_request, pong_reply);
     return counts;
 }
 
-fn readInfo(server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8, db_index: u32) !InfoCounts {
+fn readInfo(server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version: u8, db_index: u32, labels: LibraryInfo) !InfoCounts {
     var header: [24]u8 = undefined;
     var header_len: usize = 0;
     while (true) {
@@ -141,7 +191,9 @@ fn readInfo(server: *support.ServerProcess, fd: std.posix.fd_t, id: u64, version
             12 => counts.net_out = try std.fmt.parseInt(u64, value, 10),
             13 => counts.commands = try std.fmt.parseInt(u64, value, 10),
             7 => if (!std.mem.eql(u8, value, "client|info")) return error.UnexpectedReply,
-            9, 10, 14 => if (value.len != 0) return error.UnexpectedReply,
+            9 => if (!std.mem.eql(u8, value, labels.name)) return error.UnexpectedLibraryName,
+            10 => if (!std.mem.eql(u8, value, labels.version)) return error.UnexpectedLibraryVersion,
+            14 => if (value.len != 0) return error.UnexpectedReply,
             15, 16, 17, 18, 20 => if (!std.mem.eql(u8, value, "0")) return error.UnexpectedReply,
             19, 21 => if (!std.mem.eql(u8, value, "-1")) return error.UnexpectedReply,
             else => unreachable,

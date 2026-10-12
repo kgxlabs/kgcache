@@ -31,6 +31,7 @@ pub const VTable = struct {
     record_write: *const fn (*anyopaque, u64, std.Io.Timestamp) void,
     record_dispatch: *const fn (*anyopaque, []const u8) void,
     record_db_and_proto: *const fn (*anyopaque, u32, protocol.Resp.Version) void,
+    set_library_info: *const fn (*anyopaque, ConnectionReport.LibraryAttribute, []const u8) Error!void,
 };
 
 pub fn snapshotCurrent(self: *const ConnectionContext, io: std.Io, allocator: std.mem.Allocator) Error!Snapshot {
@@ -55,4 +56,8 @@ pub fn recordDispatch(self: *const ConnectionContext, canonical_name: []const u8
 
 pub fn recordDbAndProto(self: *const ConnectionContext, db_index: u32, resp: protocol.Resp.Version) void {
     self.vtable.record_db_and_proto(self.ptr, db_index, resp);
+}
+
+pub fn setLibraryInfo(self: *const ConnectionContext, attribute: ConnectionReport.LibraryAttribute, value: []const u8) Error!void {
+    return self.vtable.set_library_info(self.ptr, attribute, value);
 }

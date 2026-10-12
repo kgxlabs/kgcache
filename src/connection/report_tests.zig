@@ -5,7 +5,7 @@ const testing = std.testing;
 
 test "report counters saturate and only successful byte transfers advance activity" {
     const initial: std.Io.Timestamp = .fromNanoseconds(100);
-    var report = ConnectionReport.init(testing.io, initial);
+    var report = ConnectionReport.init(testing.io, testing.allocator, initial);
     {
         var tx = try report._lock.begin();
         defer tx.end();
@@ -58,7 +58,7 @@ test "concurrent report updates preserve totals and a coherent published state" 
             }
         }
     };
-    var report = ConnectionReport.init(testing.io, .fromNanoseconds(100));
+    var report = ConnectionReport.init(testing.io, testing.allocator, .fromNanoseconds(100));
     var workers: [worker_count]Worker = undefined;
     var threads: [worker_count]std.Thread = undefined;
     var started: usize = 0;
@@ -97,7 +97,7 @@ test "report snapshots own their strings and survive changes to the source" {
     defer request_arena.deinit();
 
     var snapshot = captured: {
-        var report = ConnectionReport.init(testing.io, .fromNanoseconds(100));
+        var report = ConnectionReport.init(testing.io, testing.allocator, .fromNanoseconds(100));
         const lib_name = try testing.allocator.dupe(u8, "test-library");
         defer testing.allocator.free(lib_name);
         const lib_ver = try testing.allocator.dupe(u8, "1.2.3");
@@ -148,7 +148,7 @@ test "snapshot allocation failures release copied strings and the report lock" {
 }
 
 fn snapshotAllocation(allocator: std.mem.Allocator) !void {
-    var report = ConnectionReport.init(testing.io, .fromNanoseconds(100));
+    var report = ConnectionReport.init(testing.io, testing.allocator, .fromNanoseconds(100));
     report._values.lib_name = "test-library";
     report._values.lib_ver = "1.2.3";
     report.recordDbAndProto(7, .resp3);
@@ -173,6 +173,69 @@ fn snapshotAllocation(allocator: std.mem.Allocator) !void {
 fn expectReportUnlocked(report: *ConnectionReport) !void {
     var tx = report._lock.tryBegin() orelse return error.ReportLockStillHeld;
     tx.end();
+}
+
+test "owned labels survive failed replacement and snapshots survive replacement and clearing" {
+    try testing.checkAllAllocationFailures(testing.allocator, libraryAllocation, .{});
+}
+
+fn libraryAllocation(allocator: std.mem.Allocator) !void {
+    var report = ConnectionReport.init(testing.io, allocator, .fromNanoseconds(100));
+    defer report.deinit();
+    try report.setLibraryInfo(.lib_name, "OldName");
+    try report.setLibraryInfo(.lib_ver, "OldVersion");
+    var old = try report.snapshot(testing.allocator);
+    defer old.deinit();
+    report.setLibraryInfo(.lib_name, "NewName") catch |err| {
+        try expectReportUnlocked(&report);
+        try testing.expectEqualStrings("OldName", report._values.lib_name);
+        try testing.expectEqualStrings("OldVersion", report._values.lib_ver);
+        return err;
+    };
+    try report.setLibraryInfo(.lib_ver, "");
+    var current = try report.snapshot(allocator);
+    defer current.deinit();
+    try report.setLibraryInfo(.lib_name, "");
+    try testing.expectEqualStrings("OldName", old.values.lib_name);
+    try testing.expectEqualStrings("OldVersion", old.values.lib_ver);
+    try testing.expectEqualStrings("NewName", current.values.lib_name);
+    try testing.expectEqualStrings("", current.values.lib_ver);
+    try testing.expectEqualStrings("", report._values.lib_name);
+    try testing.expectEqualStrings("", report._values.lib_ver);
+    try expectReportUnlocked(&report);
+}
+
+test "concurrent snapshots remain valid while owned labels are replaced" {
+    const Updater = struct {
+        report: *ConnectionReport,
+        started: std.Io.Event = .unset,
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            var first = true;
+            while (!self.stop.load(.acquire)) {
+                self.report.setLibraryInfo(.lib_name, if (first) "First" else "LongerSecondName") catch unreachable;
+                self.started.set(testing.io);
+                first = !first;
+            }
+        }
+    };
+    var report = ConnectionReport.init(testing.io, testing.allocator, .fromNanoseconds(100));
+    defer report.deinit();
+    try report.setLibraryInfo(.lib_ver, "V1");
+    var updater: Updater = .{ .report = &report };
+    const thread = try std.Thread.spawn(.{}, Updater.run, .{&updater});
+    defer {
+        updater.stop.store(true, .release);
+        thread.join();
+    }
+    updater.started.waitUncancelable(testing.io);
+    for (0..1000) |_| {
+        var snapshot = try report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expect(std.mem.eql(u8, snapshot.values.lib_name, "First") or std.mem.eql(u8, snapshot.values.lib_name, "LongerSecondName"));
+        try testing.expectEqualStrings("V1", snapshot.values.lib_ver);
+    }
 }
 
 test "concurrent snapshots copy coherent report rows" {
@@ -206,7 +269,7 @@ test "concurrent snapshots copy coherent report rows" {
         }
     };
 
-    var report = ConnectionReport.init(testing.io, .fromNanoseconds(100));
+    var report = ConnectionReport.init(testing.io, testing.allocator, .fromNanoseconds(100));
     var updater: Updater = .{ .report = &report };
     const thread = try std.Thread.spawn(.{}, Updater.run, .{&updater});
     defer {

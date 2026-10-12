@@ -183,7 +183,7 @@ fn initTestWorker(worker: *ClientWorker, registered_at: std.Io.Timestamp) void {
         .local_endpoint = .{ .ip4 = .loopback(6379) },
         .descriptor = 1,
         .registered_at = registered_at,
-        .report = ConnectionReport.init(std.testing.io, registered_at),
+        .report = ConnectionReport.init(std.testing.io, std.testing.allocator, registered_at),
     };
 }
 
@@ -359,7 +359,7 @@ test "rejected bindings and undecoded input preserve the previous dispatch" {
         .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$1\r\nx\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
         .{ .request = "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n", .response = "-ERR unsupported option\r\n" },
-        .{ .request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$1\r\nx\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*1\r\n$4\r\nPI", .response = "" },
         .{ .request = "*1\r\n:42\r\n", .response = "-ERR protocol error: invalid RESP type\r\n" },
         .{ .request = "*0\r\n", .response = "-ERR protocol error: malformed request\r\n" },
@@ -557,6 +557,94 @@ test "database and protocol publish before success and expected-error output eve
     }
 }
 
+test "SETINFO pipelines retain values across buffer reuse and count only recognized forms" {
+    const testing = std.testing;
+    const request = "*4\r\n$6\r\ncLiEnT\r\n$7\r\nsEtInFo\r\n$8\r\nlIb-NaMe\r\n$10\r\nMyClient~!\r\n" ++
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nLiB-vEr\r\n$4\r\nV1.2\r\n" ++
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nUNKNOWN\r\n$1\r\nx\r\n" ++
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$9\r\nbad value\r\n" ++
+        "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n" ++
+        "*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n" ++
+        "*1\r\n$4\r\nPING\r\n" ++
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$0\r\n\r\n" ++
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nLIB-VER\r\n$6\r\nNext~!\r\n" ++
+        "*2\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n" ++
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nLIB-VER\r\n$0\r\n\r\n" ++
+        "*1\r\n$4\r\nPING\r\n";
+    for ([_]usize{ 1, request.len / 2, request.len - 1 }) |split| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{ request[0..split], request[split..] }, .max_write_bytes = 2 };
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
+        defer worker.report.deinit();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var logger = logging.TestLogger.init();
+        serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 24, &never_stop_requested);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written(), " lib-name=MyClient~! lib-ver=V1.2 ") != null);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written(), " tot-cmds=5 ") != null);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written(), " lib-name= lib-ver=Next~! ") != null);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written(), " tot-cmds=9 ") != null);
+        try testing.expect(std.mem.indexOf(u8, fake_io.written(), "-ERR unsupported option\r\n-ERR syntax error\r\n-ERR wrong number of arguments\r\n") != null);
+        var snapshot = try worker.report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqualStrings("", snapshot.values.lib_name);
+        try testing.expectEqualStrings("", snapshot.values.lib_ver);
+        try testing.expectEqual(11, snapshot.values.total_cmds);
+        try testing.expectEqualStrings("ping", snapshot.values.last_command);
+        try testing.expectEqual(request.len, snapshot.values.total_net_in);
+        try testing.expectEqual(fake_io.output_len, snapshot.values.total_net_out);
+        try testing.expectEqual(0, mock.set_calls);
+        try testing.expectEqual(0, logger.recordedEvents().len);
+    }
+}
+
+test "SETINFO has no shorter label limit and copies values out of grown input" {
+    const testing = std.testing;
+    var value: [4096]u8 = @splat('X');
+    value[0] = '!';
+    value[value.len - 1] = '~';
+    const request = try std.fmt.allocPrint(testing.allocator, "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n${d}\r\n{s}\r\n*1\r\n$4\r\nPING\r\n", .{ value.len, value });
+    defer testing.allocator.free(request);
+    var fake_io: TestConnectionIo = .{ .requests = &.{request} };
+    var worker: ClientWorker = undefined;
+    initTestWorker(&worker, .fromNanoseconds(100));
+    defer worker.report.deinit();
+    var mock = store.MockStore.init();
+    var data_store = mock.store();
+    var logger = logging.TestLogger.init();
+    serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 24, &never_stop_requested);
+    @memset(request, 'x');
+    var snapshot = try worker.report.snapshot(testing.allocator);
+    defer snapshot.deinit();
+    try testing.expectEqualStrings(&value, snapshot.values.lib_name);
+    try testing.expectEqualStrings("+OK\r\n+PONG\r\n", fake_io.written());
+    try testing.expectEqual(0, logger.recordedEvents().len);
+}
+
+test "SETINFO retains its label after partial reply failure and stops later commands" {
+    const testing = std.testing;
+    const request = "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$8\r\nMyClient\r\n" ++
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nLIB-VER\r\n$2\r\nV1\r\n";
+    for ([_]usize{ 0, 1, 3, 4 }) |prefix| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{request}, .max_write_bytes = 1, .fail_after_bytes = prefix, .write_error = error.ConnectionResetByPeer };
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
+        defer worker.report.deinit();
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var logger = logging.TestLogger.init();
+        serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+        var snapshot = try worker.report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqualStrings("MyClient", snapshot.values.lib_name);
+        try testing.expectEqualStrings("", snapshot.values.lib_ver);
+        try testing.expectEqualStrings("client|setinfo", snapshot.values.last_command);
+        try testing.expectEqual(1, snapshot.values.total_cmds);
+        try testing.expectEqual(prefix, snapshot.values.total_net_out);
+        try testing.expectEqual(0, logger.recordedEvents().len);
+    }
+}
+
 test "unexpected handler failures count before stopping later pipeline dispatches" {
     const testing = std.testing;
     var fake_io: TestConnectionIo = .{ .requests = &.{"*1\r\n$6\r\ndBsIzE\r\n*1\r\n$4\r\nPING\r\n"} };
@@ -643,11 +731,11 @@ test "argument count errors use ERR for every command and allow another request"
     }
 }
 
-test "unsupported CLIENT forms use mapped initialization errors and keep the session usable" {
+test "unsupported CLIENT forms use mapped errors and keep the session usable" {
     const testing = std.testing;
     const requests = [_][]const u8{
         "*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n",
-        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$4\r\ntest\r\n",
+        "*4\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$7\r\nUNKNOWN\r\n$4\r\ntest\r\n",
         "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n",
     };
     for (requests) |request| {

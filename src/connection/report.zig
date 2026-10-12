@@ -4,6 +4,8 @@ const protocol = @import("../protocol.zig");
 
 const ConnectionReport = @This();
 
+pub const LibraryAttribute = enum { lib_name, lib_ver };
+
 pub const Values = struct {
     last_activity: std.Io.Timestamp,
     db_index: u32 = 0,
@@ -29,10 +31,33 @@ pub const Snapshot = struct {
 };
 
 _lock: Lock,
+_allocator: std.mem.Allocator,
 _values: Values,
 
-pub fn init(io: std.Io, registered_at: std.Io.Timestamp) ConnectionReport {
-    return .{ ._lock = Lock.init(io), ._values = .{ .last_activity = registered_at } };
+pub fn init(io: std.Io, allocator: std.mem.Allocator, registered_at: std.Io.Timestamp) ConnectionReport {
+    return .{ ._lock = Lock.init(io), ._allocator = allocator, ._values = .{ .last_activity = registered_at } };
+}
+
+pub fn deinit(self: *ConnectionReport) void {
+    self._allocator.free(self._values.lib_name);
+    self._allocator.free(self._values.lib_ver);
+    self.* = undefined;
+}
+
+pub fn setLibraryInfo(self: *ConnectionReport, attribute: LibraryAttribute, value: []const u8) std.mem.Allocator.Error!void {
+    const replacement = if (value.len == 0) "" else try self._allocator.dupe(u8, value);
+    const previous = replaced: {
+        var tx = self._lock.beginUncancelable();
+        defer tx.end();
+        const target = switch (attribute) {
+            .lib_name => &self._values.lib_name,
+            .lib_ver => &self._values.lib_ver,
+        };
+        const old = target.*;
+        target.* = replacement;
+        break :replaced old;
+    };
+    self._allocator.free(previous);
 }
 
 pub fn snapshot(self: *ConnectionReport, allocator: std.mem.Allocator) std.mem.Allocator.Error!Snapshot {

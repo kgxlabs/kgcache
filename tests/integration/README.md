@@ -26,6 +26,12 @@ They also verify `cmd=client|info`, INFO's own dispatch, handler-error counts,
 unchanged counts for rejected bindings, and separate totals for each connection.
 HELLO, SELECT, expected errors, versionless HELLO, INFO, and PING in one pipeline
 verify the latest valid database/protocol and independent connection defaults.
+SETINFO cases pipeline both labels with INFO and PING in both modes. They check
+case handling, exact value bytes, replacement, clearing, rejected attributes
+and invalid bytes, handler-error counts, separate connection labels, and
+COMMAND's SETINFO metadata. Unit tests also cover replacement/snapshot allocation
+failures, input-buffer reuse, concurrent snapshots, partial output failure,
+worker startup failure, reaping, and shutdown cleanup.
 
 The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
 and `appendfilename` with a real process. They check the first and last valid
