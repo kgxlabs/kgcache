@@ -361,6 +361,12 @@ test "rejected bindings and undecoded input preserve the previous dispatch" {
         .{ .request = "*2\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
         .{ .request = "*3\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*3\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$4\r\nDOCS\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$4\r\nHELP\r\n", .response = "-ERR unsupported option\r\n" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$5\r\nCOUNT\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n", .response = "-ERR wrong number of arguments\r\n" },
+        .{ .request = "*2\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n", .response = "-ERR wrong number of arguments\r\n" },
         .{ .request = "*1\r\n$4\r\nPI", .response = "" },
         .{ .request = "*1\r\n:42\r\n", .response = "-ERR protocol error: invalid RESP type\r\n" },
         .{ .request = "*0\r\n", .response = "-ERR protocol error: malformed request\r\n" },
@@ -382,6 +388,39 @@ test "rejected bindings and undecoded input preserve the previous dispatch" {
         try testing.expectEqualStrings("echo", snapshot.values.last_command);
         try testing.expectEqualStrings(case.response, fake_io.written());
         try testing.expectEqual(0, logger.recordedEvents().len);
+    }
+}
+
+test "COMMAND children record their selected names for replies and handler errors" {
+    const testing = std.testing;
+    const cases = [_]struct { request: []const u8, response: []const u8, name: []const u8 }{
+        .{ .request = "*2\r\n$7\r\ncOmMaNd\r\n$5\r\ncOuNt\r\n", .response = ":13\r\n", .name = "command|count" },
+        .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$8\r\nFILTERBY\r\n$7\r\nPATTERN\r\n$7\r\nabsent*\r\n", .response = "*0\r\n", .name = "command|list" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$7\r\nmissing\r\n", .response = "*1\r\n*-1\r\n", .name = "command|info" },
+        .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n$3\r\none\r\n", .response = "*1\r\n$3\r\none\r\n", .name = "command|getkeys" },
+        .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n$3\r\none\r\n", .response = "*1\r\n*2\r\n$3\r\none\r\n*2\r\n$2\r\nRO\r\n$6\r\naccess\r\n", .name = "command|getkeysandflags" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$4\r\nLIST\r\n$3\r\nbad\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|list" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|getkeys" },
+        .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$3\r\nGET\r\n", .response = "-ERR wrong number of arguments\r\n", .name = "command|getkeysandflags" },
+    };
+    for (cases) |case| {
+        var fake_io: TestConnectionIo = .{ .requests = &.{case.request}, .max_write_bytes = 2 };
+        var worker: ClientWorker = undefined;
+        initTestWorker(&worker, .fromNanoseconds(100));
+        worker.report.recordDispatch("echo");
+        var mock = store.MockStore.init();
+        var data_store = mock.store();
+        var logger = logging.TestLogger.init();
+
+        serve(fake_io.io(), logger.logger(), worker.stream, &worker.context, &data_store, testing.allocator, 1024, &never_stop_requested);
+
+        var snapshot = try worker.report.snapshot(testing.allocator);
+        defer snapshot.deinit();
+        try testing.expectEqual(@as(u64, 2), snapshot.values.total_cmds);
+        try testing.expectEqualStrings(case.name, snapshot.values.last_command);
+        try testing.expectEqualStrings(case.response, fake_io.written());
+        try testing.expectEqual(@as(usize, 0), mock.get_calls);
+        try testing.expectEqual(@as(usize, 0), logger.recordedEvents().len);
     }
 }
 

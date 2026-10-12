@@ -1,100 +1,28 @@
 const std = @import("std");
-const Reply = @import("../protocol/reply.zig").Reply;
-const store = @import("../store.zig");
-const definition = @import("definition.zig");
-const registry = @import("registry.zig");
-const Commander = @import("interface.zig");
+const Reply = @import("../../protocol/reply.zig").Reply;
+const definition = @import("../definition.zig");
+const registry = @import("../registry.zig");
+const Commander = @import("../interface.zig");
 
-const Command = @This();
 const Value = Reply;
 
-const Subcommand = enum {
-    count,
-    list,
-    info,
-    getkeys,
-    getkeysandflags,
-};
+pub const ResponseKind = enum { all, list, info, getkeys, getkeysandflags };
 
-allocator: std.mem.Allocator,
-arguments: []const []const u8,
-
-pub fn commander(self: *Command) Commander {
-    return .{ .ptr = self, .vtable = &vtable };
-}
-
-const vtable = Commander.VTable{ .execute = execute, .deinit = deinit };
-
-fn execute(ptr: *anyopaque, _: std.Io, _: *store.Store, _: *Commander.ClientState) Commander.Error!Commander.Result {
-    const self: *Command = @ptrCast(@alignCast(ptr));
-    if (self.arguments.len == 0) return self.executeAll();
-
-    const name = self.arguments[0];
-
-    return self.executeSubcommand(try parseSubcommand(name));
-}
-
-fn parseSubcommand(name: []const u8) Commander.Error!Subcommand {
-    if (std.ascii.eqlIgnoreCase(name, "COUNT")) return .count;
-    if (std.ascii.eqlIgnoreCase(name, "LIST")) return .list;
-    if (std.ascii.eqlIgnoreCase(name, "INFO")) return .info;
-    if (std.ascii.eqlIgnoreCase(name, "GETKEYS")) return .getkeys;
-    if (std.ascii.eqlIgnoreCase(name, "GETKEYSANDFLAGS")) return .getkeysandflags;
-    return error.UnsupportedOption;
-}
-
-fn executeSubcommand(self: *Command, subcommand: Subcommand) Commander.Error!Commander.Result {
-    return switch (subcommand) {
-        .count => self.executeCount(),
-        .list => self.executeList(),
-        .info => self.executeInfo(),
-        .getkeys => self.executeGetKeys(),
-        .getkeysandflags => self.executeGetKeysAndFlags(),
-    };
-}
-
-const ResponseKind = enum { all, list, info, getkeys, getkeysandflags };
-
-fn executeAll(self: *Command) Commander.Error!Commander.Result {
-    return self.reply(.all);
-}
-
-fn executeCount(self: *Command) Commander.Error!Commander.Result {
-    if (self.arguments.len != 1) return error.WrongNumberArguments;
-    return Commander.Result.borrowed(.{ .integer = @intCast(registry.all().len) });
-}
-
-fn executeList(self: *Command) Commander.Error!Commander.Result {
-    return self.reply(.list);
-}
-
-fn executeInfo(self: *Command) Commander.Error!Commander.Result {
-    return self.reply(.info);
-}
-
-fn executeGetKeys(self: *Command) Commander.Error!Commander.Result {
-    return self.reply(.getkeys);
-}
-
-fn executeGetKeysAndFlags(self: *Command) Commander.Error!Commander.Result {
-    return self.reply(.getkeysandflags);
-}
-
-fn reply(self: *Command, kind: ResponseKind) Commander.Error!Commander.Result {
-    const arena = try self.allocator.create(std.heap.ArenaAllocator);
-    arena.* = std.heap.ArenaAllocator.init(self.allocator);
+pub fn reply(backing_allocator: std.mem.Allocator, kind: ResponseKind, arguments: []const []const u8) Commander.Error!Commander.Result {
+    const arena = try backing_allocator.create(std.heap.ArenaAllocator);
+    arena.* = std.heap.ArenaAllocator.init(backing_allocator);
     errdefer {
         arena.deinit();
-        self.allocator.destroy(arena);
+        backing_allocator.destroy(arena);
     }
 
     const allocator = arena.allocator();
     const value = switch (kind) {
         .all => try allInfo(allocator),
-        .list => try list(allocator, self.arguments[1..]),
-        .info => try info(allocator, self.arguments[1..]),
-        .getkeys => try getKeys(allocator, self.arguments[1..], false),
-        .getkeysandflags => try getKeys(allocator, self.arguments[1..], true),
+        .list => try list(allocator, arguments),
+        .info => try info(allocator, arguments),
+        .getkeys => try getKeys(allocator, arguments, false),
+        .getkeysandflags => try getKeys(allocator, arguments, true),
     };
     return Commander.Result.inArena(value, arena);
 }
@@ -308,9 +236,4 @@ fn bulk(value: []const u8) Value {
 
 fn array(allocator: std.mem.Allocator, values: []const Value) std.mem.Allocator.Error!Value {
     return .{ .array = try allocator.dupe(Value, values) };
-}
-
-fn deinit(ptr: *anyopaque) void {
-    const self: *Command = @ptrCast(@alignCast(ptr));
-    self.allocator.destroy(self);
 }

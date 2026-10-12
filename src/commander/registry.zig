@@ -4,7 +4,12 @@ const BgSave = @import("bgsave.zig");
 const ClientInfo = @import("client/client_info.zig");
 const ClientSetinfo = @import("client/client_setinfo.zig");
 const ClientList = @import("client/client_list.zig");
-const Command = @import("command.zig");
+const Command = @import("command/command.zig");
+const CommandCount = @import("command/command_count.zig");
+const CommandList = @import("command/command_list.zig");
+const CommandInfo = @import("command/command_info.zig");
+const CommandGetkeys = @import("command/command_getkeys.zig");
+const CommandGetkeysandflags = @import("command/command_getkeysandflags.zig");
 const DBSize = @import("dbsize.zig");
 const Del = @import("del.zig");
 const Echo = @import("echo.zig");
@@ -142,12 +147,59 @@ const definitions = [_]Definition{
     },
     .{
         .name = "command",
-        .kind = .command,
+        .kind = .group,
         .arity = Arity.atLeast(0),
         .flags = &.{.fast},
         .categories = &.{ .connection, .fast },
         .keys = .none,
-        .factory = factoryFor(Command),
+        .factory = Command.init,
+        .subcommands = &.{
+            .{
+                .name = "command|count",
+                .kind = .command,
+                .arity = Arity.exact(1),
+                .flags = &.{.fast},
+                .categories = &.{ .connection, .fast },
+                .keys = .none,
+                .factory = CommandCount.init,
+            },
+            .{
+                .name = "command|list",
+                .kind = .command,
+                .arity = Arity.atLeast(1),
+                .flags = &.{.fast},
+                .categories = &.{ .connection, .fast },
+                .keys = .none,
+                .factory = CommandList.init,
+            },
+            .{
+                .name = "command|info",
+                .kind = .command,
+                .arity = Arity.atLeast(1),
+                .flags = &.{.fast},
+                .categories = &.{ .connection, .fast },
+                .keys = .none,
+                .factory = CommandInfo.init,
+            },
+            .{
+                .name = "command|getkeys",
+                .kind = .command,
+                .arity = Arity.atLeast(2),
+                .flags = &.{.fast},
+                .categories = &.{ .connection, .fast },
+                .keys = .none,
+                .factory = CommandGetkeys.init,
+            },
+            .{
+                .name = "command|getkeysandflags",
+                .kind = .command,
+                .arity = Arity.atLeast(2),
+                .flags = &.{.fast},
+                .categories = &.{ .connection, .fast },
+                .keys = .none,
+                .factory = CommandGetkeysandflags.init,
+            },
+        },
     },
     .{
         .name = "dbsize",
