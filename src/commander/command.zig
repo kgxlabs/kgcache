@@ -197,10 +197,8 @@ fn matchesPattern(pattern: []const u8, name: []const u8) bool {
 
 fn getKeys(allocator: std.mem.Allocator, args: []const []const u8, with_flags: bool) Commander.Error!Value {
     if (args.len == 0) return error.WrongNumberArguments;
-    const name = args[0];
-    const command_definition = registry.find(name) orelse return error.UnknownCommand;
     const command_args = args[1..];
-    if (!command_definition.arity.accepts(command_args.len)) return error.WrongNumberArguments;
+    const command_definition = try registry.resolve(.{ .name = args[0], .arguments = command_args });
 
     const range = switch (command_definition.keys) {
         .none => return error.Syntax,

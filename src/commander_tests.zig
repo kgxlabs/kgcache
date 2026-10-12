@@ -3,6 +3,7 @@ const protocol = @import("protocol.zig");
 const Reply = protocol.Reply;
 const commander = @import("commander.zig");
 const Commander = commander.Commander;
+const Definition = @import("commander/definition.zig").Definition;
 const store = @import("store.zig");
 const MockStore = @import("store/mock_store.zig");
 const init = commander.init;
@@ -50,25 +51,43 @@ test "reject unknown command" {
 }
 
 test "bound commands keep static canonical names after caller input and handlers are released" {
+    const registry = @import("commander/registry.zig");
+    for (registry.all()) |*root| {
+        if (root.kind != .namespace) try expectBoundNameLifetime(root, root);
+        for (root.subcommands) |*child| try expectBoundNameLifetime(root, child);
+    }
+}
+
+fn expectBoundNameLifetime(root: *const Definition, selected: *const Definition) !void {
     const testing = std.testing;
     const registry = @import("commander/registry.zig");
-    for (registry.all()) |definition| {
-        var name: [32]u8 = undefined;
-        for (definition.name, 0..) |byte, index| name[index] = std.ascii.toUpper(byte);
-        const is_client = std.mem.eql(u8, definition.name, "client");
-        const arguments = [_][]const u8{ "key", "value" };
-        const frame: protocol.CommandFrame = .{
-            .name = name[0..definition.name.len],
-            .arguments = if (is_client) &.{"iNfO"} else arguments[0..definition.arity.minimum],
-        };
-        const selected = try registry.resolve(frame);
-        const command = try init(testing.allocator, frame);
-        const canonical_name = command.canonical_name;
-        command.deinit();
-        @memset(&name, 'x');
-        try testing.expectEqualStrings(selected.name, canonical_name);
-        try testing.expect(canonical_name.ptr == selected.name.ptr);
-    }
+    const is_child = selected != root;
+    const name = try testing.allocator.dupe(u8, root.name);
+    defer testing.allocator.free(name);
+    for (name) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    const selector = try testing.allocator.dupe(u8, if (is_child) selected.name[root.name.len + 1 ..] else "");
+    defer testing.allocator.free(selector);
+    for (selector) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    const arguments = try testing.allocator.alloc([]const u8, selected.arity.minimum);
+    defer testing.allocator.free(arguments);
+    for (arguments) |*argument| argument.* = "value";
+    if (arguments.len > 0) arguments[0] = if (is_child) selector else "key";
+    const frame: protocol.CommandFrame = .{ .name = name, .arguments = arguments };
+    try testing.expect(try registry.resolve(frame) == selected);
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, init(failing.allocator(), frame));
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+    try testing.expectEqual(failing.allocations, failing.deallocations);
+    try testing.expect(try registry.resolve(frame) == selected);
+
+    const command = try init(testing.allocator, frame);
+    const canonical_name = command.canonical_name;
+    @memset(name, 'x');
+    @memset(selector, 'x');
+    command.deinit();
+    try testing.expectEqualStrings(selected.name, canonical_name);
+    try testing.expect(canonical_name.ptr == selected.name.ptr);
 }
 
 fn executeWithMockStore(keyword: []const u8, arguments: []const []const u8, mock_store: *MockStore) anyerror!Commander.Result {
@@ -539,6 +558,10 @@ test "COMMAND GETKEYS extracts keys without changing them" {
     }, &mock_store);
     defer del.deinit();
     try expectBulkArray(del.value, &.{ "first", "second", "third" });
+
+    try std.testing.expectEqual(@as(usize, 0), mock_store.get_calls);
+    try std.testing.expectEqual(@as(usize, 0), mock_store.set_calls);
+    try std.testing.expectEqual(@as(usize, 0), mock_store.remove_calls);
 }
 
 test "COMMAND GETKEYSANDFLAGS reports access for each key" {
@@ -572,6 +595,14 @@ test "COMMAND GETKEYSANDFLAGS reports access for each key" {
     const set_get_pair = try expectArray((try expectArray(set_get.value))[0]);
     try expectBulkArray(set_get_pair[1], &.{ "RW", "access", "update" });
 
+    var value_get = try executeWithMockStore("COMMAND", &.{
+        "GETKEYSANDFLAGS", "sEt", "value-key", "GET",
+    }, &mock_store);
+    defer value_get.deinit();
+    const value_get_pair = try expectArray((try expectArray(value_get.value))[0]);
+    try expectBulk(value_get_pair[0], "value-key");
+    try expectBulkArray(value_get_pair[1], &.{ "OW", "update" });
+
     var del = try executeWithMockStore("COMMAND", &.{
         "GETKEYSANDFLAGS", "DEL",
         "first",           "second",
@@ -583,6 +614,48 @@ test "COMMAND GETKEYSANDFLAGS reports access for each key" {
         const pair = try expectArray(entry);
         try expectBulk(pair[0], key);
         try expectBulkArray(pair[1], &.{ "RM", "delete" });
+    }
+}
+
+test "COMMAND key helpers resolve CLIENT children before checking for keys" {
+    const testing = std.testing;
+    const cases = [_]struct { target: []const []const u8, err: anyerror }{
+        .{ .target = &.{"CLIENT"}, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "UNKNOWN" }, .err = error.UnsupportedOption },
+        .{ .target = &.{ "CLIENT", "UNKNOWN", "extra" }, .err = error.UnsupportedOption },
+        .{ .target = &.{ "CLIENT", "" }, .err = error.UnsupportedOption },
+        .{ .target = &.{ "CLIENT", "INFO", "extra" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "LIST", "extra" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "SETINFO" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "CLIENT", "SETINFO", "LIB-NAME" }, .err = error.WrongNumberArguments },
+        .{ .target = &.{ "cLiEnT", "iNfO" }, .err = error.Syntax },
+        .{ .target = &.{ "CLIENT", "LIST" }, .err = error.Syntax },
+        .{ .target = &.{ "CLIENT", "sEtInFo", "LIB-NAME", "value" }, .err = error.Syntax },
+        .{ .target = &.{ "CLIENT", "SETINFO", "UNKNOWN", "value" }, .err = error.Syntax },
+        .{ .target = &.{"client|info"}, .err = error.UnknownCommand },
+        .{ .target = &.{"UNKNOWN"}, .err = error.UnknownCommand },
+    };
+    var mock = MockStore.init();
+    for ([_][]const u8{ "GETKEYS", "GETKEYSANDFLAGS" }) |helper| {
+        for (cases) |case| {
+            var arguments: [5][]const u8 = undefined;
+            arguments[0] = helper;
+            @memcpy(arguments[1..][0..case.target.len], case.target);
+            try testing.expectError(case.err, executeWithMockStore("COMMAND", arguments[0 .. case.target.len + 1], &mock));
+        }
+    }
+}
+
+test "COMMAND key lookup does not allocate or execute CLIENT target handlers" {
+    const testing = std.testing;
+    var mock = MockStore.init();
+    var data_store = mock.store();
+    var state = Commander.ClientState.init();
+    for ([_][]const u8{ "GETKEYS", "GETKEYSANDFLAGS" }) |helper| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 2 });
+        try testing.expectError(error.Syntax, executeWithAllocator(failing.allocator(), "COMMAND", &.{ helper, "CLIENT", "INFO" }, &data_store, &state));
+        try testing.expectEqual(@as(usize, 2), failing.allocations);
+        try testing.expectEqual(failing.allocations, failing.deallocations);
     }
 }
 

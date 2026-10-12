@@ -30,6 +30,16 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             .{ .request = "*2\r\n$6\r\nSELECT\r\n$4\r\n9999\r\n", .response = "-ERR DB index is out of range\r\n", .dispatches = 1 },
             .{ .request = "*2\r\n$5\r\nHELLO\r\n$1\r\n4\r\n", .response = "-NOPROTO unsupported protocol version\r\n", .dispatches = 1 },
             .{ .request = "*3\r\n$5\r\nHELLO\r\n$1\r\n3\r\n$4\r\nAUTH\r\n", .response = "-ERR unsupported option\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n", .dispatches = 1 },
+            .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
+            .{ .request = "*6\r\n$7\r\nCOMMAND\r\n$7\r\nGETKEYS\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$5\r\nprobe\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
+            .{ .request = "*3\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$7\r\nUNKNOWN\r\n", .response = "-ERR unsupported option\r\n", .dispatches = 1 },
+            .{ .request = "*5\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n$5\r\nextra\r\n", .response = "-ERR wrong number of arguments\r\n", .dispatches = 1 },
+            .{ .request = "*4\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$4\r\nINFO\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
+            .{ .request = "*6\r\n$7\r\nCOMMAND\r\n$15\r\nGETKEYSANDFLAGS\r\n$6\r\nCLIENT\r\n$7\r\nSETINFO\r\n$8\r\nLIB-NAME\r\n$5\r\nprobe\r\n", .response = "-ERR syntax error\r\n", .dispatches = 1 },
         };
         var dispatches: u64 = 0;
         for ([_]u8{ 2, 3 }) |version| {
