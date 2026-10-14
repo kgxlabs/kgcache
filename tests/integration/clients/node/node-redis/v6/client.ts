@@ -122,7 +122,10 @@ export async function withFixture(
   }
 }
 
-export async function command<T>(client: Client, work: Promise<T>): Promise<T> {
+export async function command<T>(
+  client: Pick<Client, 'isOpen' | 'destroy'>,
+  work: Promise<T>,
+): Promise<T> {
   return within(work, 3000, () => destroy(client));
 }
 
@@ -211,7 +214,7 @@ async function closeClient(owned: OwnedClient): Promise<void> {
   }
 }
 
-function destroy(client: Client): void {
+function destroy(client: Pick<Client, 'isOpen' | 'destroy'>): void {
   if (client.isOpen) {
     client.destroy();
   }
