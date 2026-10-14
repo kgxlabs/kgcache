@@ -9,4 +9,5 @@ export default {
   fakeTimers: { enableGlobally: false },
   testTimeout: 45000,
   clearMocks: true,
+  moduleNameMapper: { '^(\\.{1,2}/.*)\\.ts$': '$1' },
 } satisfies Config;
