@@ -48,8 +48,8 @@ An alternate Go executable can be selected with `make GO=/path/to/go check-go`.
 
 `test-go` and `test-node` build the
 Debug server and prepare dependencies. [Client CI](../../../.github/workflows/client-tests.yml)
-has separate Go and Node jobs after [Zig CI](../../../.github/workflows/zig-tests.yml)
-passes unit and process tests. Node CI runs its pinned compatibility profile and
+has separate Go and Node jobs after [unit and process integration tests](../../../.github/workflows/zig-tests.yml)
+pass. Node CI runs its pinned compatibility profile and
 uploads failure evidence.
 
 Select a registered profile or filter required profiles by library:
