@@ -21,3 +21,9 @@ bin/
 *.kgc
 appendonlydir/
 **/appendonlydir/
+
+# Client dependencies and test output
+node_modules/
+coverage/
+tests/integration/clients/.workspaces/
+test-artifacts/

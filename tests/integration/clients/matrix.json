@@ -36,6 +36,7 @@
       "suiteId": "node-redis-v6",
       "clientVersion": "6.2.1",
       "runtimeVersion": "22.14.0",
+      "packageManagerVersion": "10.9.2",
       "dependencyDir": "node/node-redis/v6",
       "protocols": [2, 3],
       "expectedDefaultProtocol": 3,
