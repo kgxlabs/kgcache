@@ -14,18 +14,22 @@ func TestCallerReports(t *testing.T) {
 		if protocol == 0 {
 			name, expected = "default", 3
 		}
+
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, protocol, fixtureOptions{})
 			client := f.client(t, clientOptions{})
 			conn := dedicatedConn(t, client)
+
 			if !assert.NoError(t, conn.Ping(f.ctx).Err()) {
 				return
 			}
+
 			// Query HELLO without renegotiating the native connection's protocol.
 			helloCmd := redis.NewMapStringInterfaceCmd(f.ctx, "HELLO")
 			if !assert.NoError(t, conn.Process(f.ctx, helloCmd)) {
 				return
 			}
+
 			hello, err := helloCmd.Result()
 			if !assert.NoError(t, err) {
 				return
@@ -35,6 +39,7 @@ func TestCallerReports(t *testing.T) {
 			assert.Equal(t, "standalone", hello["mode"])
 			assert.Equal(t, "master", hello["role"])
 			assert.Equal(t, []interface{}{}, hello["modules"])
+
 			helloID, ok := hello["id"].(int64)
 			if !assert.True(t, ok, "native HELLO id type: %T", hello["id"]) || !assert.Positive(t, helloID) {
 				return
@@ -44,26 +49,44 @@ func TestCallerReports(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
+
 			rows, err := parseReport(text)
 			if !assert.NoError(t, err) || !assert.Len(t, rows, 1) {
 				return
 			}
+
 			row := rows[0]
 			assert.Equal(t, uint64(helloID), row.id)
+
 			for field, value := range map[string]string{
-				"laddr": f.server.Address(), "db": "0", "cmd": "client|info", "resp": fmt.Sprint(expected),
-				"lib-name": "go-redis(,go1.26.9)", "lib-ver": "9.22.0", "name": "",
-				"sub": "0", "psub": "0", "ssub": "0", "watch": "0", "multi": "-1", "multi-mem": "0", "redir": "-1",
+				"laddr":     f.server.Address(),
+				"db":        "0",
+				"cmd":       "client|info",
+				"resp":      fmt.Sprint(expected),
+				"lib-name":  "go-redis(,go1.26.9)",
+				"lib-ver":   "9.22.0",
+				"name":      "",
+				"sub":       "0",
+				"psub":      "0",
+				"ssub":      "0",
+				"watch":     "0",
+				"multi":     "-1",
+				"multi-mem": "0",
+				"redir":     "-1",
 			} {
 				assert.Equal(t, value, row.fields[field], field)
 			}
 			assert.Regexp(t, `^127\.0\.0\.1:[1-9][0-9]*$`, row.fields["addr"])
+
 			_, err = unsignedDecimal(row.fields["fd"])
 			assert.NoError(t, err)
+
 			assert.GreaterOrEqual(t, row.counters["age"], row.counters["idle"])
+
 			for _, field := range []string{"tot-net-in", "tot-net-out", "tot-cmds"} {
 				assert.Positive(t, row.counters[field], field)
 			}
+
 			native, err := conn.ClientInfo(f.ctx).Result()
 			if !assert.NoError(t, err) {
 				return
@@ -76,16 +99,20 @@ func TestCallerReports(t *testing.T) {
 			if !assert.NoError(t, conn.ClientSetInfo(f.ctx, redis.WithLibraryName("retained-name")).Err()) {
 				return
 			}
+
 			if !assert.NoError(t, conn.ClientSetInfo(f.ctx, redis.WithLibraryVersion("9.8.7")).Err()) {
 				return
 			}
+
 			if !assert.NoError(t, conn.Ping(f.ctx).Err()) {
 				return
 			}
+
 			text, err = conn.Do(f.ctx, "CLIENT", "INFO").Text()
 			if !assert.NoError(t, err) {
 				return
 			}
+
 			retained, err := parseReport(text)
 			if !assert.NoError(t, err) || !assert.Len(t, retained, 1) {
 				return

@@ -30,48 +30,62 @@ type fixtureOptions struct {
 
 func newFixture(t *testing.T, protocol int, options fixtureOptions) *fixture {
 	t.Helper()
+
 	timeout := options.scenarioTimeout
 	if timeout == 0 {
 		timeout = 45 * time.Second
 	}
+
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	t.Cleanup(cancel)
+
 	protocolName := fmt.Sprintf("RESP%d", protocol)
 	if protocol == 0 {
 		protocolName = "RESPdefault"
 	}
+
 	options.FailureLabel = fmt.Sprintf("go-redis-v9.22.0-%s-%s", protocolName, t.Name())
 	server, err := clientharness.New(options.Options)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() {
 		stopErr := server.Stop()
 		if stopErr != nil {
 			t.Error(stopErr)
 		}
+
 		if t.Failed() {
-			cause := errors.Join(fmt.Errorf("%s: assertion or cleanup failed (see native test output)", t.Name()), stopErr)
+			cause := errors.Join(
+				fmt.Errorf("%s: assertion or cleanup failed (see native test output)", t.Name()),
+				stopErr,
+			)
 			if err := server.RetainFailure(cause); err != nil {
 				t.Error(err)
 			}
 		}
+
 		if err := server.Cleanup(); err != nil {
 			t.Error(err)
 		}
 	})
+
 	if err := server.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	return &fixture{server: server, ctx: ctx, protocol: protocol}
 }
 
 func (f *fixture) client(t *testing.T, options clientOptions) *redis.Client {
 	t.Helper()
+
 	protocol := f.protocol
 	if options.protocol != 0 {
 		protocol = options.protocol
 	}
+
 	client := redis.NewClient(&redis.Options{
 		Addr:                  f.server.Address(),
 		Protocol:              protocol,
@@ -91,22 +105,26 @@ func (f *fixture) client(t *testing.T, options clientOptions) *redis.Client {
 			t.Error("close client:", err)
 		}
 	})
+
 	return client
 }
 
 func dedicatedConn(t *testing.T, client *redis.Client) *redis.Conn {
 	t.Helper()
+
 	conn := client.Conn()
 	t.Cleanup(func() {
 		if err := conn.Close(); err != nil && !errors.Is(err, redis.ErrClosed) {
 			t.Error("close dedicated connection:", err)
 		}
 	})
+
 	return conn
 }
 
 func explicitProtocols(t *testing.T, body func(t *testing.T, protocol int)) {
 	t.Helper()
+
 	for _, protocol := range []int{2, 3} {
 		t.Run(fmt.Sprintf("RESP%d", protocol), func(t *testing.T) {
 			body(t, protocol)
@@ -117,21 +135,27 @@ func explicitProtocols(t *testing.T, body func(t *testing.T, protocol int)) {
 func poll(ctx context.Context, timeout time.Duration, observe func(context.Context) (bool, error)) error {
 	deadline, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
 	for {
 		if err := deadline.Err(); err != nil {
 			return fmt.Errorf("poll observable state: %w", err)
 		}
+
 		matched, err := observe(deadline)
 		if err != nil {
 			return fmt.Errorf("poll observation: %w", err)
 		}
+
 		if matched {
 			return nil
 		}
+
 		timer := time.NewTimer(20 * time.Millisecond)
+
 		select {
 		case <-deadline.Done():
 			timer.Stop()
+
 			return fmt.Errorf("poll observable state: %w", deadline.Err())
 		case <-timer.C:
 		}
