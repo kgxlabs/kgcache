@@ -8,7 +8,27 @@ Use Go 1.26.9 and Node 22.14.0 with its bundled npm 10.9.2. Put those tools on
 `PATH`. The launchers check installed versions and never download runtimes.
 The server build and Zig tests need only Zig 0.16.0.
 
-Run from the repository root:
+You can also unpack the official Go distribution into `.client-tools/go` and
+the official Node distribution into `.client-tools/node` at the repository root.
+Make prepends their `bin` directories to `PATH`, including Node's bundled npm.
+This ignored local setup leaves global tools and shell settings unchanged.
+Verify Go with `.client-tools/go/bin/go version` and bundled npm with
+`.client-tools/node/bin/node .client-tools/node/lib/node_modules/npm/bin/npm-cli.js --version`.
+
+Run all test groups from the repository root:
+
+```sh
+make test
+```
+
+This runs Zig unit and process tests, plus the Go and Node client test targets.
+Client targets build the server and prepare their pinned dependencies before
+execution. Every test group is attempted even if another group fails. The command
+returns a nonzero result while required client suites remain planned.
+
+Select one test group with `make test-zig`, `make test-go`, or `make test-node`.
+
+Run individual steps with:
 
 ```sh
 make build
@@ -25,8 +45,9 @@ An alternate Go executable can be selected with `make GO=/path/to/go check-go`.
 
 `test-go`, `test-node`, `test-clients`, and the full `test` target fail clearly
 while required client suites remain planned. `test-go` and `test-node` build the
-Debug server first. Foundation CI validates dependencies and code quality;
-the existing Zig CI runs unit and process tests.
+Debug server and prepare dependencies. [Client CI](../../../.github/workflows/client-tests.yml)
+has separate Go and Node jobs for dependency and code quality checks.
+[Zig CI](../../../.github/workflows/zig-tests.yml) runs unit and process tests.
 
 Select a registered profile or filter required profiles by library:
 

@@ -23,6 +23,7 @@ appendonlydir/
 **/appendonlydir/
 
 # Client dependencies and test output
+.client-tools/
 node_modules/
 coverage/
 tests/integration/clients/.workspaces/

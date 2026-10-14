@@ -1,4 +1,4 @@
-name: CI
+name: Client CI
 
 on:
   push:
@@ -10,30 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  tests:
-    name: Tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: 0.16.0
-
-      - name: Run unit tests
-        run: zig build test
-
-      - name: Run process integration tests
-        run: zig build test-integration
-
-  client-foundation:
-    name: Client foundation
+  go-client:
+    name: Go client checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -52,6 +30,26 @@ jobs:
           go-version: '1.26.9'
           cache: false
 
+      - name: Prepare and validate locked dependencies
+        run: make deps-go
+
+      - name: List Go profiles
+        run: go run tests/integration/clients/go/run.go list
+
+      - name: Check Go client project code
+        run: make check-go
+
+  node-client:
+    name: Node client checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Install pinned Node and bundled npm
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -59,7 +57,10 @@ jobs:
           package-manager-cache: false
 
       - name: Prepare and validate locked dependencies
-        run: make deps-clients list-clients
+        run: make deps-node
 
-      - name: Check client project code
-        run: make check-clients
+      - name: List Node profiles
+        run: node tests/integration/clients/node/run.cjs list
+
+      - name: Check Node client project code
+        run: make check-node
