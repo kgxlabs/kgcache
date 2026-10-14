@@ -1,4 +1,4 @@
-name: Zig CI
+name: Server and client tests
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   tests:
-    name: Tests
+    name: Unit and process integration tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 

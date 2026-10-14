@@ -17,7 +17,7 @@
       "apiGeneration": "v6",
       "package": "redis",
       "suiteDir": "node/node-redis/v6",
-      "status": "planned"
+      "status": "ready"
     }
   ],
   "profiles": [

@@ -1,6 +1,8 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 interface Suite {
   id: string;
@@ -46,6 +48,7 @@ const nodeRoot = fs.realpathSync(import.meta.dirname);
 const root = fs.realpathSync(path.join(nodeRoot, '..'));
 const stableVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const identifier = /^[a-z][a-z0-9.-]*$/;
+const nativeTimeoutMs = 5 * 60 * 1000;
 const toolingPins = {
   '@eslint/js': '10.0.1',
   '@stylistic/eslint-plugin': '5.10.0',
@@ -65,24 +68,26 @@ const suiteToolingPins = {
   typescript: '5.9.3',
 };
 
-function main(): void {
+async function main(): Promise<void> {
   try {
-    run(process.argv.slice(2));
+    await run(process.argv.slice(2));
   } catch (error) {
     console.error(`Node client profiles: ${errorMessage(error)}`);
     process.exitCode = error instanceof CommandError ? error.exitCode : 1;
   }
 }
 
-function run(args: string[]): void {
+async function run(args: string[]): Promise<void> {
   const options = parseArgs(args);
   const rows = selectProfiles(loadRegistry(), options);
   const first = rows[0];
+
   if (!first) {
     throw new Error('no Node profiles selected');
   }
 
   validateProject(nodeRoot, first, toolingPins);
+
   for (const row of rows) {
     const runtime = fs.readFileSync(path.join(row.dir, '.node-version'), 'utf8').trim();
 
@@ -106,28 +111,35 @@ function run(args: string[]): void {
     return;
   }
 
-  validateRuntime(rows);
+  await validateRuntime(rows);
+
   if (options.action === 'deps') {
-    command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot);
+    await command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot);
   }
 
   validateInstalled(nodeRoot, toolingPins);
+
   for (const row of rows) {
     if (options.action === 'deps') {
-      command('npm', ['ci', '--no-audit', '--no-fund'], row.dir);
+      await command('npm', ['ci', '--no-audit', '--no-fund'], row.dir);
     }
 
     validateInstalled(row.dir, {
       [row.suite.package]: row.clientVersion,
       ...suiteToolingPins,
     });
+
     if (options.action === 'test') {
-      if (row.suite.status !== 'planned') {
-        throw new Error('client execution requires the actual Node scenario implementation');
+      if (row.suite.status === 'ready') {
+        await runTests(row, [
+          ...splitArguments(process.env.NODE_TEST_ARGS ?? ''),
+          ...options.testArgs,
+        ]);
+        continue;
       }
 
       console.log(`${row.id}: running bootstrap placeholder (client suite remains planned)`);
-      command(
+      await command(
         'npm',
         ['test', '--', '--runTestsByPath', 'tests/bootstrap.test.ts', ...options.testArgs],
         row.dir,
@@ -138,8 +150,147 @@ function run(args: string[]): void {
   }
 }
 
+async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
+  const binary = process.env.KGCACHE_BIN;
+
+  if (!binary || !path.isAbsolute(binary)) {
+    throw new Error('KGCACHE_BIN must be an absolute executable path');
+  }
+
+  fs.accessSync(binary, fs.constants.X_OK);
+  const artifactRoot = process.env.KGCACHE_TEST_ARTIFACT_DIR;
+  const resultDir = artifactRoot
+    ? path.join(path.resolve(artifactRoot), row.id)
+    : fs.mkdtempSync(path.join(os.tmpdir(), `${row.id}-results-`));
+
+  fs.mkdirSync(resultDir, { recursive: true });
+  const resultFile = path.join(resultDir, 'jest-results.json');
+  fs.rmSync(resultFile, { force: true });
+  console.log(`${row.id}: native client tests; results: ${resultFile}`);
+
+  try {
+    await command(
+      'npm',
+      ['test', '--', ...testArgs, '--json', `--outputFile=${resultFile}`],
+      row.dir,
+    );
+  } catch (cause) {
+    try {
+      fs.writeFileSync(
+        path.join(resultDir, 'runner-failure.json'),
+        JSON.stringify(
+          {
+            profile: row.id,
+            suite: row.suite.id,
+            clientVersion: row.clientVersion,
+            runtimeVersion: row.runtimeVersion,
+            packageManagerVersion: row.packageManagerVersion,
+            protocols: row.protocols,
+            exitCode: cause instanceof CommandError ? cause.exitCode : 1,
+            reason: errorMessage(cause).slice(0, 16384),
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (reportCause) {
+      throw new CommandError(
+        `${errorMessage(cause)}; failure report: ${errorMessage(reportCause)}`,
+        cause instanceof CommandError ? cause.exitCode : 1,
+        new AggregateError([cause, reportCause], 'native execution and reporting failed', {
+          cause: reportCause,
+        }),
+      );
+    }
+
+    throw cause;
+  }
+
+  const results = readJson(resultFile);
+
+  if (!Array.isArray(results.testResults)) {
+    throw new Error(`${row.id}: Jest did not report test results`);
+  }
+
+  let executed = 0;
+  const clientRoot = path.join(row.dir, 'tests') + path.sep;
+
+  for (const raw of results.testResults as unknown[]) {
+    const suite = object(raw, 'Jest suite');
+
+    if (typeof suite.name !== 'string' || !suite.name.startsWith(clientRoot)) {
+      continue;
+    }
+
+    if (!Array.isArray(suite.assertionResults)) {
+      throw new Error(`${row.id}: missing client assertion results`);
+    }
+
+    for (const assertion of suite.assertionResults as unknown[]) {
+      const { status } = object(assertion, 'Jest assertion');
+
+      if (status === 'passed' || status === 'failed') {
+        executed += 1;
+      }
+    }
+  }
+
+  if (!executed) {
+    throw new Error(`${row.id}: zero executed client cases (fixture checks do not count)`);
+  }
+
+  console.log(`${row.id}: ${executed} client cases executed`);
+}
+
+function splitArguments(input: string): string[] {
+  const args: string[] = [];
+  let token = '';
+  let quote = '';
+  let escaped = false;
+  let started = false;
+
+  for (const character of input) {
+    if (escaped) {
+      token += character;
+      escaped = false;
+    } else if (character === '\\' && quote !== "'") {
+      escaped = true;
+      started = true;
+    } else if (quote) {
+      if (character === quote) {
+        quote = '';
+      } else {
+        token += character;
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character;
+      started = true;
+    } else if (/\s/.test(character)) {
+      if (started) {
+        args.push(token);
+        token = '';
+        started = false;
+      }
+    } else {
+      token += character;
+      started = true;
+    }
+  }
+
+  if (escaped || quote) {
+    throw new Error('NODE_TEST_ARGS contains an unfinished escape or quote');
+  }
+
+  if (started) {
+    args.push(token);
+  }
+
+  return args;
+}
+
 function parseArgs(args: string[]): Options {
   const [action, ...rest] = args;
+
   if (action !== 'list' && action !== 'validate' && action !== 'deps' && action !== 'test') {
     throw new Error(
       'usage: run.ts list|validate|deps|test [--profile ID | --library NAME] [-- test arguments]',
@@ -147,19 +298,23 @@ function parseArgs(args: string[]): Options {
   }
 
   const options: Options = { action, profile: '', library: '', testArgs: [] };
+
   for (let index = 0; index < rest.length; index++) {
     const arg = rest[index];
+
     if (arg === '--') {
       options.testArgs = rest.slice(index + 1);
       break;
     }
 
     const value = rest[index + 1];
+
     if ((arg !== '--profile' && arg !== '--library') || value === undefined) {
       throw new Error(`unknown argument or missing value: ${arg}`);
     }
 
     const key = arg === '--profile' ? 'profile' : 'library';
+
     if (options[key]) {
       throw new Error(`duplicate selector: ${arg}`);
     }
@@ -182,6 +337,7 @@ function parseArgs(args: string[]): Options {
 function loadRegistry(): Registry {
   const matrix = readJson(path.join(root, 'matrix.json'));
   checkFields(matrix, ['schemaVersion', 'suites', 'profiles'], 'registry');
+
   if (
     matrix.schemaVersion !== 1
     || !Array.isArray(matrix.suites)
@@ -193,12 +349,14 @@ function loadRegistry(): Registry {
   }
 
   const suites = new Map<string, Suite>();
+
   for (const suite of matrix.suites as unknown[]) {
     checkFields(
       suite,
       ['id', 'language', 'library', 'apiGeneration', 'package', 'suiteDir', 'status'],
       'suite',
     );
+
     if (!matches(identifier, suite.id) || suites.has(suite.id)) {
       throw new Error(`invalid or duplicate suite ID ${suite.id}`);
     }
@@ -235,6 +393,7 @@ function loadRegistry(): Registry {
 
   const ids = new Set<string>();
   const profiles: Profile[] = [];
+
   for (const profile of matrix.profiles as unknown[]) {
     checkFields(
       profile,
@@ -263,6 +422,7 @@ function loadRegistry(): Registry {
     }
 
     ids.add(profile.id);
+
     if (typeof profile.clientVersion !== 'string') {
       throw new Error(`${profile.id}: versions must be exact stable pins`);
     }
@@ -271,6 +431,7 @@ function loadRegistry(): Registry {
       suite.language === 'go' ? profile.clientVersion.replace(/^v/, '') : profile.clientVersion;
 
     const npmVersion = profile.packageManagerVersion;
+
     if (
       !matches(stableVersion, clientVersion)
       || (suite.language === 'go' && !profile.clientVersion.startsWith('v'))
@@ -322,8 +483,10 @@ function loadRegistry(): Registry {
 
 function selectProfiles({ profiles, suites }: Registry, options: Options): NodeProfile[] {
   const selected: NodeProfile[] = [];
+
   for (const profile of profiles) {
     const suite = suites.get(profile.suiteId);
+
     if (!suite) {
       throw new Error(`${profile.id}: unknown suite ${profile.suiteId}`);
     }
@@ -371,6 +534,7 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
   const manifest = readJson(path.join(dir, 'package.json'));
   const lock = readJson(path.join(dir, 'package-lock.json'));
   const engines = object(manifest.engines, `${dir}: engines`);
+
   if (
     manifest.private !== true
     || manifest.type !== 'module'
@@ -386,6 +550,7 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
   const packages = object(lock.packages, `${dir}: lock packages`);
   const declared = dependencyPins(manifest);
   const locked = dependencyPins(object(packages[''], `${dir}: lock root`));
+
   for (const [name, version] of Object.entries(pins)) {
     const installedLock = object(
       packages[`node_modules/${name}`],
@@ -403,8 +568,9 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
   }
 }
 
-function validateRuntime(rows: NodeProfile[]): void {
+async function validateRuntime(rows: NodeProfile[]): Promise<void> {
   const first = rows[0];
+
   if (!first) {
     throw new Error('no Node profiles selected');
   }
@@ -427,7 +593,8 @@ function validateRuntime(rows: NodeProfile[]): void {
     );
   }
 
-  const npmVersion = command('npm', ['--version'], nodeRoot, true);
+  const npmVersion = await command('npm', ['--version'], nodeRoot, true);
+
   if (npmVersion !== first.packageManagerVersion) {
     throw new Error(
       `selected profiles require npm ${first.packageManagerVersion}; installed npm is ${npmVersion} (use the pinned Node distribution's bundled npm)`,
@@ -455,6 +622,7 @@ function dependencyPins(manifest: Record<string, unknown>): Record<string, unkno
 function readJson(filename: string): Record<string, unknown> {
   try {
     const value: unknown = JSON.parse(fs.readFileSync(filename, 'utf8'));
+
     return object(value, filename);
   } catch (cause) {
     throw new Error(`read ${filename}: ${errorMessage(cause)}`, { cause });
@@ -493,6 +661,7 @@ function registryDir(relative: unknown): string {
   }
 
   const dir = fs.realpathSync(path.join(root, relative));
+
   if (!dir.startsWith(root + path.sep) || !fs.statSync(dir).isDirectory()) {
     throw new Error(`directory ${relative} must stay inside the registry root`);
   }
@@ -500,23 +669,105 @@ function registryDir(relative: unknown): string {
   return dir;
 }
 
-function command(executable: string, args: string[], dir: string, capture = false): string {
-  const result = spawnSync(executable, args, {
+async function command(
+  executable: string,
+  args: string[],
+  dir: string,
+  capture = false,
+): Promise<string> {
+  const child = spawn(executable, args, {
     cwd: dir,
     stdio: capture ? ['inherit', 'pipe', 'inherit'] : 'inherit',
-    encoding: 'utf8',
     shell: false,
+    detached: true,
+    env: {
+      ...process.env,
+      ...(process.env.KGCACHE_TEST_ARTIFACT_DIR
+        ? { KGCACHE_TEST_ARTIFACT_DIR: path.resolve(process.env.KGCACHE_TEST_ARTIFACT_DIR) }
+        : {}),
+    },
   });
 
-  if (result.error || result.status !== 0) {
-    throw new CommandError(
-      `${executable} ${args.join(' ')}: ${result.error?.message ?? `exit ${result.status}, signal ${result.signal ?? 'none'}`}`,
-      result.status !== null && result.status > 0 ? result.status : 1,
-      result.error,
-    );
-  }
+  let output = '';
+  let failure: Error | undefined;
+  let expired = false;
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  child.stdout?.on('data', (chunk: Buffer) => {
+    output += chunk.toString().slice(0, 16384 - output.length);
+  });
+  child.on('error', (error) => {
+    failure = error;
+  });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
 
-  return result.stdout?.trim() ?? '';
+  const terminate = (signal: NodeJS.Signals) => {
+    if (!child.pid) {
+      return;
+    }
+
+    try {
+      process.kill(-child.pid, signal);
+    } catch (cause) {
+      if (!isMissingProcess(cause)) {
+        failure = new Error('terminate native process group', { cause });
+      }
+    }
+  };
+
+  const timer = setTimeout(() => {
+    expired = true;
+    terminate('SIGTERM');
+    forceTimer = setTimeout(() => terminate('SIGKILL'), 3000);
+  }, nativeTimeoutMs);
+
+  try {
+    const result = await closed;
+
+    if (expired && child.pid) {
+      const deadline = Date.now() + 3500;
+
+      while (processGroupExists(child.pid) && Date.now() < deadline) {
+        await delay(20);
+      }
+
+      terminate('SIGKILL');
+    }
+
+    if (failure || expired || result.code !== 0) {
+      throw new CommandError(
+        `${executable} ${args.join(' ')}: ${failure?.message ?? (expired ? `exceeded ${nativeTimeoutMs}ms` : `exit ${result.code}, signal ${result.signal ?? 'none'}`)}`,
+        result.code !== null && result.code > 0 ? result.code : 1,
+        failure,
+      );
+    }
+
+    return output.trim();
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(forceTimer);
+    child.removeAllListeners();
+    child.stdout?.removeAllListeners();
+  }
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+
+    return true;
+  } catch (cause) {
+    if (isMissingProcess(cause)) {
+      return false;
+    }
+
+    throw cause;
+  }
+}
+
+function isMissingProcess(cause: unknown): boolean {
+  return cause instanceof Error && 'code' in cause && cause.code === 'ESRCH';
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -540,4 +791,4 @@ class CommandError extends Error {
   }
 }
 
-main();
+await main();

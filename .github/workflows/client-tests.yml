@@ -46,6 +46,7 @@ jobs:
     timeout-minutes: 10
     env:
       CLIENT_PROFILE: node-redis-6.2.1
+      KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/node-redis-6.2.1
 
     steps:
       - name: Check out repository
@@ -58,6 +59,18 @@ jobs:
         with:
           node-version: '22.14.0'
           package-manager-cache: false
+          cache: npm
+          cache-dependency-path: |
+            tests/integration/clients/node/package-lock.json
+            tests/integration/clients/node/node-redis/v6/package-lock.json
+
+      - name: Verify bundled npm
+        run: test "$(npm --version)" = '10.9.2'
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
 
       - name: Prepare and validate node-redis dependencies
         run: make deps-node
@@ -68,5 +81,14 @@ jobs:
       - name: Check node-redis test code
         run: make check-node
 
-      - name: Run node-redis bootstrap placeholder
-        run: node --experimental-strip-types tests/integration/clients/node/run.ts test --profile "$CLIENT_PROFILE"
+      - name: Run node-redis compatibility cases against this checkout
+        run: make test-node CLIENT_PROFILE=node-redis-6.2.1
+
+      - name: Upload node-redis failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: node-redis-6.2.1-failures
+          path: test-artifacts/node-redis-6.2.1
+          if-no-files-found: ignore
+          retention-days: 7

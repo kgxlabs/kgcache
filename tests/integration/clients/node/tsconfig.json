@@ -9,6 +9,7 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "isolatedModules": true,
+    "paths": { "@/*": ["./*.ts"] },
     "types": ["node"]
   },
   "include": ["run.ts", "eslint.config.ts", "harness/**/*.ts"],
