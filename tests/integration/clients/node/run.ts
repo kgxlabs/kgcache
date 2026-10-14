@@ -106,18 +106,6 @@ function run(args: string[]): void {
     return;
   }
 
-  if (options.action === 'test') {
-    for (const row of rows) {
-      if (row.suite.status === 'planned') {
-        throw new Error(
-          `${row.id}: suite ${row.suite.id} is planned; no client scenarios exist yet`,
-        );
-      }
-    }
-
-    throw new Error('client execution requires the actual Node scenario implementation');
-  }
-
   validateRuntime(rows);
   if (options.action === 'deps') {
     command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot);
@@ -133,7 +121,20 @@ function run(args: string[]): void {
       [row.suite.package]: row.clientVersion,
       ...suiteToolingPins,
     });
-    console.log(`${row.id}: locked dependencies validated (${row.suite.status} suite)`);
+    if (options.action === 'test') {
+      if (row.suite.status !== 'planned') {
+        throw new Error('client execution requires the actual Node scenario implementation');
+      }
+
+      console.log(`${row.id}: running bootstrap placeholder (client suite remains planned)`);
+      command(
+        'npm',
+        ['test', '--', '--runTestsByPath', 'tests/bootstrap.test.ts', ...options.testArgs],
+        row.dir,
+      );
+    } else {
+      console.log(`${row.id}: locked dependencies validated (${row.suite.status} suite)`);
+    }
   }
 }
 

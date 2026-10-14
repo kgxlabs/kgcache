@@ -118,13 +118,25 @@ func run(args []string) error {
 	}
 
 	if action == "test" {
+		if err := validateRuntime(selected); err != nil {
+			return err
+		}
+
+		args := []string{"test", "-mod=readonly", "-count=1"}
+		args = append(args, flags.Args()...)
+		args = append(args, "bootstrap_test.go")
 		for _, row := range selected {
-			if row.suite.Status == "planned" {
-				return fmt.Errorf("%s: suite %s is planned; no client scenarios exist yet", row.ID, row.suite.ID)
+			if row.suite.Status != "planned" {
+				return errors.New("client execution requires the actual Go scenario implementation")
+			}
+
+			fmt.Printf("%s: running bootstrap placeholder (client suite remains planned)\n", row.ID)
+			if err := goRun(row.dir, args...); err != nil {
+				return fmt.Errorf("%s: bootstrap test: %w", row.ID, err)
 			}
 		}
 
-		return errors.New("client execution requires the actual Go scenario implementation")
+		return nil
 	}
 
 	if err := validateRuntime(selected); err != nil {

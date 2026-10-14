@@ -39,6 +39,9 @@ jobs:
       - name: Check Go client project code
         run: make check-go
 
+      - name: Run Go bootstrap placeholder
+        run: go run tests/integration/clients/go/run.go test --profile go-redis-v9.22.0
+
   node-client:
     name: Node client checks
     runs-on: ubuntu-24.04
@@ -64,3 +67,6 @@ jobs:
 
       - name: Check Node client project code
         run: make check-node
+
+      - name: Run Node bootstrap placeholder
+        run: node --experimental-strip-types tests/integration/clients/node/run.ts test --profile node-redis-6.2.1
