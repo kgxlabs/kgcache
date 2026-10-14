@@ -6,7 +6,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
-	"kgcache.test/clientharness"
 )
 
 func TestCallerReports(t *testing.T) {
@@ -16,7 +15,7 @@ func TestCallerReports(t *testing.T) {
 			name, expected = "default", 3
 		}
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, protocol, clientharness.Options{})
+			f := newFixture(t, protocol, fixtureOptions{})
 			client := f.client(t, clientOptions{})
 			conn := dedicatedConn(t, client)
 			if !assert.NoError(t, conn.Ping(f.ctx).Err()) {

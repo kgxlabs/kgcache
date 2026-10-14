@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -186,10 +187,12 @@ func run(args []string) error {
 }
 
 func runNativeTests(row selection, focused []string, requireClientCases bool) error {
-	fmt.Printf("%s: native client tests\n", row.ID)
+	fmt.Printf("%s: native tests\n", row.ID)
 	args := append([]string{"test", "-timeout=5m"}, focused...)
 	args = append(args, "-json", "-mod=readonly", "-count=1", "./...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	interrupted, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := context.WithTimeout(interrupted, 5*time.Minute)
 	defer cancel()
 	cmd := goCommand(row.dir, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -254,7 +257,7 @@ func runNativeTests(row selection, focused []string, requireClientCases bool) er
 	<-watchJoined
 	groupErr := reapNativeGroup(cmd.Process.Pid)
 	if ctx.Err() != nil {
-		waitErr = errors.Join(waitErr, fmt.Errorf("native suite deadline: %w", ctx.Err()))
+		waitErr = errors.Join(waitErr, fmt.Errorf("native suite cancelled: %w", ctx.Err()))
 	}
 	err = errors.Join(decodeErr, waitErr, groupErr)
 	executed := 0

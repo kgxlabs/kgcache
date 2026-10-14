@@ -23,16 +23,25 @@ type clientOptions struct {
 	identitySuffix string
 }
 
-func newFixture(t *testing.T, protocol int, options clientharness.Options) *fixture {
+type fixtureOptions struct {
+	clientharness.Options
+	scenarioTimeout time.Duration
+}
+
+func newFixture(t *testing.T, protocol int, options fixtureOptions) *fixture {
 	t.Helper()
-	timeout := 45 * time.Second
-	if options.ExtraConfig != "" {
-		timeout = 60 * time.Second
+	timeout := options.scenarioTimeout
+	if timeout == 0 {
+		timeout = 45 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	t.Cleanup(cancel)
-	options.FailureLabel = fmt.Sprintf("go-redis-v9.22.0-RESP%d-%s", protocol, t.Name())
-	server, err := clientharness.New(options)
+	protocolName := fmt.Sprintf("RESP%d", protocol)
+	if protocol == 0 {
+		protocolName = "RESPdefault"
+	}
+	options.FailureLabel = fmt.Sprintf("go-redis-v9.22.0-%s-%s", protocolName, t.Name())
+	server, err := clientharness.New(options.Options)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,12 +5,11 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
-	"kgcache.test/clientharness"
 )
 
 func TestStrings(t *testing.T) {
 	explicitProtocols(t, func(t *testing.T, protocol int) {
-		f := newFixture(t, protocol, clientharness.Options{})
+		f := newFixture(t, protocol, fixtureOptions{})
 		client := f.client(t, clientOptions{})
 		size, err := client.DBSize(f.ctx).Result()
 		if !assert.NoError(t, err) {
@@ -62,7 +61,7 @@ func TestStrings(t *testing.T) {
 
 func TestBinaryStrings(t *testing.T) {
 	explicitProtocols(t, func(t *testing.T, protocol int) {
-		f := newFixture(t, protocol, clientharness.Options{})
+		f := newFixture(t, protocol, fixtureOptions{})
 		client := f.client(t, clientOptions{})
 		key := string([]byte{0, 255, 13, 10, 128, '='})
 		value := []byte{255, 0, 128, 13, 10, 195, 40}

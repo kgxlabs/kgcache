@@ -307,6 +307,9 @@ func helperOptions(t *testing.T, mode string) Options {
 
 func newTestServer(t *testing.T, options Options) *Server {
 	t.Helper()
+	if options.Quiet && options.ArtifactDir == "" {
+		options.DisableArtifacts = true
+	}
 	s, err := New(options)
 	if err != nil {
 		t.Fatal(err)

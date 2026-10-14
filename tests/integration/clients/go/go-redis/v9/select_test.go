@@ -5,12 +5,11 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
-	"kgcache.test/clientharness"
 )
 
 func TestInitialDatabase(t *testing.T) {
 	explicitProtocols(t, func(t *testing.T, protocol int) {
-		f := newFixture(t, protocol, clientharness.Options{})
+		f := newFixture(t, protocol, fixtureOptions{})
 		db1 := f.client(t, clientOptions{db: 1})
 		db0 := f.client(t, clientOptions{})
 		if !assert.NoError(t, db1.Set(f.ctx, "shared-key", "one", 0).Err()) {
@@ -44,7 +43,7 @@ func TestInitialDatabase(t *testing.T) {
 
 func TestSelectPreservesConnectionState(t *testing.T) {
 	explicitProtocols(t, func(t *testing.T, protocol int) {
-		f := newFixture(t, protocol, clientharness.Options{})
+		f := newFixture(t, protocol, fixtureOptions{})
 		client := f.client(t, clientOptions{})
 		peer := f.client(t, clientOptions{})
 		conn := dedicatedConn(t, client)

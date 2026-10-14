@@ -8,12 +8,11 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
-	"kgcache.test/clientharness"
 )
 
 func TestLiveClientListings(t *testing.T) {
 	explicitProtocols(t, func(t *testing.T, protocol int) {
-		f := newFixture(t, protocol, clientharness.Options{})
+		f := newFixture(t, protocol, fixtureOptions{})
 		caller := f.client(t, clientOptions{})
 		callerConn := dedicatedConn(t, caller)
 		peerProtocol := 5 - protocol

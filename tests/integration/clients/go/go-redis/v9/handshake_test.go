@@ -20,14 +20,16 @@ func TestHandshake(t *testing.T) {
 			name, expected = "default", 3
 		}
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, protocol, clientharness.Options{})
+			f := newFixture(t, protocol, fixtureOptions{})
 			client := f.client(t, clientOptions{})
 			conn := dedicatedConn(t, client)
 			pong, err := conn.Ping(f.ctx).Result()
 			if !assert.NoError(t, err) {
 				return
 			}
-			assert.Equal(t, "PONG", pong)
+			if !assert.Equal(t, "PONG", pong) {
+				return
+			}
 
 			info, err := conn.ClientInfo(f.ctx).Result()
 			if !assert.NoError(t, err) {
@@ -74,7 +76,7 @@ func TestClientAssertionCleanupHelper(t *testing.T) {
 	if marker == "" {
 		t.Skip("subprocess check only")
 	}
-	f := newFixture(t, 3, clientharness.Options{Quiet: true})
+	f := newFixture(t, 3, fixtureOptions{Options: clientharness.Options{Quiet: true, DisableArtifacts: true}})
 	if err := os.WriteFile(marker, []byte(f.server.DataDir()), 0600); err != nil {
 		t.Fatal(err)
 	}

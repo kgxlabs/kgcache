@@ -25,14 +25,15 @@ const logLimit = 16 * 1024
 
 // Options configures process startup without any client library dependency.
 type Options struct {
-	Executable     string
-	ExtraArgs      []string
-	ExtraConfig    string
-	StartupTimeout time.Duration
-	StopTimeout    time.Duration
-	ArtifactDir    string
-	FailureLabel   string
-	Quiet          bool
+	Executable       string
+	ExtraArgs        []string
+	ExtraConfig      string
+	StartupTimeout   time.Duration
+	StopTimeout      time.Duration
+	ArtifactDir      string
+	FailureLabel     string
+	Quiet            bool
+	DisableArtifacts bool
 }
 
 // Server owns its child and temporary directory across stop/start cycles.
@@ -268,9 +269,12 @@ func (s *Server) RetainFailure(cause error) error {
 	if label == "" {
 		label = "go-harness"
 	}
-	causeText := bounded([]byte(cause.Error()))
+	causeText := bounded([]byte(errors.Join(cause, s.failure).Error()))
 	if !s.options.Quiet {
 		fmt.Fprintf(os.Stderr, "%s: %s\nstdout:\n%s\nstderr:\n%s\n", label, causeText, s.stdout.bytes(), s.stderr.bytes())
+	}
+	if s.options.DisableArtifacts {
+		return nil
 	}
 	root := s.options.ArtifactDir
 	if root == "" {

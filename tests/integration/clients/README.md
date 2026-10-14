@@ -1,11 +1,9 @@
 # Client test projects
 
-The node-redis v6 suite runs real clients against kgcache with explicit RESP2 and
-RESP3, plus a default handshake check. It covers strings and binary values,
+The go-redis v9 and node-redis v6 suites run real clients against kgcache with
+explicit RESP2 and RESP3, plus a default handshake check. They cover strings and binary values,
 database selection, client reports, SET options and expiration, ordered pipelines,
 command errors, snapshot reload, and background persistence replies.
-The go-redis v9 suite also runs native clients, starting with handshakes in both
-protocols and the omitted-option default.
 
 Use Go 1.26.9 and Node 22.14.0 with its bundled npm 10.9.2. Put those tools on
 `PATH`. The launchers check installed versions and never download runtimes.
