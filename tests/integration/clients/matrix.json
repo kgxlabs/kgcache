@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "suites": [
+    {
+      "id": "go-redis-v9",
+      "language": "go",
+      "library": "go-redis",
+      "apiGeneration": "v9",
+      "package": "github.com/redis/go-redis/v9",
+      "suiteDir": "go/go-redis/v9",
+      "status": "planned"
+    },
+    {
+      "id": "node-redis-v6",
+      "language": "node",
+      "library": "node-redis",
+      "apiGeneration": "v6",
+      "package": "redis",
+      "suiteDir": "node/node-redis/v6",
+      "status": "planned"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "go-redis-v9.22.0",
+      "suiteId": "go-redis-v9",
+      "clientVersion": "v9.22.0",
+      "runtimeVersion": "1.26.9",
+      "dependencyDir": "go/go-redis/v9",
+      "protocols": [2, 3],
+      "expectedDefaultProtocol": 3,
+      "ci": "required"
+    },
+    {
+      "id": "node-redis-6.2.1",
+      "suiteId": "node-redis-v6",
+      "clientVersion": "6.2.1",
+      "runtimeVersion": "22.14.0",
+      "dependencyDir": "node/node-redis/v6",
+      "protocols": [2, 3],
+      "expectedDefaultProtocol": 3,
+      "ci": "required"
+    }
+  ]
+}
