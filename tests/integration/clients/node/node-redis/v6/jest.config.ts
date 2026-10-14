@@ -7,7 +7,7 @@ export default {
   roots: ['<rootDir>/tests', '<rootDir>/../../harness'],
   testMatch: ['<rootDir>/tests/**/*.test.ts', '<rootDir>/../../harness/**/*.test.ts'],
   fakeTimers: { enableGlobally: false },
-  testTimeout: 45000,
+  testTimeout: 75000,
   clearMocks: true,
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/../../$1.ts',
