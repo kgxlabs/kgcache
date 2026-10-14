@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 interface Suite {
@@ -122,8 +123,9 @@ function run(args: string[]): void {
       ...suiteToolingPins,
     });
     if (options.action === 'test') {
-      if (row.suite.status !== 'planned') {
-        throw new Error('client execution requires the actual Node scenario implementation');
+      if (row.suite.status === 'ready') {
+        runTests(row, [...splitArguments(process.env.NODE_TEST_ARGS ?? ''), ...options.testArgs]);
+        continue;
       }
 
       console.log(`${row.id}: running bootstrap placeholder (client suite remains planned)`);
@@ -136,6 +138,100 @@ function run(args: string[]): void {
       console.log(`${row.id}: locked dependencies validated (${row.suite.status} suite)`);
     }
   }
+}
+
+function runTests(row: NodeProfile, testArgs: string[]): void {
+  const binary = process.env.KGCACHE_BIN;
+  if (!binary || !path.isAbsolute(binary)) {
+    throw new Error('KGCACHE_BIN must be an absolute executable path');
+  }
+
+  fs.accessSync(binary, fs.constants.X_OK);
+  const artifactRoot = process.env.KGCACHE_TEST_ARTIFACT_DIR;
+  const resultDir = artifactRoot
+    ? path.join(path.resolve(artifactRoot), row.id)
+    : fs.mkdtempSync(path.join(os.tmpdir(), `${row.id}-results-`));
+
+  fs.mkdirSync(resultDir, { recursive: true });
+  const resultFile = path.join(resultDir, 'jest-results.json');
+  fs.rmSync(resultFile, { force: true });
+  console.log(`${row.id}: native client tests; results: ${resultFile}`);
+  command('npm', ['test', '--', ...testArgs, '--json', `--outputFile=${resultFile}`], row.dir);
+  const results = readJson(resultFile);
+  if (!Array.isArray(results.testResults)) {
+    throw new Error(`${row.id}: Jest did not report test results`);
+  }
+
+  let executed = 0;
+  const clientRoot = path.join(row.dir, 'tests') + path.sep;
+  for (const raw of results.testResults as unknown[]) {
+    const suite = object(raw, 'Jest suite');
+    if (typeof suite.name !== 'string' || !suite.name.startsWith(clientRoot)) {
+      continue;
+    }
+
+    if (!Array.isArray(suite.assertionResults)) {
+      throw new Error(`${row.id}: missing client assertion results`);
+    }
+
+    for (const assertion of suite.assertionResults as unknown[]) {
+      const { status } = object(assertion, 'Jest assertion');
+      if (status === 'passed' || status === 'failed') {
+        executed += 1;
+      }
+    }
+  }
+
+  if (!executed) {
+    throw new Error(`${row.id}: zero executed client cases (fixture checks do not count)`);
+  }
+
+  console.log(`${row.id}: ${executed} client cases executed`);
+}
+
+function splitArguments(input: string): string[] {
+  const args: string[] = [];
+  let token = '';
+  let quote = '';
+  let escaped = false;
+  let started = false;
+  for (const character of input) {
+    if (escaped) {
+      token += character;
+      escaped = false;
+    } else if (character === '\\' && quote !== "'") {
+      escaped = true;
+      started = true;
+    } else if (quote) {
+      if (character === quote) {
+        quote = '';
+      } else {
+        token += character;
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character;
+      started = true;
+    } else if (/\s/.test(character)) {
+      if (started) {
+        args.push(token);
+        token = '';
+        started = false;
+      }
+    } else {
+      token += character;
+      started = true;
+    }
+  }
+
+  if (escaped || quote) {
+    throw new Error('NODE_TEST_ARGS contains an unfinished escape or quote');
+  }
+
+  if (started) {
+    args.push(token);
+  }
+
+  return args;
 }
 
 function parseArgs(args: string[]): Options {
@@ -506,6 +602,14 @@ function command(executable: string, args: string[], dir: string, capture = fals
     stdio: capture ? ['inherit', 'pipe', 'inherit'] : 'inherit',
     encoding: 'utf8',
     shell: false,
+    timeout: 5 * 60 * 1000,
+    killSignal: 'SIGTERM',
+    env: {
+      ...process.env,
+      ...(process.env.KGCACHE_TEST_ARTIFACT_DIR
+        ? { KGCACHE_TEST_ARTIFACT_DIR: path.resolve(process.env.KGCACHE_TEST_ARTIFACT_DIR) }
+        : {}),
+    },
   });
 
   if (result.error || result.status !== 0) {
