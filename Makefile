@@ -22,7 +22,7 @@ export GO_TEST_ARGS NODE_TEST_ARGS
 
 CLIENT_SELECTOR = --profile "$(CLIENT_PROFILE)" --library "$(CLIENT_LIBRARY)"
 GO_RUN = $(GO) run "$(CLIENT_ROOT)/go/run.go"
-NODE_RUN = $(NODE) "$(CLIENT_ROOT)/node/run.cjs"
+NODE_RUN = $(NODE) --experimental-strip-types "$(CLIENT_ROOT)/node/run.ts"
 
 .PHONY: build test test-zig test-unit test-integration test-go test-node test-clients \
 	deps-go deps-node deps-clients list-clients check-go check-node check-clients \

@@ -49,8 +49,10 @@ type selection struct {
 	dir   string
 }
 
-var stableVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
-var identifier = regexp.MustCompile(`^[a-z][a-z0-9.-]*$`)
+var (
+	stableVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	identifier    = regexp.MustCompile(`^[a-z][a-z0-9.-]*$`)
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -59,6 +61,7 @@ func main() {
 		if errors.As(err, &child) && child.ExitCode() > 0 {
 			os.Exit(child.ExitCode())
 		}
+
 		os.Exit(1)
 	}
 }
@@ -68,9 +71,12 @@ func run(args []string) error {
 		return errors.New("usage: run.go list|validate|deps|check|fmt|test [--profile ID | --library NAME] [-- test arguments]")
 	}
 	action := args[0]
-	if action != "list" && action != "validate" && action != "deps" && action != "check" && action != "fmt" && action != "test" {
+	switch action {
+	case "list", "validate", "deps", "check", "fmt", "test":
+	default:
 		return fmt.Errorf("unknown action %q", action)
 	}
+
 	flags := flag.NewFlagSet("Go client profiles", flag.ContinueOnError)
 	profileID := flags.String("profile", "", "select one registered profile")
 	library := flags.String("library", "", "filter required profiles by library")
@@ -80,50 +86,62 @@ func run(args []string) error {
 	if action != "test" && flags.NArg() != 0 {
 		return errors.New("test arguments are only allowed with test")
 	}
+
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		return errors.New("cannot locate the client registry")
 	}
+
 	root := filepath.Dir(filepath.Dir(source))
 	matrix, err := loadRegistry(root)
 	if err != nil {
 		return err
 	}
+
 	selected, err := selectProfiles(root, matrix, *profileID, *library)
 	if err != nil {
 		return err
 	}
+
 	for _, row := range selected {
 		if err := validateManifest(row); err != nil {
 			return fmt.Errorf("%s: %w", row.ID, err)
 		}
 	}
+
 	if action == "list" {
 		for _, row := range selected {
 			fmt.Printf("%s  %s  %s  Go %s  %s\n", row.ID, row.suite.ID, row.suite.Status, row.RuntimeVersion, row.CI)
 		}
+
 		return nil
 	}
+
 	if action == "test" {
 		for _, row := range selected {
 			if row.suite.Status == "planned" {
 				return fmt.Errorf("%s: suite %s is planned; no client scenarios exist yet", row.ID, row.suite.ID)
 			}
 		}
+
 		return errors.New("client execution requires the actual Go scenario implementation")
 	}
+
 	if err := validateRuntime(selected); err != nil {
 		return err
 	}
+
 	if action == "check" || action == "fmt" {
 		return checkCode(root, selected, action == "fmt")
 	}
+
 	for _, row := range selected {
 		if action == "deps" {
 			if err := goRun(row.dir, "mod", "download", "all"); err != nil {
 				return fmt.Errorf("%s: download dependencies: %w", row.ID, err)
 			}
 		}
+
 		if err := goRun(row.dir, "mod", "verify"); err != nil {
 			return fmt.Errorf("%s: verify dependencies: %w", row.ID, err)
 		}
@@ -132,41 +150,7 @@ func run(args []string) error {
 		}
 		fmt.Printf("%s: locked dependencies validated (%s suite)\n", row.ID, row.suite.Status)
 	}
-	return nil
-}
 
-func checkCode(root string, rows []selection, format bool) error {
-	goroot, err := goCommand("", "env", "GOROOT").Output()
-	if err != nil {
-		return fmt.Errorf("locate pinned formatter: %w", err)
-	}
-	mode := "-l"
-	if format {
-		mode = "-w"
-	}
-	cmd := exec.Command(filepath.Join(strings.TrimSpace(string(goroot)), "bin", "gofmt"), mode, filepath.Join(root, "go"))
-	cmd.Stderr = os.Stderr
-	output, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("format Go sources: %w", err)
-	}
-	if !format && len(output) != 0 {
-		return fmt.Errorf("run make fmt-go for:\n%s", output)
-	}
-	if format {
-		return nil
-	}
-	if err := goRun(filepath.Join(root, "go"), "vet", "run.go"); err != nil {
-		return fmt.Errorf("vet launcher: %w", err)
-	}
-	if err := goRun(filepath.Join(root, "go", "harness"), "vet", "-mod=readonly", "./..."); err != nil {
-		return fmt.Errorf("vet harness: %w", err)
-	}
-	for _, row := range rows {
-		if err := goRun(row.dir, "vet", "-mod=readonly", "./..."); err != nil {
-			return fmt.Errorf("%s: vet suite: %w", row.ID, err)
-		}
-	}
 	return nil
 }
 
@@ -177,6 +161,7 @@ func loadRegistry(root string) (registry, error) {
 		return matrix, fmt.Errorf("open registry: %w", err)
 	}
 	defer file.Close()
+
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&matrix); err != nil {
@@ -193,7 +178,9 @@ func loadRegistry(root string) (registry, error) {
 		if _, exists := suites[s.ID]; exists || !identifier.MatchString(s.ID) {
 			return matrix, fmt.Errorf("invalid or duplicate suite ID %q", s.ID)
 		}
-		if (s.Language != "go" && s.Language != "node") || !identifier.MatchString(s.Library) || !identifier.MatchString(s.APIGeneration) || s.Package == "" {
+		validLanguage := s.Language == "go" || s.Language == "node"
+		validNames := identifier.MatchString(s.Library) && identifier.MatchString(s.APIGeneration)
+		if !validLanguage || !validNames || s.Package == "" {
 			return matrix, fmt.Errorf("%s: invalid language, library, API generation, or package", s.ID)
 		}
 		if s.Status != "planned" && s.Status != "ready" {
@@ -207,6 +194,7 @@ func loadRegistry(root string) (registry, error) {
 		}
 		suites[s.ID] = s
 	}
+
 	ids := make(map[string]bool)
 	for _, p := range matrix.Profiles {
 		s, exists := suites[p.SuiteID]
@@ -214,6 +202,7 @@ func loadRegistry(root string) (registry, error) {
 			return matrix, fmt.Errorf("%q: invalid/duplicate profile ID or unknown suite %q", p.ID, p.SuiteID)
 		}
 		ids[p.ID] = true
+
 		version := p.ClientVersion
 		if s.Language == "go" {
 			if !strings.HasPrefix(version, "v") {
@@ -221,12 +210,15 @@ func loadRegistry(root string) (registry, error) {
 			}
 			version = strings.TrimPrefix(version, "v")
 		}
-		if !stableVersion.MatchString(version) || !stableVersion.MatchString(p.RuntimeVersion) || (s.Language == "node" && !stableVersion.MatchString(p.PackageManagerVersion)) {
+		validVersions := stableVersion.MatchString(version) && stableVersion.MatchString(p.RuntimeVersion)
+		validNPM := s.Language != "node" || stableVersion.MatchString(p.PackageManagerVersion)
+		if !validVersions || !validNPM {
 			return matrix, fmt.Errorf("%s: versions must be exact stable pins", p.ID)
 		}
 		if p.CI != "required" && p.CI != "advisory" {
 			return matrix, fmt.Errorf("%s: ci must be required or advisory", p.ID)
 		}
+
 		protocols := make(map[int]bool)
 		for _, protocol := range p.Protocols {
 			if (protocol != 2 && protocol != 3) || protocols[protocol] {
@@ -237,6 +229,7 @@ func loadRegistry(root string) (registry, error) {
 		if !protocols[p.ExpectedDefaultProtocol] {
 			return matrix, fmt.Errorf("%s: expected default must be a declared protocol", p.ID)
 		}
+
 		if p.DependencyDir != s.SuiteDir && !strings.HasPrefix(p.DependencyDir, s.SuiteDir+"/profiles/") {
 			return matrix, fmt.Errorf("%s: dependencyDir must belong to its suite", p.ID)
 		}
@@ -244,25 +237,8 @@ func loadRegistry(root string) (registry, error) {
 			return matrix, fmt.Errorf("%s: %w", p.ID, err)
 		}
 	}
-	return matrix, nil
-}
 
-func registryDir(root, relative string) (string, error) {
-	if relative == "" || filepath.IsAbs(relative) || filepath.ToSlash(filepath.Clean(relative)) != relative {
-		return "", fmt.Errorf("invalid registry directory %q", relative)
-	}
-	dir, err := filepath.EvalSymlinks(filepath.Join(root, relative))
-	if err != nil {
-		return "", fmt.Errorf("resolve directory %q: %w", relative, err)
-	}
-	if !strings.HasPrefix(dir, root+string(os.PathSeparator)) {
-		return "", fmt.Errorf("directory %q leaves the registry root", relative)
-	}
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		return "", fmt.Errorf("%q must be a directory", relative)
-	}
-	return dir, nil
+	return matrix, nil
 }
 
 func selectProfiles(root string, matrix registry, profileID, library string) ([]selection, error) {
@@ -273,6 +249,7 @@ func selectProfiles(root string, matrix registry, profileID, library string) ([]
 	for _, s := range matrix.Suites {
 		suites[s.ID] = s
 	}
+
 	var selected []selection
 	for _, p := range matrix.Profiles {
 		s := suites[p.SuiteID]
@@ -286,6 +263,7 @@ func selectProfiles(root string, matrix registry, profileID, library string) ([]
 		} else if s.Language != "go" || p.CI != "required" || (library != "" && s.Library != library) {
 			continue
 		}
+
 		if p.DependencyDir != s.SuiteDir {
 			return nil, fmt.Errorf("%s: separate dependency workspaces require the step 04 runner", p.ID)
 		}
@@ -295,9 +273,11 @@ func selectProfiles(root string, matrix registry, profileID, library string) ([]
 		}
 		selected = append(selected, selection{profile: p, suite: s, dir: dir})
 	}
+
 	if len(selected) == 0 {
 		return nil, fmt.Errorf("no Go profiles match profile=%q library=%q", profileID, library)
 	}
+
 	return selected, nil
 }
 
@@ -308,6 +288,7 @@ func validateManifest(row selection) error {
 			return fmt.Errorf("missing or empty %s", name)
 		}
 	}
+
 	version, err := os.ReadFile(filepath.Join(row.dir, ".go-version"))
 	if err != nil {
 		return err
@@ -315,34 +296,24 @@ func validateManifest(row selection) error {
 	if strings.TrimSpace(string(version)) != row.RuntimeVersion {
 		return errors.New(".go-version does not match runtimeVersion")
 	}
+
 	manifest, err := os.ReadFile(filepath.Join(row.dir, "go.mod"))
 	if err != nil {
 		return err
 	}
-	for name, version := range map[string]string{"go": row.RuntimeVersion, row.suite.Package: row.ClientVersion, "github.com/stretchr/testify": "v1.11.1"} {
+	pins := map[string]string{
+		"go":                          row.RuntimeVersion,
+		row.suite.Package:             row.ClientVersion,
+		"github.com/stretchr/testify": "v1.11.1",
+	}
+	for name, version := range pins {
 		pin := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(name) + `\s+` + regexp.QuoteMeta(version) + `\s*(?://[^\n]*)?$`)
 		if !pin.Match(manifest) {
 			return fmt.Errorf("go.mod must pin %s %s", name, version)
 		}
 	}
+
 	return nil
-}
-
-func goCommand(dir string, args ...string) *exec.Cmd {
-	command := os.Getenv("GO")
-	if command == "" {
-		command = "go"
-	}
-	cmd := exec.Command(command, args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off")
-	return cmd
-}
-
-func goRun(dir string, args ...string) error {
-	cmd := goCommand(dir, args...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
 }
 
 func validateRuntime(rows []selection) error {
@@ -352,18 +323,69 @@ func validateRuntime(rows []selection) error {
 			return errors.New("selected profiles require different Go versions; invoke each --profile separately with its pinned runtime")
 		}
 	}
+
 	actual, err := goCommand("", "env", "GOVERSION").Output()
 	if err != nil {
 		return fmt.Errorf("read Go runtime: %w", err)
 	}
-	if strings.TrimSpace(string(actual)) != "go"+version {
-		return fmt.Errorf("selected profiles require Go %s; installed runtime is %s (set GO to the pinned executable)", version, strings.TrimSpace(string(actual)))
+	installedVersion := strings.TrimSpace(string(actual))
+	if installedVersion != "go"+version {
+		return fmt.Errorf("selected profiles require Go %s; installed runtime is %s (set GO to the pinned executable)", version, installedVersion)
 	}
+
 	return nil
 }
 
+func checkCode(root string, rows []selection, format bool) error {
+	goroot, err := goCommand("", "env", "GOROOT").Output()
+	if err != nil {
+		return fmt.Errorf("locate pinned formatter: %w", err)
+	}
+
+	mode := "-l"
+	if format {
+		mode = "-w"
+	}
+
+	gofmtPath := filepath.Join(strings.TrimSpace(string(goroot)), "bin", "gofmt")
+	cmd := exec.Command(gofmtPath, mode, filepath.Join(root, "go"))
+	cmd.Stderr = os.Stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("format Go sources: %w", err)
+	}
+	if !format && len(output) != 0 {
+		return fmt.Errorf("run make fmt-go for:\n%s", output)
+	}
+	if format {
+		return nil
+	}
+
+	if err := goRun(filepath.Join(root, "go"), "vet", "run.go"); err != nil {
+		return fmt.Errorf("vet launcher: %w", err)
+	}
+	if err := goRun(filepath.Join(root, "go", "harness"), "vet", "-mod=readonly", "./..."); err != nil {
+		return fmt.Errorf("vet harness: %w", err)
+	}
+	for _, row := range rows {
+		if err := goRun(row.dir, "vet", "-mod=readonly", "./..."); err != nil {
+			return fmt.Errorf("%s: vet suite: %w", row.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func goRun(dir string, args ...string) error {
+	cmd := goCommand(dir, args...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}
+
 func validateResolvedVersions(root string, row selection) error {
-	output, err := goCommand(row.dir, "list", "-mod=readonly", "-m", "-json", row.suite.Package, "github.com/stretchr/testify", "kgcache.test/clientharness").Output()
+	cmd := goCommand(row.dir, "list", "-mod=readonly", "-m", "-json",
+		row.suite.Package, "github.com/stretchr/testify", "kgcache.test/clientharness")
+	output, err := cmd.Output()
 	if err != nil {
 		var child *exec.ExitError
 		if errors.As(err, &child) {
@@ -371,8 +393,13 @@ func validateResolvedVersions(root string, row selection) error {
 		}
 		return fmt.Errorf("resolve modules: %w", err)
 	}
+
 	decoder := json.NewDecoder(strings.NewReader(string(output)))
-	expected := map[string]string{row.suite.Package: row.ClientVersion, "github.com/stretchr/testify": "v1.11.1", "kgcache.test/clientharness": "v0.0.0"}
+	expected := map[string]string{
+		row.suite.Package:             row.ClientVersion,
+		"github.com/stretchr/testify": "v1.11.1",
+		"kgcache.test/clientharness":  "v0.0.0",
+	}
 	for decoder.More() {
 		var module struct {
 			Path, Version string
@@ -381,10 +408,12 @@ func validateResolvedVersions(root string, row selection) error {
 		if err := decoder.Decode(&module); err != nil {
 			return fmt.Errorf("parse resolved module: %w", err)
 		}
+
 		version, exists := expected[module.Path]
 		if !exists || module.Version != version {
 			return fmt.Errorf("unexpected resolved module %s %s", module.Path, module.Version)
 		}
+
 		if module.Path == "kgcache.test/clientharness" {
 			harness, err := registryDir(root, "go/harness")
 			if err != nil {
@@ -396,10 +425,45 @@ func validateResolvedVersions(root string, row selection) error {
 		} else if module.Replace != nil {
 			return fmt.Errorf("%s must use its published pinned module, without replace", module.Path)
 		}
+
 		delete(expected, module.Path)
 	}
+
 	if len(expected) != 0 {
 		return errors.New("resolved module output omitted required dependencies")
 	}
+
 	return nil
+}
+
+func registryDir(root, relative string) (string, error) {
+	if relative == "" || filepath.IsAbs(relative) || filepath.ToSlash(filepath.Clean(relative)) != relative {
+		return "", fmt.Errorf("invalid registry directory %q", relative)
+	}
+	dir, err := filepath.EvalSymlinks(filepath.Join(root, relative))
+	if err != nil {
+		return "", fmt.Errorf("resolve directory %q: %w", relative, err)
+	}
+	if !strings.HasPrefix(dir, root+string(os.PathSeparator)) {
+		return "", fmt.Errorf("directory %q leaves the registry root", relative)
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("%q must be a directory", relative)
+	}
+
+	return dir, nil
+}
+
+func goCommand(dir string, args ...string) *exec.Cmd {
+	command := os.Getenv("GO")
+	if command == "" {
+		command = "go"
+	}
+
+	cmd := exec.Command(command, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off")
+	return cmd
 }

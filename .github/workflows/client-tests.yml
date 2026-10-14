@@ -60,7 +60,7 @@ jobs:
         run: make deps-node
 
       - name: List Node profiles
-        run: node tests/integration/clients/node/run.cjs list
+        run: node --experimental-strip-types tests/integration/clients/node/run.ts list
 
       - name: Check Node client project code
         run: make check-node

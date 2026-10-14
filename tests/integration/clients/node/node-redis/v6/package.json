@@ -2,19 +2,24 @@
   "name": "kgcache-client-node-redis-v6",
   "version": "0.0.0",
   "private": true,
-  "type": "commonjs",
+  "type": "module",
   "packageManager": "npm@10.9.2",
   "engines": {
     "node": "22.14.0",
     "npm": "10.9.2"
   },
   "scripts": {
-    "test": "jest --runInBand"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && node --experimental-strip-types --experimental-vm-modules node_modules/jest/bin/jest.js --runInBand"
   },
   "dependencies": {
     "redis": "6.2.1"
   },
   "devDependencies": {
-    "jest": "30.2.0"
+    "@types/jest": "30.0.0",
+    "@types/node": "22.14.0",
+    "jest": "30.2.0",
+    "ts-jest": "29.4.14",
+    "typescript": "5.9.3"
   }
 }
