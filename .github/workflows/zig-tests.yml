@@ -32,3 +32,8 @@ jobs:
       - name: Run process integration tests
         run: zig build test-integration
 
+  client-tests:
+    name: go-redis and node-redis tests
+    needs: tests
+    uses: ./.github/workflows/client-tests.yml
+
