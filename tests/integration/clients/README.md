@@ -4,7 +4,8 @@ The node-redis v6 suite runs real clients against kgcache with explicit RESP2 an
 RESP3, plus a default handshake check. It covers strings and binary values,
 database selection, client reports, SET options and expiration, ordered pipelines,
 command errors, snapshot reload, and background persistence replies.
-The go-redis v9 suite remains planned and runs its bootstrap placeholder.
+The go-redis v9 suite also runs native clients, starting with handshakes in both
+protocols and the omitted-option default.
 
 Use Go 1.26.9 and Node 22.14.0 with its bundled npm 10.9.2. Put those tools on
 `PATH`. The launchers check installed versions and never download runtimes.
@@ -49,7 +50,7 @@ An alternate Go executable can be selected with `make GO=/path/to/go check-go`.
 `test-go` and `test-node` build the
 Debug server and prepare dependencies. [Client CI](../../../.github/workflows/client-tests.yml)
 has separate Go and Node jobs after [unit and process integration tests](../../../.github/workflows/zig-tests.yml)
-pass. Node CI runs its pinned compatibility profile and
+pass. Each client job runs its pinned compatibility profile and
 uploads failure evidence.
 
 Select a registered profile or filter required profiles by library:
@@ -58,6 +59,7 @@ Select a registered profile or filter required profiles by library:
 make deps-go CLIENT_PROFILE=go-redis-v9.22.0
 make deps-node CLIENT_LIBRARY=node-redis
 make test-go CLIENT_PROFILE=go-redis-v9.22.0
+make test-go CLIENT_PROFILE=go-redis-v9.22.0 GO_TEST_ARGS='-run TestHandshake'
 make test-node CLIENT_PROFILE=node-redis-6.2.1 NODE_TEST_ARGS='--testPathPatterns=pipeline'
 ```
 
@@ -74,6 +76,15 @@ The Makefile supplies an absolute `KGCACHE_BIN` for the built server. Set
 `KGCACHE_TEST_ARTIFACT_DIR=test-artifacts` to retain diagnostics;
 the Makefile resolves it before entering suite directories. Node retains Jest
 results and bounded failure bundles, then removes each fixture's temporary data.
-Fixture-only and empty Node selections fail because they execute no client cases.
+Fixture-only and empty selections fail because they execute no client cases.
+Direct Go tests also work from `go/go-redis/v9`:
+
+```sh
+KGCACHE_BIN=/absolute/path/to/kgcache GOTOOLCHAIN=local GOWORK=off go test -mod=readonly -count=1 -timeout=5m ./...
+```
+
+Go runs the shared process fixture checks before client cases. Tests use the
+committed module pins with local toolchain selection. On failure, Go retains
+bounded native output and config, log, exit, and persistence-file evidence.
 Direct `npm test` is usable from `node/node-redis/v6` with an absolute `KGCACHE_BIN`
 supplied by the caller.

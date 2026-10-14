@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +14,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 type suite struct {
@@ -52,6 +55,7 @@ type selection struct {
 var (
 	stableVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	identifier    = regexp.MustCompile(`^[a-z][a-z0-9.-]*$`)
+	nativeCase    = regexp.MustCompile(`/(RESP[23]|default)(/|$)`)
 )
 
 func main() {
@@ -121,18 +125,33 @@ func run(args []string) error {
 		if err := validateRuntime(selected); err != nil {
 			return err
 		}
-
-		args := []string{"test", "-mod=readonly", "-count=1"}
-		args = append(args, flags.Args()...)
-		args = append(args, "bootstrap_test.go")
+		focused, err := splitArguments(os.Getenv("GO_TEST_ARGS"))
+		if err != nil {
+			return err
+		}
+		focused = append(focused, flags.Args()...)
+		if err := validateTestArguments(focused); err != nil {
+			return err
+		}
+		if err := resolveTestPaths(); err != nil {
+			return err
+		}
+		harness := selection{profile: profile{ID: "go-harness"}, dir: filepath.Join(root, "go", "harness")}
+		if err := runNativeTests(harness, nil, false); err != nil {
+			return fmt.Errorf("shared Go fixture checks: %w", err)
+		}
 		for _, row := range selected {
-			if row.suite.Status != "planned" {
-				return errors.New("client execution requires the actual Go scenario implementation")
+			if row.suite.Status != "ready" {
+				return fmt.Errorf("%s: client suite is still planned", row.ID)
 			}
-
-			fmt.Printf("%s: running bootstrap placeholder (client suite remains planned)\n", row.ID)
-			if err := goRun(row.dir, args...); err != nil {
-				return fmt.Errorf("%s: bootstrap test: %w", row.ID, err)
+			if err := goRun(row.dir, "mod", "verify"); err != nil {
+				return fmt.Errorf("%s: verify dependencies: %w", row.ID, err)
+			}
+			if err := validateResolvedVersions(root, row); err != nil {
+				return fmt.Errorf("%s: %w", row.ID, err)
+			}
+			if err := runNativeTests(row, focused, true); err != nil {
+				return err
 			}
 		}
 
@@ -163,6 +182,196 @@ func run(args []string) error {
 		fmt.Printf("%s: locked dependencies validated (%s suite)\n", row.ID, row.suite.Status)
 	}
 
+	return nil
+}
+
+func runNativeTests(row selection, focused []string, requireClientCases bool) error {
+	fmt.Printf("%s: native client tests\n", row.ID)
+	args := append([]string{"test", "-timeout=5m"}, focused...)
+	args = append(args, "-json", "-mod=readonly", "-count=1", "./...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := goCommand(row.dir, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("%s: capture native output: %w", row.ID, err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s: start native tests: %w", row.ID, err)
+	}
+	// The whole native process group is owned, including fixture children.
+	watchDone := make(chan struct{})
+	watchJoined := make(chan struct{})
+	go func() {
+		defer close(watchJoined)
+		select {
+		case <-ctx.Done():
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			select {
+			case <-watchDone:
+			case <-time.After(5 * time.Second):
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		case <-watchDone:
+		}
+	}()
+
+	decoder := json.NewDecoder(output)
+	passed := make(map[string]bool)
+	parents := make(map[string]bool)
+	var transcript []byte
+	var decodeErr error
+	for {
+		var event struct {
+			Action, Test, Output string
+		}
+		if err := decoder.Decode(&event); err != nil {
+			if err != io.EOF {
+				decodeErr = fmt.Errorf("decode native test event: %w", err)
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			}
+			break
+		}
+		fmt.Print(event.Output)
+		transcript = append(transcript, event.Output...)
+		if len(transcript) > 64*1024 {
+			transcript = append([]byte(nil), transcript[len(transcript)-64*1024:]...)
+		}
+		if event.Action == "run" {
+			if index := strings.LastIndex(event.Test, "/"); index >= 0 {
+				parents[event.Test[:index]] = true
+			}
+		}
+		if event.Action == "pass" && nativeCase.MatchString(event.Test) {
+			passed[event.Test] = true
+		}
+	}
+	waitErr := cmd.Wait()
+	close(watchDone)
+	<-watchJoined
+	groupErr := reapNativeGroup(cmd.Process.Pid)
+	if ctx.Err() != nil {
+		waitErr = errors.Join(waitErr, fmt.Errorf("native suite deadline: %w", ctx.Err()))
+	}
+	err = errors.Join(decodeErr, waitErr, groupErr)
+	executed := 0
+	for name := range passed {
+		if !parents[name] {
+			executed++
+		}
+	}
+	if err == nil && requireClientCases && executed == 0 {
+		err = errors.New("zero executed client cases (fixture checks do not count)")
+	}
+	if err != nil {
+		if root := os.Getenv("KGCACHE_TEST_ARTIFACT_DIR"); root != "" {
+			if reportErr := os.MkdirAll(root, 0700); reportErr != nil {
+				err = errors.Join(err, reportErr)
+			} else {
+				reportErr := os.WriteFile(filepath.Join(root, row.ID+"-native.log"), transcript, 0600)
+				err = errors.Join(err, reportErr)
+			}
+		}
+		return fmt.Errorf("%s: native tests: %w", row.ID, err)
+	}
+	if requireClientCases {
+		fmt.Printf("%s: %d client cases executed\n", row.ID, executed)
+	}
+	return nil
+}
+
+func reapNativeGroup(pid int) error {
+	if err := syscall.Kill(-pid, 0); errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	err := errors.New("native tests retained a process group after exit")
+	syscall.Kill(-pid, syscall.SIGTERM)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	syscall.Kill(-pid, syscall.SIGKILL)
+	return err
+}
+
+func splitArguments(input string) ([]string, error) {
+	var args []string
+	var word strings.Builder
+	var quote rune
+	escaped, started := false, false
+	for _, char := range input {
+		switch {
+		case escaped:
+			word.WriteRune(char)
+			escaped = false
+		case char == '\\' && quote != '\'':
+			escaped, started = true, true
+		case quote != 0:
+			if char == quote {
+				quote = 0
+			} else {
+				word.WriteRune(char)
+			}
+		case char == '\'' || char == '"':
+			quote, started = char, true
+		case char == ' ' || char == '\t' || char == '\n':
+			if started {
+				args = append(args, word.String())
+				word.Reset()
+				started = false
+			}
+		default:
+			word.WriteRune(char)
+			started = true
+		}
+	}
+	if escaped || quote != 0 {
+		return nil, errors.New("GO_TEST_ARGS contains an unfinished escape or quote")
+	}
+	if started {
+		args = append(args, word.String())
+	}
+	return args, nil
+}
+
+func validateTestArguments(args []string) error {
+	flags := flag.NewFlagSet("native Go test arguments", flag.ContinueOnError)
+	for _, name := range []string{"run", "skip", "shuffle", "cpu"} {
+		flags.String(name, "", "native test option")
+	}
+	for _, name := range []string{"v", "race", "short", "failfast", "cover"} {
+		flags.Bool(name, false, "native test option")
+	}
+	flags.Int("parallel", 1, "test parallelism")
+	timeout := flags.Duration("timeout", 5*time.Minute, "native test timeout")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || *timeout <= 0 || *timeout > 5*time.Minute {
+		return errors.New("test arguments must be supported native flags, with a timeout between 0 and 5m")
+	}
+	return nil
+}
+
+func resolveTestPaths() error {
+	bin := os.Getenv("KGCACHE_BIN")
+	info, err := os.Stat(bin)
+	if !filepath.IsAbs(bin) || err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return errors.New("KGCACHE_BIN must be an absolute regular executable path")
+	}
+	if root := os.Getenv("KGCACHE_TEST_ARTIFACT_DIR"); root != "" {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return fmt.Errorf("resolve artifact root: %w", err)
+		}
+		return os.Setenv("KGCACHE_TEST_ARTIFACT_DIR", absolute)
+	}
 	return nil
 }
 

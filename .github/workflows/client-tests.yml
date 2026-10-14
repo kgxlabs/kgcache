@@ -15,6 +15,7 @@ jobs:
       CLIENT_PROFILE: go-redis-v9.22.0
       GOTOOLCHAIN: local
       GOWORK: 'off'
+      KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/go-redis-v9.22.0
 
     steps:
       - name: Check out repository
@@ -26,7 +27,13 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.9'
-          cache: false
+          cache: true
+          cache-dependency-path: tests/integration/clients/go/go-redis/v9/go.sum
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
 
       - name: Prepare and validate go-redis dependencies
         run: make deps-go
@@ -37,8 +44,17 @@ jobs:
       - name: Check go-redis test code
         run: make check-go
 
-      - name: Run go-redis bootstrap placeholder
-        run: go run tests/integration/clients/go/run.go test --profile "$CLIENT_PROFILE"
+      - name: Run go-redis compatibility cases against this checkout
+        run: make test-go CLIENT_PROFILE=go-redis-v9.22.0
+
+      - name: Upload go-redis failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-redis-v9.22.0-failures
+          path: test-artifacts/go-redis-v9.22.0
+          if-no-files-found: ignore
+          retention-days: 7
 
   node-redis:
     name: node-redis 6.2.1 tests
