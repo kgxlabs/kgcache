@@ -17,6 +17,12 @@ type fixture struct {
 	protocol int
 }
 
+type clientOptions struct {
+	db             int
+	protocol       int
+	identitySuffix string
+}
+
 func newFixture(t *testing.T, protocol int, options clientharness.Options) *fixture {
 	t.Helper()
 	timeout := 45 * time.Second
@@ -51,12 +57,17 @@ func newFixture(t *testing.T, protocol int, options clientharness.Options) *fixt
 	return &fixture{server: server, ctx: ctx, protocol: protocol}
 }
 
-func (f *fixture) client(t *testing.T, db int) *redis.Client {
+func (f *fixture) client(t *testing.T, options clientOptions) *redis.Client {
 	t.Helper()
+	protocol := f.protocol
+	if options.protocol != 0 {
+		protocol = options.protocol
+	}
 	client := redis.NewClient(&redis.Options{
 		Addr:                  f.server.Address(),
-		Protocol:              f.protocol,
-		DB:                    db,
+		Protocol:              protocol,
+		DB:                    options.db,
+		IdentitySuffix:        options.identitySuffix,
 		MaxRetries:            -1,
 		PoolSize:              1,
 		MaxActiveConns:        1,
@@ -91,5 +102,29 @@ func explicitProtocols(t *testing.T, body func(t *testing.T, protocol int)) {
 		t.Run(fmt.Sprintf("RESP%d", protocol), func(t *testing.T) {
 			body(t, protocol)
 		})
+	}
+}
+
+func poll(ctx context.Context, timeout time.Duration, observe func(context.Context) (bool, error)) error {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		if err := deadline.Err(); err != nil {
+			return fmt.Errorf("poll observable state: %w", err)
+		}
+		matched, err := observe(deadline)
+		if err != nil {
+			return fmt.Errorf("poll observation: %w", err)
+		}
+		if matched {
+			return nil
+		}
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case <-deadline.Done():
+			timer.Stop()
+			return fmt.Errorf("poll observable state: %w", deadline.Err())
+		case <-timer.C:
+		}
 	}
 }

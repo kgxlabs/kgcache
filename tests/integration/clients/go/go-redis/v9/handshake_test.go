@@ -21,7 +21,7 @@ func TestHandshake(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, protocol, clientharness.Options{})
-			client := f.client(t, 0)
+			client := f.client(t, clientOptions{})
 			conn := dedicatedConn(t, client)
 			pong, err := conn.Ping(f.ctx).Result()
 			if !assert.NoError(t, err) {
@@ -78,7 +78,7 @@ func TestClientAssertionCleanupHelper(t *testing.T) {
 	if err := os.WriteFile(marker, []byte(f.server.DataDir()), 0600); err != nil {
 		t.Fatal(err)
 	}
-	client := f.client(t, 0)
+	client := f.client(t, clientOptions{})
 	conn := dedicatedConn(t, client)
 	pong, err := conn.Ping(f.ctx).Result()
 	if !assert.NoError(t, err) {
