@@ -1,4 +1,4 @@
-import { command, protocols, withFixture } from '../client.ts';
+import { command, protocols, withFixture } from '@/node-redis/v6/client';
 
 describe.each(protocols)('database selection RESP %i', (protocol) => {
   test('initial DB 1 is isolated from a separately owned DB 0 connection', async () => {

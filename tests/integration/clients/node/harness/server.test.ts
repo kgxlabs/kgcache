@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { getEventListeners } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { readReady, Server } from './server.ts';
+import { readReady, Server } from '@/harness/server';
 
 test('READY selects a loopback port and stop/start preserves directory and endpoint', async () => {
   const server = new Server();

@@ -1,7 +1,7 @@
 import { createClient } from 'redis';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Server, within } from '../../harness/server.ts';
-import type { ServerOptions } from '../../harness/server.ts';
+import { Server, within } from '@/harness/server';
+import type { ServerOptions } from '@/harness/server';
 
 export const protocols = [2, 3] as const;
 

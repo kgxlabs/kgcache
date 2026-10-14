@@ -1,5 +1,5 @@
 import { RESP_TYPES } from 'redis';
-import { command, protocols, withFixture } from '../client.ts';
+import { command, protocols, withFixture } from '@/node-redis/v6/client';
 
 describe.each(protocols)('strings RESP %i', (protocol) => {
   test('text, empty keys/values, null, DEL counts, and DBSIZE', async () => {

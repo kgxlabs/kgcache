@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { command, withFixture } from '../client.ts';
-import type { Client } from '../client.ts';
-import type { Server } from '../../../harness/server.ts';
+import { command, withFixture } from '@/node-redis/v6/client';
+import type { Client } from '@/node-redis/v6/client';
+import type { Server } from '@/harness/server';
 
 test.each([
   { protocol: 2 as const, expected: 2 },
