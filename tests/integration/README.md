@@ -2,6 +2,11 @@
 
 Run `zig build test-integration` to build kgcache and run the Zig integration runner. `zig build test` runs the unit suite. The runner calls suite files in `tests/integration/suites/`.
 
+The root Makefile exposes these checks as `make test-integration` and
+`make test-unit`. See [Client test projects](clients/README.md) for dependency
+setup and quality checks. The client suites remain planned, so `make test-clients`
+and the full `make test` report a nonzero result until real client cases exist.
+
 The baseline suite checks PING, SET/GET/DEL, retained pipeline tails, request limits, recovery after command errors, database isolation, invalid config startup, slow readers, peer resets, idle reader and blocked writer shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
 
 The PING cases check PONG without a message and exact bulk string replies for

@@ -65,10 +65,10 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: run.go list|validate|deps|test [--profile ID | --library NAME] [-- test arguments]")
+		return errors.New("usage: run.go list|validate|deps|check|fmt|test [--profile ID | --library NAME] [-- test arguments]")
 	}
 	action := args[0]
-	if action != "list" && action != "validate" && action != "deps" && action != "test" {
+	if action != "list" && action != "validate" && action != "deps" && action != "check" && action != "fmt" && action != "test" {
 		return fmt.Errorf("unknown action %q", action)
 	}
 	flags := flag.NewFlagSet("Go client profiles", flag.ContinueOnError)
@@ -115,6 +115,9 @@ func run(args []string) error {
 	if err := validateRuntime(selected); err != nil {
 		return err
 	}
+	if action == "check" || action == "fmt" {
+		return checkCode(root, selected, action == "fmt")
+	}
 	for _, row := range selected {
 		if action == "deps" {
 			if err := goRun(row.dir, "mod", "download", "all"); err != nil {
@@ -128,6 +131,41 @@ func run(args []string) error {
 			return fmt.Errorf("%s: %w", row.ID, err)
 		}
 		fmt.Printf("%s: locked dependencies validated (%s suite)\n", row.ID, row.suite.Status)
+	}
+	return nil
+}
+
+func checkCode(root string, rows []selection, format bool) error {
+	goroot, err := goCommand("", "env", "GOROOT").Output()
+	if err != nil {
+		return fmt.Errorf("locate pinned formatter: %w", err)
+	}
+	mode := "-l"
+	if format {
+		mode = "-w"
+	}
+	cmd := exec.Command(filepath.Join(strings.TrimSpace(string(goroot)), "bin", "gofmt"), mode, filepath.Join(root, "go"))
+	cmd.Stderr = os.Stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("format Go sources: %w", err)
+	}
+	if !format && len(output) != 0 {
+		return fmt.Errorf("run make fmt-go for:\n%s", output)
+	}
+	if format {
+		return nil
+	}
+	if err := goRun(filepath.Join(root, "go"), "vet", "run.go"); err != nil {
+		return fmt.Errorf("vet launcher: %w", err)
+	}
+	if err := goRun(filepath.Join(root, "go", "harness"), "vet", "-mod=readonly", "./..."); err != nil {
+		return fmt.Errorf("vet harness: %w", err)
+	}
+	for _, row := range rows {
+		if err := goRun(row.dir, "vet", "-mod=readonly", "./..."); err != nil {
+			return fmt.Errorf("%s: vet suite: %w", row.ID, err)
+		}
 	}
 	return nil
 }
