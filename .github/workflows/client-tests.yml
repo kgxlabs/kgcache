@@ -1,0 +1,72 @@
+name: go-redis and node-redis tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  go-redis:
+    name: go-redis v9.22.0 tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CLIENT_PROFILE: go-redis-v9.22.0
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.9'
+          cache: false
+
+      - name: Prepare and validate go-redis dependencies
+        run: make deps-go
+
+      - name: List go-redis profile
+        run: go run tests/integration/clients/go/run.go list --profile "$CLIENT_PROFILE"
+
+      - name: Check go-redis test code
+        run: make check-go
+
+      - name: Run go-redis bootstrap placeholder
+        run: go run tests/integration/clients/go/run.go test --profile "$CLIENT_PROFILE"
+
+  node-redis:
+    name: node-redis 6.2.1 tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CLIENT_PROFILE: node-redis-6.2.1
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Node and bundled npm
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+
+      - name: Prepare and validate node-redis dependencies
+        run: make deps-node
+
+      - name: List node-redis profile
+        run: node --experimental-strip-types tests/integration/clients/node/run.ts list --profile "$CLIENT_PROFILE"
+
+      - name: Check node-redis test code
+        run: make check-node
+
+      - name: Run node-redis bootstrap placeholder
+        run: node --experimental-strip-types tests/integration/clients/node/run.ts test --profile "$CLIENT_PROFILE"

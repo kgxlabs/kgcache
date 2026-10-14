@@ -1,0 +1,27 @@
+{
+  "name": "kgcache-client-node-tooling",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@10.9.2",
+  "engines": {
+    "node": "22.14.0",
+    "npm": "10.9.2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && npm --prefix node-redis/v6 run typecheck",
+    "lint": "node --experimental-strip-types node_modules/eslint/bin/eslint.js --flag unstable_native_nodejs_ts_config .",
+    "check": "npm run typecheck && npm run lint && prettier --check . ../matrix.json",
+    "format": "prettier --write . ../matrix.json && npm run lint -- --fix && prettier --write . ../matrix.json"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@stylistic/eslint-plugin": "5.10.0",
+    "@types/node": "22.14.0",
+    "eslint": "10.12.0",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.2"
+  }
+}
