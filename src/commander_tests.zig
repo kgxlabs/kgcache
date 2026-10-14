@@ -277,6 +277,51 @@ test "command names are case-insensitive" {
     try testing.expectEqualStrings("PONG", result.value.simple_string);
 }
 
+test "SET accepts lowercase and mixed-case options without changing key or value bytes" {
+    const testing = std.testing;
+    const cases = [_][]const []const u8{
+        &.{"nx"},
+        &.{"nX"},
+        &.{"xx"},
+        &.{"Xx"},
+        &.{ "ex", "2" },
+        &.{ "eX", "2" },
+        &.{ "px", "1500" },
+        &.{ "Px", "1500" },
+        &.{ "exat", "2000000000" },
+        &.{ "eXaT", "2000000000" },
+        &.{ "pxat", "2000000000000" },
+        &.{ "PxAt", "2000000000000" },
+        &.{"keepttl"},
+        &.{"KeepTtl"},
+        &.{"get"},
+        &.{"gEt"},
+        &.{ "nX", "gEt", "pX", "1500" },
+    };
+    for (cases) |options| {
+        var mock = MockStore.init();
+        var arguments: [7][]const u8 = undefined;
+        arguments[0] = "MiXeD\x00key";
+        arguments[1] = "BiNaRy\xffvalue";
+        @memcpy(arguments[2 .. options.len + 2], options);
+        var result = try executeWithMockStore("SET", arguments[0 .. options.len + 2], &mock);
+        defer result.deinit();
+
+        try testing.expectEqual(@as(usize, 1), mock.set_calls);
+        try testing.expectEqualStrings(arguments[0], mock.last_set_key.?);
+        try testing.expectEqualStrings(arguments[1], mock.last_set_value.?);
+        var returns_previous = false;
+        for (options) |option| {
+            if (std.ascii.eqlIgnoreCase(option, "GET")) returns_previous = true;
+        }
+        if (returns_previous) {
+            try testing.expect(result.value.null_value == .bulk_string);
+        } else {
+            try testing.expectEqualStrings("OK", result.value.simple_string);
+        }
+    }
+}
+
 test "invalid SET options preserve existing values and expiration and do not create keys" {
     const testing = std.testing;
     const DefaultStorage = @import("storage/default_storage.zig");
@@ -309,11 +354,15 @@ test "invalid SET options preserve existing values and expiration and do not cre
         .{ .options = &.{ "NX", "NX" }, .expected_error = error.Syntax },
         .{ .options = &.{ "XX", "XX" }, .expected_error = error.Syntax },
         .{ .options = &.{ "NX", "XX" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "nx", "NX" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "nX", "xX" }, .expected_error = error.Syntax },
         .{ .options = &.{ "XX", "NX" }, .expected_error = error.Syntax },
         .{ .options = &.{ "GET", "GET" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "get", "gEt" }, .expected_error = error.Syntax },
         .{ .options = &.{ "EX", "60", "PX", "60000" }, .expected_error = error.Syntax },
         .{ .options = &.{ "EX", "60", "KEEPTTL" }, .expected_error = error.Syntax },
         .{ .options = &.{ "KEEPTTL", "EX", "60" }, .expected_error = error.Syntax },
+        .{ .options = &.{ "KeepTtl", "eX", "60" }, .expected_error = error.Syntax },
         .{ .options = &.{ "KEEPTTL", "KEEPTTL" }, .expected_error = error.Syntax },
         .{ .options = &.{"EX"}, .expected_error = error.UnsupportedOption },
         .{ .options = &.{"PX"}, .expected_error = error.UnsupportedOption },
