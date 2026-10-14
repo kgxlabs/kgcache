@@ -40,3 +40,38 @@ test.each(protocols)(
     );
   },
 );
+
+test.each(protocols)('BGSAVE replies and leaves a healthy client in RESP %i', async (protocol) => {
+  await withFixture(
+    'bgsave-smoke',
+    protocol,
+    async ({ connect }) => {
+      const client = await connect();
+      expect(await command(client, client.set('key', 'snapshot value'))).toBe('OK');
+      expect(await command(client, client.bgSave())).toMatch(
+        /^Background saving (started|scheduled)$/,
+      );
+      expect(await command(client, client.ping())).toBe('PONG');
+    },
+    { scenarioTimeoutMs: 60000 },
+  );
+});
+
+test.each(protocols)(
+  'BGREWRITEAOF replies and leaves a healthy client in RESP %i',
+  async (protocol) => {
+    await withFixture(
+      'bgrewriteaof-smoke',
+      protocol,
+      async ({ connect }) => {
+        const client = await connect();
+        expect(await command(client, client.set('key', 'AOF value'))).toBe('OK');
+        expect(await command(client, client.bgRewriteAof())).toMatch(
+          /^Background append only file rewriting (started|scheduled)$/,
+        );
+        expect(await command(client, client.ping())).toBe('PONG');
+      },
+      { extraConfig: 'appendonly yes\nappendfsync always\n', scenarioTimeoutMs: 60000 },
+    );
+  },
+);
