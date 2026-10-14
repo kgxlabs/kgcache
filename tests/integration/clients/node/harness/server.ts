@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +12,8 @@ export interface ServerOptions {
   extraConfig?: string;
   startupTimeoutMs?: number;
   stopTimeoutMs?: number;
+  artifactDir?: string | null;
+  reportFailures?: boolean;
 }
 
 interface ExitStatus {
@@ -33,6 +36,8 @@ export class Server {
   private closed?: Promise<void>;
   private processError?: Error;
   private cleaned = false;
+  private reported = false;
+  terminationReason = 'not started';
 
   constructor(options: ServerOptions = {}) {
     this.options = options;
@@ -70,6 +75,7 @@ export class Server {
     this.stderr = Buffer.alloc(0);
     this.exitStatus = undefined;
     this.processError = undefined;
+    this.terminationReason = 'running';
     const child = spawn(
       executable,
       [...(this.options.extraArgs ?? []), configPath, '--ready-fd', '3'],
@@ -108,7 +114,9 @@ export class Server {
 
       this.address = address;
     } catch (cause) {
+      this.terminationReason = 'startup failure';
       await this.terminate();
+      this.retainFailure('harness-startup', cause);
       throw new Error('server startup failed', { cause });
     } finally {
       ready.destroy();
@@ -121,17 +129,25 @@ export class Server {
     }
 
     const child = this.child;
+    this.terminationReason = 'SIGTERM';
     if (child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM');
     }
 
     try {
-      await within(this.closed!, this.options.stopTimeoutMs ?? 5000, () => child.kill('SIGKILL'));
+      await within(this.closed!, this.options.stopTimeoutMs ?? 5000, () => {
+        this.terminationReason = 'forced SIGKILL';
+        child.kill('SIGKILL');
+      });
       if (this.processError || this.exitStatus?.code !== 0) {
         throw new Error(`server stop failed: ${JSON.stringify(this.exitStatus)}`, {
           cause: this.processError,
         });
       }
+    } catch (cause) {
+      await this.terminate();
+      this.retainFailure('harness-stop', cause);
+      throw cause;
     } finally {
       await this.terminate();
     }
@@ -152,6 +168,68 @@ export class Server {
 
   get pid(): number | undefined {
     return this.child?.pid;
+  }
+
+  retainFailure(label: string, cause: unknown): void {
+    if (this.reported) {
+      return;
+    }
+
+    this.reported = true;
+    const artifactRoot =
+      this.options.artifactDir === undefined
+        ? process.env.KGCACHE_TEST_ARTIFACT_DIR
+        : this.options.artifactDir;
+
+    if (artifactRoot === null) {
+      return;
+    }
+
+    if (this.options.reportFailures !== false) {
+      console.error(
+        `${label}: ${String(cause)}\n${this.stdout.toString()}\n${this.stderr.toString()}`,
+      );
+    }
+
+    if (!artifactRoot) {
+      return;
+    }
+
+    const safeLabel = label.replace(/[^a-zA-Z0-9.-]/g, '_').slice(0, 120);
+    fs.mkdirSync(artifactRoot, { recursive: true });
+    const destination = fs.mkdtempSync(path.join(path.resolve(artifactRoot), `${safeLabel}-`));
+    const files = fs.readdirSync(this.dataDir, { recursive: true }).slice(0, 64);
+    const listing = files.map((file) => {
+      const relative = String(file);
+      const filename = path.join(this.dataDir, relative);
+      const stat = fs.lstatSync(filename);
+      const checksum =
+        stat.isFile() && stat.size <= 1024 * 1024
+          ? createHash('sha256').update(fs.readFileSync(filename)).digest('hex')
+          : undefined;
+
+      return { path: relative, bytes: stat.size, sha256: checksum };
+    });
+
+    fs.writeFileSync(path.join(destination, 'kgcache.conf'), this.config.slice(0, logLimit));
+    fs.writeFileSync(path.join(destination, 'stdout.log'), this.stdout);
+    fs.writeFileSync(path.join(destination, 'stderr.log'), this.stderr);
+    fs.writeFileSync(
+      path.join(destination, 'failure.json'),
+      JSON.stringify(
+        {
+          label,
+          cause: String(cause).slice(0, logLimit),
+          processError: this.processError?.message,
+          address: this.address,
+          exitStatus: this.exitStatus,
+          terminationReason: this.terminationReason,
+          files: listing,
+        },
+        null,
+        2,
+      ),
+    );
   }
 
   private drain(stream: Readable | null, target: 'stdout' | 'stderr'): void {
@@ -262,8 +340,12 @@ export async function within<T>(
       work,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          cancel();
-          reject(new Error(`operation exceeded ${timeoutMs}ms`));
+          try {
+            cancel();
+            reject(new Error(`operation exceeded ${timeoutMs}ms`));
+          } catch (cause) {
+            reject(new Error(`cancellation failed after ${timeoutMs}ms`, { cause }));
+          }
         }, timeoutMs);
       }),
     ]);
