@@ -1,7 +1,8 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 interface Suite {
   id: string;
@@ -47,6 +48,7 @@ const nodeRoot = fs.realpathSync(import.meta.dirname);
 const root = fs.realpathSync(path.join(nodeRoot, '..'));
 const stableVersion = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;
 const identifier = /^[a-z][a-z0-9.-]*$/;
+const nativeTimeoutMs = 5 * 60 * 1000;
 const toolingPins = {
   '@eslint/js': '10.0.1',
   '@stylistic/eslint-plugin': '5.10.0',
@@ -66,16 +68,16 @@ const suiteToolingPins = {
   typescript: '5.9.3',
 };
 
-function main(): void {
+async function main(): Promise<void> {
   try {
-    run(process.argv.slice(2));
+    await run(process.argv.slice(2));
   } catch (error) {
     console.error(`Node client profiles: ${errorMessage(error)}`);
     process.exitCode = error instanceof CommandError ? error.exitCode : 1;
   }
 }
 
-function run(args: string[]): void {
+async function run(args: string[]): Promise<void> {
   const options = parseArgs(args);
   const rows = selectProfiles(loadRegistry(), options);
   const first = rows[0];
@@ -107,15 +109,15 @@ function run(args: string[]): void {
     return;
   }
 
-  validateRuntime(rows);
+  await validateRuntime(rows);
   if (options.action === 'deps') {
-    command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot);
+    await command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot);
   }
 
   validateInstalled(nodeRoot, toolingPins);
   for (const row of rows) {
     if (options.action === 'deps') {
-      command('npm', ['ci', '--no-audit', '--no-fund'], row.dir);
+      await command('npm', ['ci', '--no-audit', '--no-fund'], row.dir);
     }
 
     validateInstalled(row.dir, {
@@ -124,12 +126,15 @@ function run(args: string[]): void {
     });
     if (options.action === 'test') {
       if (row.suite.status === 'ready') {
-        runTests(row, [...splitArguments(process.env.NODE_TEST_ARGS ?? ''), ...options.testArgs]);
+        await runTests(row, [
+          ...splitArguments(process.env.NODE_TEST_ARGS ?? ''),
+          ...options.testArgs,
+        ]);
         continue;
       }
 
       console.log(`${row.id}: running bootstrap placeholder (client suite remains planned)`);
-      command(
+      await command(
         'npm',
         ['test', '--', '--runTestsByPath', 'tests/bootstrap.test.ts', ...options.testArgs],
         row.dir,
@@ -140,7 +145,7 @@ function run(args: string[]): void {
   }
 }
 
-function runTests(row: NodeProfile, testArgs: string[]): void {
+async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
   const binary = process.env.KGCACHE_BIN;
   if (!binary || !path.isAbsolute(binary)) {
     throw new Error('KGCACHE_BIN must be an absolute executable path');
@@ -156,7 +161,44 @@ function runTests(row: NodeProfile, testArgs: string[]): void {
   const resultFile = path.join(resultDir, 'jest-results.json');
   fs.rmSync(resultFile, { force: true });
   console.log(`${row.id}: native client tests; results: ${resultFile}`);
-  command('npm', ['test', '--', ...testArgs, '--json', `--outputFile=${resultFile}`], row.dir);
+  try {
+    await command(
+      'npm',
+      ['test', '--', ...testArgs, '--json', `--outputFile=${resultFile}`],
+      row.dir,
+    );
+  } catch (cause) {
+    try {
+      fs.writeFileSync(
+        path.join(resultDir, 'runner-failure.json'),
+        JSON.stringify(
+          {
+            profile: row.id,
+            suite: row.suite.id,
+            clientVersion: row.clientVersion,
+            runtimeVersion: row.runtimeVersion,
+            packageManagerVersion: row.packageManagerVersion,
+            protocols: row.protocols,
+            exitCode: cause instanceof CommandError ? cause.exitCode : 1,
+            reason: errorMessage(cause).slice(0, 16384),
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (reportCause) {
+      throw new CommandError(
+        `${errorMessage(cause)}; failure report: ${errorMessage(reportCause)}`,
+        cause instanceof CommandError ? cause.exitCode : 1,
+        new AggregateError([cause, reportCause], 'native execution and reporting failed', {
+          cause: reportCause,
+        }),
+      );
+    }
+
+    throw cause;
+  }
+
   const results = readJson(resultFile);
   if (!Array.isArray(results.testResults)) {
     throw new Error(`${row.id}: Jest did not report test results`);
@@ -499,7 +541,7 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
   }
 }
 
-function validateRuntime(rows: NodeProfile[]): void {
+async function validateRuntime(rows: NodeProfile[]): Promise<void> {
   const first = rows[0];
   if (!first) {
     throw new Error('no Node profiles selected');
@@ -523,7 +565,7 @@ function validateRuntime(rows: NodeProfile[]): void {
     );
   }
 
-  const npmVersion = command('npm', ['--version'], nodeRoot, true);
+  const npmVersion = await command('npm', ['--version'], nodeRoot, true);
   if (npmVersion !== first.packageManagerVersion) {
     throw new Error(
       `selected profiles require npm ${first.packageManagerVersion}; installed npm is ${npmVersion} (use the pinned Node distribution's bundled npm)`,
@@ -596,14 +638,17 @@ function registryDir(relative: unknown): string {
   return dir;
 }
 
-function command(executable: string, args: string[], dir: string, capture = false): string {
-  const result = spawnSync(executable, args, {
+async function command(
+  executable: string,
+  args: string[],
+  dir: string,
+  capture = false,
+): Promise<string> {
+  const child = spawn(executable, args, {
     cwd: dir,
     stdio: capture ? ['inherit', 'pipe', 'inherit'] : 'inherit',
-    encoding: 'utf8',
     shell: false,
-    timeout: 5 * 60 * 1000,
-    killSignal: 'SIGTERM',
+    detached: true,
     env: {
       ...process.env,
       ...(process.env.KGCACHE_TEST_ARTIFACT_DIR
@@ -612,15 +657,83 @@ function command(executable: string, args: string[], dir: string, capture = fals
     },
   });
 
-  if (result.error || result.status !== 0) {
-    throw new CommandError(
-      `${executable} ${args.join(' ')}: ${result.error?.message ?? `exit ${result.status}, signal ${result.signal ?? 'none'}`}`,
-      result.status !== null && result.status > 0 ? result.status : 1,
-      result.error,
-    );
-  }
+  let output = '';
+  let failure: Error | undefined;
+  let expired = false;
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  child.stdout?.on('data', (chunk: Buffer) => {
+    output += chunk.toString().slice(0, 16384 - output.length);
+  });
+  child.on('error', (error) => {
+    failure = error;
+  });
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
 
-  return result.stdout?.trim() ?? '';
+  const terminate = (signal: NodeJS.Signals) => {
+    if (!child.pid) {
+      return;
+    }
+
+    try {
+      process.kill(-child.pid, signal);
+    } catch (cause) {
+      if (!isMissingProcess(cause)) {
+        failure = new Error('terminate native process group', { cause });
+      }
+    }
+  };
+
+  const timer = setTimeout(() => {
+    expired = true;
+    terminate('SIGTERM');
+    forceTimer = setTimeout(() => terminate('SIGKILL'), 3000);
+  }, nativeTimeoutMs);
+
+  try {
+    const result = await closed;
+    if (expired && child.pid) {
+      const deadline = Date.now() + 3500;
+      while (processGroupExists(child.pid) && Date.now() < deadline) {
+        await delay(20);
+      }
+
+      terminate('SIGKILL');
+    }
+
+    if (failure || expired || result.code !== 0) {
+      throw new CommandError(
+        `${executable} ${args.join(' ')}: ${failure?.message ?? (expired ? `exceeded ${nativeTimeoutMs}ms` : `exit ${result.code}, signal ${result.signal ?? 'none'}`)}`,
+        result.code !== null && result.code > 0 ? result.code : 1,
+        failure,
+      );
+    }
+
+    return output.trim();
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(forceTimer);
+    child.removeAllListeners();
+    child.stdout?.removeAllListeners();
+  }
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (cause) {
+    if (isMissingProcess(cause)) {
+      return false;
+    }
+
+    throw cause;
+  }
+}
+
+function isMissingProcess(cause: unknown): boolean {
+  return cause instanceof Error && 'code' in cause && cause.code === 'ESRCH';
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -644,4 +757,4 @@ class CommandError extends Error {
   }
 }
 
-main();
+await main();

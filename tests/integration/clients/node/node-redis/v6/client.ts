@@ -35,11 +35,23 @@ export async function withFixture(
   body: (fixture: Fixture) => Promise<void>,
   options: ServerOptions & { scenarioTimeoutMs?: number } = {},
 ): Promise<void> {
-  const server = new Server(options);
+  const label = `node-redis-6.2.1-RESP${protocol ?? 'default'}-${name}`;
+  const server = new Server({ ...options, failureLabel: label });
   const clients: OwnedClient[] = [];
   const controller = new AbortController();
   const errors: unknown[] = [];
   let work: Promise<void> | undefined;
+  const onTerminate = () => {
+    const cause = new Error('native suite received SIGTERM');
+    errors.push(cause);
+    controller.abort(cause);
+    for (const owned of clients) {
+      owned.state.closing = true;
+      destroy(owned.client);
+    }
+  };
+
+  process.once('SIGTERM', onTerminate);
   try {
     await server.start(controller.signal);
     work = body({
@@ -100,7 +112,7 @@ export async function withFixture(
 
     if (errors.length) {
       try {
-        server.retainFailure(`node-redis-6.2.1-RESP${protocol ?? 'default'}-${name}`, errors[0]);
+        server.retainFailure(label, new AggregateError(errors, `${name}: case failed`));
       } catch (cause) {
         errors.push(cause);
       }
@@ -111,6 +123,8 @@ export async function withFixture(
     } catch (cause) {
       errors.push(cause);
     }
+
+    process.off('SIGTERM', onTerminate);
   }
 
   if (errors.length === 1) {

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
+import { inspect } from 'node:util';
 
 export interface ServerOptions {
   executable?: string;
@@ -14,6 +15,7 @@ export interface ServerOptions {
   stopTimeoutMs?: number;
   artifactDir?: string | null;
   reportFailures?: boolean;
+  failureLabel?: string;
 }
 
 interface ExitStatus {
@@ -115,8 +117,22 @@ export class Server {
       this.address = address;
     } catch (cause) {
       this.terminationReason = 'startup failure';
-      await this.terminate();
-      this.retainFailure('harness-startup', cause);
+      try {
+        await this.terminate();
+      } catch (reapCause) {
+        throw new AggregateError([cause, reapCause], 'startup and reaping failed', {
+          cause: reapCause,
+        });
+      }
+
+      try {
+        this.retainFailure(`${this.options.failureLabel ?? 'node-harness'}-startup`, cause);
+      } catch (reportCause) {
+        throw new AggregateError([cause, reportCause], 'startup and reporting failed', {
+          cause: reportCause,
+        });
+      }
+
       throw new Error('server startup failed', { cause });
     } finally {
       ready.destroy();
@@ -145,12 +161,26 @@ export class Server {
         });
       }
     } catch (cause) {
-      await this.terminate();
-      this.retainFailure('harness-stop', cause);
+      try {
+        await this.terminate();
+      } catch (reapCause) {
+        throw new AggregateError([cause, reapCause], 'stop and reaping failed', {
+          cause: reapCause,
+        });
+      }
+
+      try {
+        this.retainFailure(`${this.options.failureLabel ?? 'node-harness'}-stop`, cause);
+      } catch (reportCause) {
+        throw new AggregateError([cause, reportCause], 'stop and reporting failed', {
+          cause: reportCause,
+        });
+      }
+
       throw cause;
-    } finally {
-      await this.terminate();
     }
+
+    await this.terminate();
   }
 
   async cleanup(): Promise<void> {
@@ -185,10 +215,14 @@ export class Server {
       return;
     }
 
+    const evidence = inspect(cause, {
+      depth: 5,
+      maxArrayLength: 20,
+      maxStringLength: logLimit,
+    }).slice(0, logLimit);
+
     if (this.options.reportFailures !== false) {
-      console.error(
-        `${label}: ${String(cause)}\n${this.stdout.toString()}\n${this.stderr.toString()}`,
-      );
+      console.error(`${label}: ${evidence}\n${this.stdout.toString()}\n${this.stderr.toString()}`);
     }
 
     if (!artifactRoot) {
@@ -198,15 +232,20 @@ export class Server {
     const safeLabel = label.replace(/[^a-zA-Z0-9.-]/g, '_').slice(0, 120);
     fs.mkdirSync(artifactRoot, { recursive: true });
     const destination = fs.mkdtempSync(path.join(path.resolve(artifactRoot), `${safeLabel}-`));
-    const files = fs.readdirSync(this.dataDir, { recursive: true }).slice(0, 64);
+    const files = listFiles(this.dataDir);
+    let checksumBudget = 1024 * 1024;
     const listing = files.map((file) => {
       const relative = String(file);
       const filename = path.join(this.dataDir, relative);
       const stat = fs.lstatSync(filename);
       const checksum =
-        stat.isFile() && stat.size <= 1024 * 1024
+        stat.isFile() && stat.size <= checksumBudget
           ? createHash('sha256').update(fs.readFileSync(filename)).digest('hex')
           : undefined;
+
+      if (checksum) {
+        checksumBudget -= stat.size;
+      }
 
       return { path: relative, bytes: stat.size, sha256: checksum };
     });
@@ -219,7 +258,7 @@ export class Server {
       JSON.stringify(
         {
           label,
-          cause: String(cause).slice(0, logLimit),
+          cause: evidence,
           processError: this.processError?.message,
           address: this.address,
           exitStatus: this.exitStatus,
@@ -268,6 +307,31 @@ export class Server {
     this.child = undefined;
     this.closed = undefined;
   }
+}
+
+function listFiles(root: string): string[] {
+  const files: string[] = [];
+  const directories = [{ relative: '', depth: 0 }];
+  while (directories.length && files.length < 64) {
+    const current = directories.shift()!;
+    const directory = fs.opendirSync(path.join(root, current.relative));
+    try {
+      let entry = directory.readSync();
+      while (entry && files.length < 64) {
+        const relative = path.join(current.relative, entry.name);
+        files.push(relative);
+        if (entry.isDirectory() && current.depth < 3) {
+          directories.push({ relative, depth: current.depth + 1 });
+        }
+
+        entry = directory.readSync();
+      }
+    } finally {
+      directory.closeSync();
+    }
+  }
+
+  return files;
 }
 
 /** Reads one bounded readiness record and removes every temporary listener. */

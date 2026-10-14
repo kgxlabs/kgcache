@@ -1,4 +1,6 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { command, withFixture } from '@/node-redis/v6/client';
 import type { Client } from '@/node-redis/v6/client';
@@ -69,4 +71,34 @@ test('unexpected transport events fail the owning case', async () => {
       { artifactDir: null },
     ),
   ).rejects.toThrow('injected transport failure');
+});
+
+test('failure evidence names the profile and retains both assertion and transport errors', async () => {
+  const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'kgcache-node-case-artifacts-'));
+  try {
+    await expect(
+      withFixture(
+        'combined-failure',
+        2,
+        async ({ connect }) => {
+          const client = await connect();
+          client.emit('error', new Error('recorded transport failure'));
+          expect(await command(client, client.ping())).toBe('recorded assertion failure');
+        },
+        { artifactDir: artifacts, reportFailures: false },
+      ),
+    ).rejects.toBeInstanceOf(AggregateError);
+    const bundles = fs.readdirSync(artifacts);
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]).toMatch(/^node-redis-6\.2\.1-RESP2-combined-failure-/);
+    const failure = JSON.parse(
+      fs.readFileSync(path.join(artifacts, bundles[0]!, 'failure.json'), 'utf8'),
+    );
+
+    expect(failure.cause).toContain('recorded assertion failure');
+    expect(failure.cause).toContain('recorded transport failure');
+    expect(failure.exitStatus).toEqual({ code: 0, signal: null });
+  } finally {
+    fs.rmSync(artifacts, { recursive: true, force: true });
+  }
 });
