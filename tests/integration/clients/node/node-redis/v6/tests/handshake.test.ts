@@ -15,6 +15,7 @@ test.each([
     const client = await connect();
     expect(client.isReady).toBe(true);
     expect(await command(client, client.ping())).toBe('PONG');
+
     const info = await command(client, client.clientInfo());
     expect(info.resp).toBe(expected);
     expect(info.libName).toBe('node-redis');
@@ -25,6 +26,7 @@ test.each([
 test('assertion failure after connection preserves the failure and cleans all owners', async () => {
   let client: Client | undefined;
   let server: Server | undefined;
+
   await expect(
     withFixture(
       'assertion-cleanup',
@@ -37,6 +39,7 @@ test('assertion failure after connection preserves the failure and cleans all ow
       { artifactDir: null },
     ),
   ).rejects.toThrow('intentional assertion failure');
+
   expect(client!.isOpen).toBe(false);
   expect(server!.pid).toBeUndefined();
   expect(fs.existsSync(server!.dataDir)).toBe(false);
@@ -44,6 +47,7 @@ test('assertion failure after connection preserves the failure and cleans all ow
 
 test('scenario deadline cancels waiting work and closes the connected client', async () => {
   let client: Client | undefined;
+
   await expect(
     withFixture(
       'scenario-deadline',
@@ -55,6 +59,7 @@ test('scenario deadline cancels waiting work and closes the connected client', a
       { scenarioTimeoutMs: 150, artifactDir: null },
     ),
   ).rejects.toThrow('operation exceeded');
+
   expect(client!.isOpen).toBe(false);
 });
 
@@ -75,6 +80,7 @@ test('unexpected transport events fail the owning case', async () => {
 
 test('failure evidence names the profile and retains both assertion and transport errors', async () => {
   const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), 'kgcache-node-case-artifacts-'));
+
   try {
     await expect(
       withFixture(
@@ -88,9 +94,11 @@ test('failure evidence names the profile and retains both assertion and transpor
         { artifactDir: artifacts, reportFailures: false },
       ),
     ).rejects.toBeInstanceOf(AggregateError);
+
     const bundles = fs.readdirSync(artifacts);
     expect(bundles).toHaveLength(1);
     expect(bundles[0]).toMatch(/^node-redis-6\.2\.1-RESP2-combined-failure-/);
+
     const failure = JSON.parse(
       fs.readFileSync(path.join(artifacts, bundles[0]!, 'failure.json'), 'utf8'),
     );

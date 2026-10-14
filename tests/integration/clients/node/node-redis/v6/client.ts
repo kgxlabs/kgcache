@@ -40,11 +40,13 @@ export async function withFixture(
   const clients: OwnedClient[] = [];
   const controller = new AbortController();
   const errors: unknown[] = [];
+
   let work: Promise<void> | undefined;
   const onTerminate = () => {
     const cause = new Error('native suite received SIGTERM');
     errors.push(cause);
     controller.abort(cause);
+
     for (const owned of clients) {
       owned.state.closing = true;
       destroy(owned.client);
@@ -52,21 +54,26 @@ export async function withFixture(
   };
 
   process.once('SIGTERM', onTerminate);
+
   try {
     await server.start(controller.signal);
+
     work = body({
       server,
       signal: controller.signal,
       connect: async (clientOptions = {}) => {
         controller.signal.throwIfAborted();
+
         const owned = ownClient(newClient(server, { protocol, ...clientOptions }));
         clients.push(owned);
         await command(owned.client, owned.client.connect());
         controller.signal.throwIfAborted();
+
         return owned.client;
       },
       close: async (client) => {
         const owned = clients.find((entry) => entry.client === client);
+
         if (!owned) {
           throw new Error('client does not belong to this fixture');
         }
@@ -74,8 +81,10 @@ export async function withFixture(
         await closeClient(owned);
       },
     });
+
     await within(work, options.scenarioTimeoutMs ?? 45000, () => {
       controller.abort(new Error('scenario deadline'));
+
       for (const owned of clients) {
         owned.state.closing = true;
         destroy(owned.client);
@@ -85,6 +94,7 @@ export async function withFixture(
     errors.push(cause);
   } finally {
     controller.abort();
+
     if (work) {
       // Cancellation must settle the body before the process and directory go away.
       await within(
@@ -151,9 +161,11 @@ export async function poll<T>(
   timeoutMs = 5000,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
+
   while (true) {
     signal.throwIfAborted();
     const value = await read();
+
     if (accepts(value)) {
       return value;
     }
@@ -205,16 +217,19 @@ function ownClient(client: Client): OwnedClient {
   client.on('error', owned.onError);
   client.on('end', owned.onEnd);
   client.on('reconnecting', owned.onReconnect);
+
   return owned;
 }
 
 async function closeClient(owned: OwnedClient): Promise<void> {
   const { state } = owned;
+
   if (state.closed) {
     return;
   }
 
   state.closing = true;
+
   try {
     if (owned.client.isOpen) {
       await within(owned.client.close(), 3000, () => destroy(owned.client));

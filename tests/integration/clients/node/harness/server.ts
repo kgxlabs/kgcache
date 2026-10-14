@@ -52,11 +52,13 @@ export class Server {
     }
 
     const executable = this.options.executable ?? process.env.KGCACHE_BIN;
+
     if (!executable || !path.isAbsolute(executable)) {
       throw new Error('KGCACHE_BIN must be an absolute executable path');
     }
 
     signal?.throwIfAborted();
+
     this.config = [
       'bind 127.0.0.1',
       `port ${this.address?.port ?? 0}`,
@@ -71,13 +73,16 @@ export class Server {
       this.options.extraConfig ?? '',
       '',
     ].join('\n');
+
     const configPath = path.join(this.dataDir, 'kgcache.conf');
     fs.writeFileSync(configPath, this.config);
+
     this.stdout = Buffer.alloc(0);
     this.stderr = Buffer.alloc(0);
     this.exitStatus = undefined;
     this.processError = undefined;
     this.terminationReason = 'running';
+
     const child = spawn(
       executable,
       [...(this.options.extraArgs ?? []), configPath, '--ready-fd', '3'],
@@ -117,6 +122,7 @@ export class Server {
       this.address = address;
     } catch (cause) {
       this.terminationReason = 'startup failure';
+
       try {
         await this.terminate();
       } catch (reapCause) {
@@ -146,6 +152,7 @@ export class Server {
 
     const child = this.child;
     this.terminationReason = 'SIGTERM';
+
     if (child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM');
     }
@@ -155,6 +162,7 @@ export class Server {
         this.terminationReason = 'forced SIGKILL';
         child.kill('SIGKILL');
       });
+
       if (this.processError || this.exitStatus?.code !== 0) {
         throw new Error(`server stop failed: ${JSON.stringify(this.exitStatus)}`, {
           cause: this.processError,
@@ -234,6 +242,7 @@ export class Server {
     const destination = fs.mkdtempSync(path.join(path.resolve(artifactRoot), `${safeLabel}-`));
     const files = listFiles(this.dataDir);
     let checksumBudget = 1024 * 1024;
+
     const listing = files.map((file) => {
       const relative = String(file);
       const filename = path.join(this.dataDir, relative);
@@ -285,6 +294,7 @@ export class Server {
 
   private async terminate(): Promise<void> {
     const child = this.child;
+
     if (!child) {
       return;
     }
@@ -299,6 +309,7 @@ export class Server {
       }
     });
     child.removeAllListeners();
+
     for (const stream of child.stdio) {
       stream?.removeAllListeners();
       stream?.destroy();
@@ -312,14 +323,18 @@ export class Server {
 function listFiles(root: string): string[] {
   const files: string[] = [];
   const directories = [{ relative: '', depth: 0 }];
+
   while (directories.length && files.length < 64) {
     const current = directories.shift()!;
     const directory = fs.opendirSync(path.join(root, current.relative));
+
     try {
       let entry = directory.readSync();
+
       while (entry && files.length < 64) {
         const relative = path.join(current.relative, entry.name);
         files.push(relative);
+
         if (entry.isDirectory() && current.depth < 3) {
           directories.push({ relative, depth: current.depth + 1 });
         }
@@ -349,6 +364,7 @@ export async function readReady(
   const record = new Promise<{ host: string; port: number }>((resolve, reject) => {
     onData = (chunk) => {
       bytes += chunk.toString('ascii');
+
       if (bytes.length > 128) {
         reject(new Error('oversized READY record'));
         return;
@@ -360,6 +376,7 @@ export async function readReady(
 
       const match = /^READY 127\.0\.0\.1 ([1-9][0-9]{0,4})\n$/.exec(bytes);
       const port = Number(match?.[1]);
+
       if (!match || port > 65535) {
         reject(new Error(`malformed READY: ${JSON.stringify(bytes)}`));
         return;
@@ -375,6 +392,7 @@ export async function readReady(
     stream.once('end', onEnd);
     stream.once('error', onError);
     signal?.addEventListener('abort', onAbort, { once: true });
+
     if (signal?.aborted) {
       onAbort();
     }
@@ -399,6 +417,7 @@ export async function within<T>(
   cancel: () => void,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+
   try {
     return await Promise.race([
       work,

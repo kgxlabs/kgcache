@@ -81,11 +81,13 @@ async function run(args: string[]): Promise<void> {
   const options = parseArgs(args);
   const rows = selectProfiles(loadRegistry(), options);
   const first = rows[0];
+
   if (!first) {
     throw new Error('no Node profiles selected');
   }
 
   validateProject(nodeRoot, first, toolingPins);
+
   for (const row of rows) {
     const runtime = fs.readFileSync(path.join(row.dir, '.node-version'), 'utf8').trim();
 
@@ -110,11 +112,13 @@ async function run(args: string[]): Promise<void> {
   }
 
   await validateRuntime(rows);
+
   if (options.action === 'deps') {
     await command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot);
   }
 
   validateInstalled(nodeRoot, toolingPins);
+
   for (const row of rows) {
     if (options.action === 'deps') {
       await command('npm', ['ci', '--no-audit', '--no-fund'], row.dir);
@@ -124,6 +128,7 @@ async function run(args: string[]): Promise<void> {
       [row.suite.package]: row.clientVersion,
       ...suiteToolingPins,
     });
+
     if (options.action === 'test') {
       if (row.suite.status === 'ready') {
         await runTests(row, [
@@ -147,6 +152,7 @@ async function run(args: string[]): Promise<void> {
 
 async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
   const binary = process.env.KGCACHE_BIN;
+
   if (!binary || !path.isAbsolute(binary)) {
     throw new Error('KGCACHE_BIN must be an absolute executable path');
   }
@@ -161,6 +167,7 @@ async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
   const resultFile = path.join(resultDir, 'jest-results.json');
   fs.rmSync(resultFile, { force: true });
   console.log(`${row.id}: native client tests; results: ${resultFile}`);
+
   try {
     await command(
       'npm',
@@ -200,14 +207,17 @@ async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
   }
 
   const results = readJson(resultFile);
+
   if (!Array.isArray(results.testResults)) {
     throw new Error(`${row.id}: Jest did not report test results`);
   }
 
   let executed = 0;
   const clientRoot = path.join(row.dir, 'tests') + path.sep;
+
   for (const raw of results.testResults as unknown[]) {
     const suite = object(raw, 'Jest suite');
+
     if (typeof suite.name !== 'string' || !suite.name.startsWith(clientRoot)) {
       continue;
     }
@@ -218,6 +228,7 @@ async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
 
     for (const assertion of suite.assertionResults as unknown[]) {
       const { status } = object(assertion, 'Jest assertion');
+
       if (status === 'passed' || status === 'failed') {
         executed += 1;
       }
@@ -237,6 +248,7 @@ function splitArguments(input: string): string[] {
   let quote = '';
   let escaped = false;
   let started = false;
+
   for (const character of input) {
     if (escaped) {
       token += character;
@@ -278,6 +290,7 @@ function splitArguments(input: string): string[] {
 
 function parseArgs(args: string[]): Options {
   const [action, ...rest] = args;
+
   if (action !== 'list' && action !== 'validate' && action !== 'deps' && action !== 'test') {
     throw new Error(
       'usage: run.ts list|validate|deps|test [--profile ID | --library NAME] [-- test arguments]',
@@ -285,19 +298,23 @@ function parseArgs(args: string[]): Options {
   }
 
   const options: Options = { action, profile: '', library: '', testArgs: [] };
+
   for (let index = 0; index < rest.length; index++) {
     const arg = rest[index];
+
     if (arg === '--') {
       options.testArgs = rest.slice(index + 1);
       break;
     }
 
     const value = rest[index + 1];
+
     if ((arg !== '--profile' && arg !== '--library') || value === undefined) {
       throw new Error(`unknown argument or missing value: ${arg}`);
     }
 
     const key = arg === '--profile' ? 'profile' : 'library';
+
     if (options[key]) {
       throw new Error(`duplicate selector: ${arg}`);
     }
@@ -320,6 +337,7 @@ function parseArgs(args: string[]): Options {
 function loadRegistry(): Registry {
   const matrix = readJson(path.join(root, 'matrix.json'));
   checkFields(matrix, ['schemaVersion', 'suites', 'profiles'], 'registry');
+
   if (
     matrix.schemaVersion !== 1
     || !Array.isArray(matrix.suites)
@@ -331,12 +349,14 @@ function loadRegistry(): Registry {
   }
 
   const suites = new Map<string, Suite>();
+
   for (const suite of matrix.suites as unknown[]) {
     checkFields(
       suite,
       ['id', 'language', 'library', 'apiGeneration', 'package', 'suiteDir', 'status'],
       'suite',
     );
+
     if (!matches(identifier, suite.id) || suites.has(suite.id)) {
       throw new Error(`invalid or duplicate suite ID ${suite.id}`);
     }
@@ -373,6 +393,7 @@ function loadRegistry(): Registry {
 
   const ids = new Set<string>();
   const profiles: Profile[] = [];
+
   for (const profile of matrix.profiles as unknown[]) {
     checkFields(
       profile,
@@ -401,6 +422,7 @@ function loadRegistry(): Registry {
     }
 
     ids.add(profile.id);
+
     if (typeof profile.clientVersion !== 'string') {
       throw new Error(`${profile.id}: versions must be exact stable pins`);
     }
@@ -409,6 +431,7 @@ function loadRegistry(): Registry {
       suite.language === 'go' ? profile.clientVersion.replace(/^v/, '') : profile.clientVersion;
 
     const npmVersion = profile.packageManagerVersion;
+
     if (
       !matches(stableVersion, clientVersion)
       || (suite.language === 'go' && !profile.clientVersion.startsWith('v'))
@@ -460,8 +483,10 @@ function loadRegistry(): Registry {
 
 function selectProfiles({ profiles, suites }: Registry, options: Options): NodeProfile[] {
   const selected: NodeProfile[] = [];
+
   for (const profile of profiles) {
     const suite = suites.get(profile.suiteId);
+
     if (!suite) {
       throw new Error(`${profile.id}: unknown suite ${profile.suiteId}`);
     }
@@ -509,6 +534,7 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
   const manifest = readJson(path.join(dir, 'package.json'));
   const lock = readJson(path.join(dir, 'package-lock.json'));
   const engines = object(manifest.engines, `${dir}: engines`);
+
   if (
     manifest.private !== true
     || manifest.type !== 'module'
@@ -524,6 +550,7 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
   const packages = object(lock.packages, `${dir}: lock packages`);
   const declared = dependencyPins(manifest);
   const locked = dependencyPins(object(packages[''], `${dir}: lock root`));
+
   for (const [name, version] of Object.entries(pins)) {
     const installedLock = object(
       packages[`node_modules/${name}`],
@@ -543,6 +570,7 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
 
 async function validateRuntime(rows: NodeProfile[]): Promise<void> {
   const first = rows[0];
+
   if (!first) {
     throw new Error('no Node profiles selected');
   }
@@ -566,6 +594,7 @@ async function validateRuntime(rows: NodeProfile[]): Promise<void> {
   }
 
   const npmVersion = await command('npm', ['--version'], nodeRoot, true);
+
   if (npmVersion !== first.packageManagerVersion) {
     throw new Error(
       `selected profiles require npm ${first.packageManagerVersion}; installed npm is ${npmVersion} (use the pinned Node distribution's bundled npm)`,
@@ -593,6 +622,7 @@ function dependencyPins(manifest: Record<string, unknown>): Record<string, unkno
 function readJson(filename: string): Record<string, unknown> {
   try {
     const value: unknown = JSON.parse(fs.readFileSync(filename, 'utf8'));
+
     return object(value, filename);
   } catch (cause) {
     throw new Error(`read ${filename}: ${errorMessage(cause)}`, { cause });
@@ -631,6 +661,7 @@ function registryDir(relative: unknown): string {
   }
 
   const dir = fs.realpathSync(path.join(root, relative));
+
   if (!dir.startsWith(root + path.sep) || !fs.statSync(dir).isDirectory()) {
     throw new Error(`directory ${relative} must stay inside the registry root`);
   }
@@ -693,8 +724,10 @@ async function command(
 
   try {
     const result = await closed;
+
     if (expired && child.pid) {
       const deadline = Date.now() + 3500;
+
       while (processGroupExists(child.pid) && Date.now() < deadline) {
         await delay(20);
       }
@@ -722,6 +755,7 @@ async function command(
 function processGroupExists(pid: number): boolean {
   try {
     process.kill(-pid, 0);
+
     return true;
   } catch (cause) {
     if (isMissingProcess(cause)) {

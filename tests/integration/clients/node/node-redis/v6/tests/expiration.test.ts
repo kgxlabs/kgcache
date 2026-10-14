@@ -22,6 +22,7 @@ describe.each(protocols)('SET expiration RESP %i', (protocol) => {
           ),
         ).toBe('OK');
         expect(await command(client, client.get('expiring'))).toBe('value');
+
         expect(
           await poll(
             () => command(client, client.get('expiring')),
@@ -36,6 +37,7 @@ describe.each(protocols)('SET expiration RESP %i', (protocol) => {
   test('KEEPTTL preserves the deadline while replacing the value', async () => {
     await withFixture('expiration-keepttl', protocol, async ({ connect, signal }) => {
       const client = await connect();
+
       expect(
         await command(
           client,
@@ -45,8 +47,10 @@ describe.each(protocols)('SET expiration RESP %i', (protocol) => {
         ),
       ).toBe('OK');
       expect(await command(client, client.get('key'))).toBe('old');
+
       expect(await command(client, client.set('key', 'new', { expiration: 'KEEPTTL' }))).toBe('OK');
       expect(await command(client, client.get('key'))).toBe('new');
+
       expect(
         await poll(
           () => command(client, client.get('key')),
@@ -61,6 +65,7 @@ describe.each(protocols)('SET expiration RESP %i', (protocol) => {
     await withFixture('expiration-cleared', protocol, async ({ connect, signal }) => {
       const client = await connect();
       const oldDeadline = Date.now() + 1500;
+
       expect(
         await command(
           client,
@@ -70,15 +75,19 @@ describe.each(protocols)('SET expiration RESP %i', (protocol) => {
         ),
       ).toBe('OK');
       expect(await command(client, client.get('key'))).toBe('old');
+
       expect(await command(client, client.set('key', 'new'))).toBe('OK');
+
       await poll(
         async () => {
           expect(await command(client, client.get('key'))).toBe('new');
+
           return Date.now();
         },
         (now) => now >= oldDeadline + 250,
         signal,
       );
+
       expect(await command(client, client.get('key'))).toBe('new');
     });
   });

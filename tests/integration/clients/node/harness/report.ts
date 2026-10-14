@@ -42,6 +42,7 @@ export function parseReport(reply: unknown): Report[] {
     .split('\n')
     .map((line) => {
       const tokens = line.split(' ');
+
       if (tokens.length !== reportFields.length) {
         throw new Error(`CLIENT report expected 22 fields, got ${tokens.length}`);
       }
@@ -49,6 +50,7 @@ export function parseReport(reply: unknown): Report[] {
       const pairs = tokens.map((token, index) => {
         const separator = token.indexOf('=');
         const field = token.slice(0, separator);
+
         if (separator < 1 || field !== reportFields[index]) {
           throw new Error(
             `CLIENT report field ${index}: expected ${reportFields[index]}, got ${field}`,

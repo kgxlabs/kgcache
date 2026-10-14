@@ -42,6 +42,11 @@ export default defineConfig(
         'error',
         { blankLine: 'always', prev: 'block-like', next: '*' },
         { blankLine: 'always', prev: ['multiline-const', 'multiline-let'], next: '*' },
+        {
+          blankLine: 'always',
+          prev: '*',
+          next: ['if', 'for', 'while', 'do', 'switch', 'try'],
+        },
       ],
     },
     languageOptions: {

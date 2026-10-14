@@ -16,6 +16,7 @@ test.each(protocols)('CLIENT LIST retains independent live peers in RESP %i', as
     const peerInfo = parseReport(await command(peer, peer.sendCommand(['CLIENT', 'INFO'])))[0]!;
     const rows = parseReport(await command(caller, caller.sendCommand(['CLIENT', 'LIST'])));
     expect(rows).toHaveLength(2);
+
     const ids = rows.map((row) => row.id);
     expect(ids).toContain(callerInfo.id);
     expect(ids).toContain(peerInfo.id);
@@ -32,6 +33,7 @@ test.each(protocols)('CLIENT LIST retains independent live peers in RESP %i', as
       'lib-name': 'node-redis(peer)',
       'lib-ver': 'peer-version',
     });
+
     const native = await command(caller, caller.clientList());
     expect(native.map((row) => BigInt(row.id))).toEqual(ids);
     expect(native.find((row) => BigInt(row.id) === peerInfo.id)).toMatchObject({
@@ -40,7 +42,9 @@ test.each(protocols)('CLIENT LIST retains independent live peers in RESP %i', as
       libName: 'node-redis(peer)',
       libVer: 'peer-version',
     });
+
     await close(peer);
+
     const remaining = await poll(
       async () => parseReport(await command(caller, caller.sendCommand(['CLIENT', 'LIST']))),
       (reports) => reports.every((row) => row.id !== peerInfo.id),

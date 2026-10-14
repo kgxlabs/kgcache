@@ -24,7 +24,9 @@ describe.each(protocols)('command error recovery RESP %i', (protocol) => {
         const rejected = command(client, client.sendCommand(args));
         await expect(rejected).rejects.toBeInstanceOf(ErrorReply);
         await expect(rejected).rejects.toThrow(message);
+
         expect(await command(client, client.ping())).toBe('PONG');
+
         const after = parseReport(
           await command(client, client.sendCommand(['CLIENT', 'INFO'])),
         )[0]!;
@@ -39,6 +41,7 @@ describe.each(protocols)('command error recovery RESP %i', (protocol) => {
     await withFixture('pipeline-error-recovery', protocol, async ({ connect }) => {
       const client = await connect();
       const before = parseReport(await command(client, client.sendCommand(['CLIENT', 'INFO'])))[0]!;
+
       // Queue all native calls before yielding so node-redis pipelines this batch.
       const pending = [
         command(client, client.set('key', 'value')),
@@ -52,6 +55,7 @@ describe.each(protocols)('command error recovery RESP %i', (protocol) => {
       expect(outcomes).toHaveLength(5);
       expect(outcomes[0]).toEqual({ status: 'fulfilled', value: 'OK' });
       expect(outcomes[1]).toEqual({ status: 'rejected', reason: expect.any(ErrorReply) });
+
       if (outcomes[1]!.status === 'rejected') {
         expect(outcomes[1]!.reason.message).toBe('ERR wrong number of arguments');
       }
@@ -61,7 +65,9 @@ describe.each(protocols)('command error recovery RESP %i', (protocol) => {
         { status: 'fulfilled', value: 1 },
         { status: 'fulfilled', value: null },
       ]);
+
       expect(await command(client, client.ping())).toBe('PONG');
+
       const after = parseReport(await command(client, client.sendCommand(['CLIENT', 'INFO'])))[0]!;
       expect(after.id).toBe(before.id);
     });

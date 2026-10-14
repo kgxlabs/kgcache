@@ -5,6 +5,7 @@ test.each(protocols)(
   async (protocol) => {
     await withFixture('ordered-pipeline', protocol, async ({ connect }) => {
       const client = await connect();
+
       const replies = await command(
         client,
         client
@@ -23,6 +24,7 @@ test.each(protocols)(
 
       expect(replies).toHaveLength(9);
       expect(replies).toEqual(['OK', 'first', null, 'OK', 1, null, 1, 'tail', 'PONG']);
+
       expect(await command(client, client.get('b'))).toBe('second');
       expect(await command(client, client.ping())).toBe('PONG');
     });

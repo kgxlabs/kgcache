@@ -88,6 +88,7 @@ describe.each(protocols)('conditional SET RESP %i', (protocol) => {
   test.each(cases)('$name', async (row) => {
     await withFixture(row.name, protocol, async ({ connect }) => {
       const client = await connect();
+
       if (row.exists) {
         expect(await command(client, client.set('key', 'old'))).toBe('OK');
       }
