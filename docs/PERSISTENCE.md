@@ -19,5 +19,10 @@ Both methods can be enabled:
 - `appendonly yes` records writes in AOF files.
 - When AOF is on, startup loads AOF instead of the `.kgc` snapshot.
 
+Background persistence remains experimental. Failed background work is reported
+by the parent with a generic operation error; the child's source error and trace
+are temporarily unavailable. Other inherited runtime locks may still block a
+child, and shutdown has no strict deadline. See [Errors and logging](ERRORS.md).
+
 Start with [Snapshots](SNAPSHOTS.md) for `SAVE` and `BGSAVE`, or
 [Append-only file](AOF.md) for AOF setup and recovery.

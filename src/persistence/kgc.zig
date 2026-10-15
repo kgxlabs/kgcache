@@ -126,16 +126,13 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
     if (pid == 0) {
         // The child inherits stdin, stdout, and stderr from the parent.
         // It needs no stdin. Close stdout so tests waiting for output can finish.
-        // Keep stderr open to report child errors.
+        // Leave stderr inherited; stream handling is tracked in issue #227.
         _ = std.c.close(std.posix.STDIN_FILENO);
         _ = std.c.close(std.posix.STDOUT_FILENO);
 
-        self.dump(storages) catch |err| {
-            // TODO: Send the source error to the parent through a pipe so the
-            // child does not lock logger state copied during fork.
-            self._logger.err("kgc: background save failed", err, @errorReturnTrace());
-            std.c._exit(1);
-        };
+        // The parent reports a generic failure until issue #118 adds source errors.
+        // Logging here could wait forever on a mutex copied during fork.
+        self.dump(storages) catch std.c._exit(1);
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
         // using _exit to sidestep clearing the buffered data (at the time of fork) completely
         std.c._exit(0);

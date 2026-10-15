@@ -992,3 +992,64 @@ test "concurrent onWrite from several threads loses no bytes" {
         }
     }.run);
 }
+
+fn expectBackgroundRewriteFailure(comptime mode: @import("child_test_helpers.zig").ChildLogger.Mode) !void {
+    try withScratchDir("scratch-aof-child-logger", struct {
+        fn run(io: std.Io, _: std.Io.Dir) !void {
+            const testing = std.testing;
+            const DefaultStorage = @import("../storage/default_storage.zig");
+            const child_tests = @import("child_test_helpers.zig");
+
+            var storage_backend = DefaultStorage.init(io, testing.allocator);
+            var data_storage = storage_backend.storage();
+            defer data_storage.deinit();
+            {
+                var tx = try data_storage.begin();
+                defer tx.end();
+                _ = try data_storage.put("key", .{ .string = "value" }, .{ .expires_at = null });
+            }
+            var failing_vtable = data_storage.vtable.*;
+            failing_vtable.forEach = child_tests.failVisit;
+            var failing_storage = data_storage;
+            failing_storage.vtable = &failing_vtable;
+
+            var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
+            var backend = try AofBackend.init(io, testing.allocator, &state, .{ .append_dirname = "scratch-aof-child-logger" });
+            defer backend.journal().deinit() catch {};
+            var logger: child_tests.ChildLogger = .{ .mode = mode, .parent_pid = std.c.getpid() };
+            backend._logger = logger.logger();
+            const holder = try std.Thread.spawn(.{}, child_tests.ChildLogger.hold, .{&logger});
+            defer {
+                logger.release.set(io);
+                holder.join();
+            }
+            logger.held.waitUncancelable(io);
+            defer child_tests.cleanUpChild(&state, .aof);
+
+            {
+                var storage_tx = try data_storage.begin();
+                defer storage_tx.end();
+                var journal_tx = try backend.journal().begin();
+                defer journal_tx.end();
+                try testing.expectEqual(PersistenceState.BackgroundStartOutcome.started, try backend.journal().bgRewrite(&.{failing_storage}, .manual));
+            }
+            try child_tests.expectFailedChild(&state, .aof);
+            try testing.expect(state._in_flight_aof_rewrite == null);
+            try testing.expectEqual(0, logger.recorder.recordedEvents().len);
+            {
+                var tx = try backend.journal().begin();
+                defer tx.end();
+                try backend.journal().finishRewrite(.failed);
+            }
+            try testing.expectEqual(Journal.RewriteResolution.settled, backend.journal().getRewriteResolution());
+        }
+    }.run);
+}
+
+test "background rewrite failure avoids the child logger" {
+    try expectBackgroundRewriteFailure(.guard);
+}
+
+test "background rewrite failure exits while the parent logger is locked" {
+    try expectBackgroundRewriteFailure(.locked);
+}
