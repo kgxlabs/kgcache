@@ -60,7 +60,11 @@ var (
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, os.Args[1:])
+	stop()
+
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "Go client profiles:", err)
 		var child *exec.ExitError
 		if errors.As(err, &child) && child.ExitCode() > 0 {
@@ -71,7 +75,7 @@ func main() {
 	}
 }
 
-func run(args []string) error {
+func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: run.go list|validate|deps|check|fmt|test [--profile ID | --library NAME] [-- test arguments]")
 	}
@@ -100,7 +104,10 @@ func run(args []string) error {
 		return errors.New("cannot locate the client registry")
 	}
 
-	root := filepath.Dir(filepath.Dir(source))
+	root, err := filepath.EvalSymlinks(filepath.Dir(filepath.Dir(source)))
+	if err != nil {
+		return fmt.Errorf("resolve registry root: %w", err)
+	}
 	matrix, err := loadRegistry(root)
 	if err != nil {
 		return err
@@ -125,12 +132,17 @@ func run(args []string) error {
 		return nil
 	}
 
-	if action == "test" {
-		if err := validateRuntime(selected); err != nil {
-			return err
-		}
+	if err := validateRuntime(ctx, selected); err != nil {
+		return err
+	}
 
-		focused, err := splitArguments(os.Getenv("GO_TEST_ARGS"))
+	if action == "check" || action == "fmt" {
+		return checkCode(ctx, root, selected, action == "fmt")
+	}
+
+	var focused []string
+	if action == "test" {
+		focused, err = splitArguments(os.Getenv("GO_TEST_ARGS"))
 		if err != nil {
 			return err
 		}
@@ -139,77 +151,159 @@ func run(args []string) error {
 		if err := validateTestArguments(focused); err != nil {
 			return err
 		}
-
 		if err := resolveTestPaths(); err != nil {
 			return err
 		}
-
-		harness := selection{profile: profile{ID: "go-harness"}, dir: filepath.Join(root, "go", "harness")}
-		if err := runNativeTests(harness, nil, false); err != nil {
-			return fmt.Errorf("shared Go fixture checks: %w", err)
+		if err := goRun(ctx, filepath.Join(root, "go"), "test", "-count=1", "-timeout=30s", "run.go", "run_test.go"); err != nil {
+			return fmt.Errorf("Go launcher checks: %w", err)
 		}
-
-		for _, row := range selected {
-			if row.suite.Status != "ready" {
-				return fmt.Errorf("%s: client suite is still planned", row.ID)
-			}
-
-			if err := goRun(row.dir, "mod", "verify"); err != nil {
-				return fmt.Errorf("%s: verify dependencies: %w", row.ID, err)
-			}
-
-			if err := validateResolvedVersions(root, row); err != nil {
-				return fmt.Errorf("%s: %w", row.ID, err)
-			}
-
-			if err := runNativeTests(row, focused, true); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	}
-
-	if err := validateRuntime(selected); err != nil {
-		return err
-	}
-
-	if action == "check" || action == "fmt" {
-		return checkCode(root, selected, action == "fmt")
 	}
 
 	for _, row := range selected {
-		if action == "deps" {
-			if err := goRun(row.dir, "mod", "download", "all"); err != nil {
-				return fmt.Errorf("%s: download dependencies: %w", row.ID, err)
+		if action == "test" && row.suite.Status != "ready" {
+			return fmt.Errorf("%s: client suite is still planned", row.ID)
+		}
+
+		err := withProfileWorkspace(ctx, root, row, func(workspace string, active selection) error {
+			if action == "deps" || action == "test" {
+				if err := goRun(ctx, active.dir, "mod", "download", "all"); err != nil {
+					return fmt.Errorf("download dependencies: %w", err)
+				}
 			}
-		}
+			if err := goRun(ctx, active.dir, "mod", "verify"); err != nil {
+				return fmt.Errorf("verify dependencies: %w", err)
+			}
+			if err := validateResolvedVersions(ctx, workspace, active); err != nil {
+				return err
+			}
 
-		if err := goRun(row.dir, "mod", "verify"); err != nil {
-			return fmt.Errorf("%s: verify dependencies: %w", row.ID, err)
-		}
+			if action == "test" {
+				harness := selection{
+					profile: profile{ID: active.ID + "-harness"},
+					dir:     filepath.Join(workspace, "go", "harness"),
+				}
+				if err := runNativeTests(ctx, harness, nil, false); err != nil {
+					return fmt.Errorf("shared Go fixture checks: %w", err)
+				}
 
-		if err := validateResolvedVersions(root, row); err != nil {
+				return runNativeTests(ctx, active, focused, true)
+			}
+
+			fmt.Printf("%s: locked dependencies validated (%s suite)\n", active.ID, active.suite.Status)
+
+			return nil
+		})
+		if err != nil {
 			return fmt.Errorf("%s: %w", row.ID, err)
 		}
-
-		fmt.Printf("%s: locked dependencies validated (%s suite)\n", row.ID, row.suite.Status)
 	}
 
 	return nil
 }
 
-func runNativeTests(row selection, focused []string, requireClientCases bool) error {
+func withProfileWorkspace(ctx context.Context, root string, row selection, run func(string, selection) error) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	workspace, err := os.MkdirTemp("", "kgcache-"+row.ID+"-")
+	if err != nil {
+		return fmt.Errorf("create dependency workspace: %w", err)
+	}
+	defer func() { err = errors.Join(err, os.RemoveAll(workspace)) }()
+
+	canonical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return fmt.Errorf("resolve dependency workspace: %w", err)
+	}
+	workspace = canonical
+
+	fmt.Printf("%s: isolated workspace: %s\n", row.ID, workspace)
+	active := row
+	active.dir = filepath.Join(workspace, filepath.FromSlash(row.suite.SuiteDir))
+
+	for _, relative := range []string{row.suite.SuiteDir, "go/harness"} {
+		if err := copyTree(ctx, filepath.Join(root, filepath.FromSlash(relative)), filepath.Join(workspace, filepath.FromSlash(relative))); err != nil {
+			return fmt.Errorf("copy %s: %w", relative, err)
+		}
+	}
+
+	for _, name := range []string{"go.mod", "go.sum", ".go-version"} {
+		if err := copyFile(filepath.Join(row.dir, name), filepath.Join(active.dir, name)); err != nil {
+			return fmt.Errorf("overlay %s: %w", name, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	return run(workspace, active)
+}
+
+func copyTree(ctx context.Context, source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		if entry.IsDir() {
+			switch entry.Name() {
+			case "profiles", "node_modules", ".git", ".zig-cache", "zig-out", ".workspaces", "coverage", "dist", "build", "test-artifacts":
+				return filepath.SkipDir
+			}
+		}
+
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+
+		target := filepath.Join(destination, relative)
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0755)
+		}
+
+		return copyFile(path, target)
+	})
+}
+
+func copyFile(source, destination string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("source must be a regular file: %s", source)
+	}
+
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+
+	_, err = io.Copy(output, input)
+
+	return errors.Join(err, output.Close())
+}
+
+func runNativeTests(parent context.Context, row selection, focused []string, requireClientCases bool) error {
 	fmt.Printf("%s: native tests\n", row.ID)
 	args := append([]string{"test", "-timeout=5m"}, focused...)
 	args = append(args, "-json", "-mod=readonly", "-count=1", "./...")
-	interrupted, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-
-	ctx, cancel := context.WithTimeout(interrupted, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
 
-	cmd := goCommand(row.dir, args...)
+	cmd := goCommand(ctx, row.dir, args...)
+	cmd.Env = append(cmd.Env, "KGCACHE_CLIENT_PROFILE="+row.ID)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 5 * time.Second
 	output, err := cmd.StdoutPipe()
@@ -560,10 +654,6 @@ func selectProfiles(root string, matrix registry, profileID, library string) ([]
 			continue
 		}
 
-		if p.DependencyDir != s.SuiteDir {
-			return nil, fmt.Errorf("%s: separate dependency workspaces require the step 04 runner", p.ID)
-		}
-
 		dir, err := registryDir(root, p.DependencyDir)
 		if err != nil {
 			return nil, err
@@ -617,7 +707,7 @@ func validateManifest(row selection) error {
 	return nil
 }
 
-func validateRuntime(rows []selection) error {
+func validateRuntime(ctx context.Context, rows []selection) error {
 	version := rows[0].RuntimeVersion
 
 	for _, row := range rows {
@@ -626,7 +716,7 @@ func validateRuntime(rows []selection) error {
 		}
 	}
 
-	actual, err := goCommand("", "env", "GOVERSION").Output()
+	actual, err := goCommand(ctx, "", "env", "GOVERSION").Output()
 	if err != nil {
 		return fmt.Errorf("read Go runtime: %w", err)
 	}
@@ -639,8 +729,8 @@ func validateRuntime(rows []selection) error {
 	return nil
 }
 
-func checkCode(root string, rows []selection, format bool) error {
-	goroot, err := goCommand("", "env", "GOROOT").Output()
+func checkCode(ctx context.Context, root string, rows []selection, format bool) error {
+	goroot, err := goCommand(ctx, "", "env", "GOROOT").Output()
 	if err != nil {
 		return fmt.Errorf("locate pinned formatter: %w", err)
 	}
@@ -666,16 +756,19 @@ func checkCode(root string, rows []selection, format bool) error {
 		return nil
 	}
 
-	if err := goRun(filepath.Join(root, "go"), "vet", "run.go"); err != nil {
+	if err := goRun(ctx, filepath.Join(root, "go"), "vet", "run.go", "run_test.go"); err != nil {
 		return fmt.Errorf("vet launcher: %w", err)
 	}
 
-	if err := goRun(filepath.Join(root, "go", "harness"), "vet", "-mod=readonly", "./..."); err != nil {
+	if err := goRun(ctx, filepath.Join(root, "go", "harness"), "vet", "-mod=readonly", "./..."); err != nil {
 		return fmt.Errorf("vet harness: %w", err)
 	}
 
 	for _, row := range rows {
-		if err := goRun(row.dir, "vet", "-mod=readonly", "./..."); err != nil {
+		err := withProfileWorkspace(ctx, root, row, func(_ string, active selection) error {
+			return goRun(ctx, active.dir, "vet", "-mod=readonly", "./...")
+		})
+		if err != nil {
 			return fmt.Errorf("%s: vet suite: %w", row.ID, err)
 		}
 	}
@@ -683,15 +776,20 @@ func checkCode(root string, rows []selection, format bool) error {
 	return nil
 }
 
-func goRun(dir string, args ...string) error {
-	cmd := goCommand(dir, args...)
+func goRun(ctx context.Context, dir string, args ...string) error {
+	cmd := goCommand(ctx, dir, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 
-	return cmd.Run()
+	err := cmd.Run()
+	if cmd.Process != nil {
+		err = errors.Join(err, reapNativeGroup(cmd.Process.Pid))
+	}
+
+	return err
 }
 
-func validateResolvedVersions(root string, row selection) error {
-	cmd := goCommand(row.dir, "list", "-mod=readonly", "-m", "-json",
+func validateResolvedVersions(ctx context.Context, root string, row selection) error {
+	cmd := goCommand(ctx, row.dir, "list", "-mod=readonly", "-m", "-json",
 		row.suite.Package, "github.com/stretchr/testify", "kgcache.test/clientharness")
 	output, err := cmd.Output()
 	if err != nil {
@@ -769,13 +867,29 @@ func registryDir(root, relative string) (string, error) {
 	return dir, nil
 }
 
-func goCommand(dir string, args ...string) *exec.Cmd {
+func goCommand(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	command := os.Getenv("GO")
 	if command == "" {
 		command = "go"
 	}
 
-	cmd := exec.Command(command, args...)
+	if resolved, err := exec.LookPath(command); err == nil {
+		if absolute, err := filepath.Abs(resolved); err == nil {
+			command = absolute
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+
+		return err
+	}
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off")
 
