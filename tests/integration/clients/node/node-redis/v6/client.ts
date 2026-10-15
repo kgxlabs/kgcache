@@ -1,4 +1,4 @@
-import { createClient } from 'redis';
+import { createClient, createClientPool } from 'redis';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Server, within } from '@/harness/server';
 import type { ServerOptions } from '@/harness/server';
@@ -12,9 +12,10 @@ interface ClientOptions {
 }
 
 export type Client = ReturnType<typeof newClient>;
+export type Pool = ReturnType<typeof newPool>;
 
 interface OwnedClient {
-  client: Client;
+  client: Client | Pool;
   errors: Error[];
   state: { closing: boolean; closed: boolean };
   onError: (error: Error) => void;
@@ -26,7 +27,8 @@ export interface Fixture {
   server: Server;
   signal: AbortSignal;
   connect: (options?: ClientOptions) => Promise<Client>;
-  close: (client: Client) => Promise<void>;
+  connectPool: (options?: ClientOptions) => Promise<Pool>;
+  close: (client: Client | Pool) => Promise<void>;
 }
 
 export async function withFixture(
@@ -64,12 +66,23 @@ export async function withFixture(
       connect: async (clientOptions = {}) => {
         controller.signal.throwIfAborted();
 
-        const owned = ownClient(newClient(server, { protocol, ...clientOptions }));
+        const client = newClient(server, { protocol, ...clientOptions });
+        const owned = ownClient(client);
         clients.push(owned);
-        await command(owned.client, owned.client.connect());
+        await command(client, client.connect());
         controller.signal.throwIfAborted();
 
-        return owned.client;
+        return client;
+      },
+      connectPool: async (clientOptions = {}) => {
+        controller.signal.throwIfAborted();
+
+        const pool = newPool(server, { protocol, ...clientOptions });
+        clients.push(ownClient(pool));
+        await command(pool, pool.connect());
+        controller.signal.throwIfAborted();
+
+        return pool;
       },
       close: async (client) => {
         const owned = clients.find((entry) => entry.client === client);
@@ -178,12 +191,89 @@ export async function poll<T>(
   }
 }
 
-function newClient(server: Server, options: ClientOptions): ReturnType<typeof createClient> {
+/** Holds native pool leases until the body finishes, including after a failed assertion. */
+export async function withPoolConnections(
+  pool: Pool,
+  signal: AbortSignal,
+  body: (clients: Client[]) => Promise<void>,
+  count = 3,
+): Promise<void> {
+  const clients: Client[] = [];
+  const errors: unknown[] = [];
+  let ready!: () => void;
+  let release!: () => void;
+  const acquired = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const tasks = Array.from({ length: count }, () =>
+    pool.execute(async (client) => {
+      clients.push(client);
+
+      if (clients.length === count) {
+        ready();
+      }
+
+      await released;
+    }),
+  );
+
+  const settled = Promise.allSettled(tasks);
+
+  try {
+    await within(acquired, 3000, release);
+    signal.throwIfAborted();
+    await body(clients);
+  } catch (cause) {
+    errors.push(cause);
+  } finally {
+    release();
+
+    try {
+      const results = await within(settled, 3000, () => destroy(pool));
+
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          errors.push(result.reason);
+        }
+      }
+    } catch (cause) {
+      errors.push(cause);
+    }
+  }
+
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+
+  if (errors.length) {
+    throw new AggregateError(errors, 'pool body and lease cleanup failed');
+  }
+}
+
+function newClient(server: Server, options: ClientOptions) {
+  return createClient(nativeOptions(server, options));
+}
+
+function newPool(server: Server, options: ClientOptions) {
+  return createClientPool(nativeOptions(server, options), {
+    minimum: 1,
+    maximum: 3,
+    acquireTimeout: 3000,
+    cleanupDelay: 60000,
+  });
+}
+
+function nativeOptions(server: Server, options: ClientOptions) {
   if (!server.address) {
     throw new Error('server has no current address');
   }
 
-  return createClient({
+  return {
     ...(options.protocol === undefined ? {} : { RESP: options.protocol }),
     database: options.database ?? 0,
     clientInfoTag: options.clientInfoTag,
@@ -191,14 +281,14 @@ function newClient(server: Server, options: ClientOptions): ReturnType<typeof cr
       ...server.address,
       connectTimeout: 3000,
       socketTimeout: 3000,
-      reconnectStrategy: false,
+      reconnectStrategy: false as const,
     },
     commandOptions: { timeout: 3000 },
     disableOfflineQueue: true,
-  });
+  };
 }
 
-function ownClient(client: Client): OwnedClient {
+function ownClient(client: Client | Pool): OwnedClient {
   const errors: Error[] = [];
   const state = { closing: false, closed: false };
   const owned: OwnedClient = {
@@ -243,7 +333,11 @@ async function closeClient(owned: OwnedClient): Promise<void> {
   }
 }
 
-function destroy(client: Pick<Client, 'isOpen' | 'destroy'>): void {
+function destroy(
+  client: Pick<Client, 'isOpen' | 'destroy'> & { cleanupTimeout?: NodeJS.Timeout },
+): void {
+  clearTimeout(client.cleanupTimeout);
+
   if (client.isOpen) {
     client.destroy();
   }
