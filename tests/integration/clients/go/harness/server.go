@@ -34,6 +34,7 @@ type Options struct {
 	FailureLabel     string
 	Quiet            bool
 	DisableArtifacts bool
+	NewPortOnRestart bool
 }
 
 // Server owns its child and temporary directory across stop/start cycles.
@@ -117,11 +118,20 @@ func (s *Server) Start(ctx context.Context) (err error) {
 	}
 
 	port := "0"
-	if s.address != "" {
+	if s.address != "" && !s.options.NewPortOnRestart {
 		_, port, err = net.SplitHostPort(s.address)
 		if err != nil {
 			return fmt.Errorf("read restart endpoint: %w", err)
 		}
+	}
+
+	if s.address != "" && s.options.NewPortOnRestart {
+		// Reserve the old endpoint while port 0 selects a different one.
+		guard, err := net.Listen("tcp", s.address)
+		if err != nil {
+			return fmt.Errorf("reserve former endpoint: %w", err)
+		}
+		defer guard.Close()
 	}
 
 	s.config = fmt.Sprintf(
@@ -219,8 +229,11 @@ func (s *Server) Start(ctx context.Context) (err error) {
 			return err
 		}
 
-		if s.address != "" && address != s.address {
+		if s.address != "" && !s.options.NewPortOnRestart && address != s.address {
 			return fmt.Errorf("restart changed endpoint from %s to %s", s.address, address)
+		}
+		if s.address != "" && s.options.NewPortOnRestart && address == s.address {
+			return fmt.Errorf("restart reused former endpoint %s", address)
 		}
 
 		if err := startup.Err(); err != nil {
@@ -291,7 +304,7 @@ func (s *Server) Cleanup() error {
 	return err
 }
 
-// Address is the current endpoint, preserved on restart.
+// Address is the current endpoint, preserved unless NewPortOnRestart is set.
 func (s *Server) Address() string { return s.address }
 
 // DataDir contains the config and persistence files.

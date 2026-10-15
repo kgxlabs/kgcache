@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -73,6 +74,71 @@ func TestServersHaveSeparatePortsAndDirectories(t *testing.T) {
 
 	if first.Address() == second.Address() || first.DataDir() == second.DataDir() {
 		t.Fatal("fixtures shared an endpoint or directory")
+	}
+}
+
+func TestServerRestartOnNewPortPreservesData(t *testing.T) {
+	s := newTestServer(t, Options{NewPortOnRestart: true})
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	address, directory := s.Address(), s.DataDir()
+	marker := filepath.Join(directory, "restart-marker")
+	if err := os.WriteFile(marker, []byte("preserved"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if s.Address() == address || s.DataDir() != directory {
+		t.Fatalf("restart endpoint/directory: %s, %s", s.Address(), s.DataDir())
+	}
+
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != "preserved" {
+		t.Fatalf("restart marker: %q, %v", data, err)
+	}
+}
+
+func TestServerFailedNewPortRestartReleasesResources(t *testing.T) {
+	s := newTestServer(t, Options{NewPortOnRestart: true, Quiet: true})
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	address := s.Address()
+	if err := s.Stop(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.options.ExtraConfig = "unknown-fixture-directive yes"
+	if err := s.Start(t.Context()); err == nil {
+		t.Fatal("invalid restart configuration accepted")
+	}
+	assertReaped(t, s, 0)
+
+	guard, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("former endpoint guard leaked: %v", err)
+	}
+	if err := guard.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 2 {
+		if err := s.Cleanup(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := os.Stat(s.DataDir()); !os.IsNotExist(err) {
+		t.Fatalf("failed restart retained its directory: %v", err)
 	}
 }
 

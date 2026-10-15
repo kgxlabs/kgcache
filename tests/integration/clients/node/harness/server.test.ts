@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import { getEventListeners } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { readReady, Server } from '@/harness/server';
+import { readReady, Server, within } from '@/harness/server';
 
 test('READY selects a loopback port and stop/start preserves directory and endpoint', async () => {
   const server = new Server();
@@ -27,6 +28,73 @@ test('READY selects a loopback port and stop/start preserves directory and endpo
   }
 
   await server.cleanup();
+  expect(fs.existsSync(server.dataDir)).toBe(false);
+});
+
+test('requested new port preserves data and releases the former endpoint', async () => {
+  const server = new Server({ newPortOnRestart: true });
+
+  try {
+    await server.start();
+    const address = server.address;
+    const directory = server.dataDir;
+    const marker = path.join(directory, 'restart-marker');
+    fs.writeFileSync(marker, 'preserved');
+    await server.stop();
+    await server.start();
+    expect(server.address).not.toEqual(address);
+    expect(server.dataDir).toBe(directory);
+    expect(fs.readFileSync(marker, 'utf8')).toBe('preserved');
+  } finally {
+    await server.cleanup();
+  }
+});
+
+test('failed restart releases the child, former endpoint, and data directory', async () => {
+  const server = new Server({ newPortOnRestart: true, artifactDir: null });
+  const guard = net.createServer();
+
+  try {
+    await server.start();
+    const address = server.address;
+    await server.stop();
+    server.options.extraConfig = 'unknown-fixture-directive yes';
+    await expect(server.start()).rejects.toThrow('server startup failed');
+    expect(server.pid).toBeUndefined();
+
+    await within(
+      new Promise<void>((resolve, reject) => {
+        guard.once('error', reject);
+        guard.listen(address!, resolve);
+      }),
+      1000,
+      () => guard.close(),
+    );
+  } finally {
+    try {
+      if (guard.listening) {
+        await within(
+          new Promise<void>((resolve, reject) =>
+            guard.close((cause) => {
+              if (cause) {
+                reject(cause);
+              } else {
+                resolve();
+              }
+            }),
+          ),
+          1000,
+          () => guard.close(),
+        );
+      }
+    } finally {
+      guard.removeAllListeners();
+      await server.cleanup();
+    }
+
+    await server.cleanup();
+  }
+
   expect(fs.existsSync(server.dataDir)).toBe(false);
 });
 
