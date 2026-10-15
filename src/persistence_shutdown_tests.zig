@@ -155,6 +155,7 @@ const WaitObserver = struct {
     first_wait: std.Io.Event = .unset,
     second_wait: std.Io.Event = .unset,
     info_count: std.atomic.Value(usize) = .init(0),
+    errors: logging.TestLogger = .init(),
 
     fn logger(self: *WaitObserver) logging.Logger {
         return .{ .ptr = self, .vtable = &vtable };
@@ -169,7 +170,10 @@ const WaitObserver = struct {
         if (index == 1) self.second_wait.set(self.io);
     }
 
-    fn err(_: *anyopaque, _: []const u8, _: anyerror, _: logging.Logger.ErrorTrace) void {}
+    fn err(ptr: *anyopaque, message: []const u8, source: anyerror, trace: logging.Logger.ErrorTrace) void {
+        const self: *WaitObserver = @ptrCast(@alignCast(ptr));
+        self.errors.logger().err(message, source, trace);
+    }
 };
 
 const DestroyTask = struct {
@@ -432,6 +436,10 @@ test "failed BGSAVE during shutdown keeps the previous snapshot" {
 
     const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed);
     try testing.expectEqual(error.BackgroundSaveFailed, result.?);
+    const events = observer.errors.recordedEvents();
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqual(error.BackgroundSaveFailed, events[0].source.?);
+    try testing.expect(!events[0].has_trace);
     try expectReaped(pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
@@ -466,6 +474,10 @@ test "failed BGREWRITEAOF during shutdown keeps acknowledged writes" {
 
     const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed);
     try testing.expectEqual(error.AofRewriteFailed, result.?);
+    const events = observer.errors.recordedEvents();
+    try testing.expectEqual(1, events.len);
+    try testing.expectEqual(error.AofRewriteFailed, events[0].source.?);
+    try testing.expect(!events[0].has_trace);
     try expectReaped(pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());

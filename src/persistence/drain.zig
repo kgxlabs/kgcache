@@ -107,9 +107,11 @@ fn finishKgc(
     drain_error: *?anyerror,
 ) void {
     if (result.report_error) |err| {
-        recordError(logger, drain_error, "server: BGSAVE child failed", err);
+        logger.err("server: BGSAVE child failed", err, null);
+        if (drain_error.* == null) drain_error.* = err;
     } else if (result.status == .failed) {
-        recordError(logger, drain_error, "server: BGSAVE child failed", error.BackgroundSaveFailed);
+        logger.err("server: BGSAVE child failed", error.BackgroundSaveFailed, null);
+        if (drain_error.* == null) drain_error.* = error.BackgroundSaveFailed;
     }
 
     var state_tx = state.beginUncancelable();
@@ -130,10 +132,16 @@ fn finishAof(
     result: PersistenceState.AofReapResult,
     drain_error: *?anyerror,
 ) void {
-    if (result.report_error) |err| {
-        recordError(logger, drain_error, "server: BGREWRITEAOF child failed", err);
-    } else if (result.status == .failed) {
-        recordError(logger, drain_error, "server: BGREWRITEAOF child failed", error.AofRewriteFailed);
+    const failure: ?anyerror = if (result.report_error) |err| err else if (result.status == .failed) error.AofRewriteFailed else null;
+    if (failure) |err| {
+        const should_report = blk: {
+            var state_tx = state.beginUncancelable();
+            defer state_tx.end();
+            break :blk state.claimAofFailureReport();
+        };
+        if (should_report) logger.err("server: BGREWRITEAOF child failed", err, null);
+        // Reporting in cron must not hide the failure from shutdown's caller.
+        if (drain_error.* == null) drain_error.* = err;
     }
 
     const aof = maybe_aof orelse {

@@ -49,10 +49,7 @@ pub fn run(
             defer state_tx.end();
 
             const completed_save = persistence_state.reapKgc(time.nowMs(io));
-            if (completed_save.report_error) |err| {
-                logger.err("cron: KGC background child failed", err, @errorReturnTrace());
-            }
-            _ = finishKgcIfCompleted(io, persistence_state, completed_save) catch |err| {
+            _ = finishKgcIfCompleted(io, logger, persistence_state, completed_save) catch |err| {
                 logger.err("cron: failed to account for completed background save", err, @errorReturnTrace());
             };
         }
@@ -88,9 +85,15 @@ pub fn run(
 /// cannot capture a snapshot change count before this completion is accounted for.
 fn finishKgcIfCompleted(
     io: std.Io,
+    logger: logging.Logger,
     persistence_state: *PersistenceState,
     result: PersistenceState.KgcReapResult,
 ) !bool {
+    if (result.report_error) |err| {
+        logger.err("cron: KGC background child failed", err, @errorReturnTrace());
+    } else if (result.status == .failed) {
+        logger.err("cron: KGC background child failed", error.BackgroundSaveFailed, null);
+    }
     if (result.status == .running) return false;
     // NOTE: this placement is intentional. We will only set in_progress => false only for completion(failed/succeeded)
     defer persistence_state.finishKgc();
@@ -119,8 +122,14 @@ fn finishAofIfCompleted(
     aof: persistence.JournalPersistence,
     reap_result: PersistenceState.AofReapResult,
 ) void {
-    if (reap_result.report_error) |err| {
-        logger.err("cron: AOF background child failed", err, @errorReturnTrace());
+    const failure: ?anyerror = if (reap_result.report_error) |err| err else if (reap_result.status == .failed) error.AofRewriteFailed else null;
+    if (failure) |err| {
+        const should_report = if (reap_result.status == .running) true else blk: {
+            var state_tx = persistence_state.beginUncancelable();
+            defer state_tx.end();
+            break :blk persistence_state.claimAofFailureReport();
+        };
+        if (should_report) logger.err("cron: AOF background child failed", err, null);
     }
     if (reap_result.status == .running) return;
 
@@ -263,6 +272,7 @@ const FinishRewriteJournal = struct {
     flush_calls: usize = 0,
     last_flush_ms: ?i64 = null,
     fail_flush: bool = false,
+    resolution: persistence.JournalPersistence.RewriteResolution = .none,
 
     fn init(io: std.Io) FinishRewriteJournal {
         return .{ .lock = Lock.init(io) };
@@ -312,10 +322,12 @@ const FinishRewriteJournal = struct {
         self.calls += 1;
         self.last_result = result;
         if (self.fail) return error.TestRewriteCompletion;
+        self.resolution = .settled;
     }
 
-    fn getRewriteResolution(_: *anyopaque) persistence.JournalPersistence.RewriteResolution {
-        return .none;
+    fn getRewriteResolution(ptr: *anyopaque) persistence.JournalPersistence.RewriteResolution {
+        const self: *FinishRewriteJournal = @ptrCast(@alignCast(ptr));
+        return self.resolution;
     }
 
     fn beginLoading(_: *anyopaque) void {}
@@ -524,7 +536,7 @@ test "cron dispatches one pending save after either AOF result and retries a fai
             defer tx.end();
             const save_result = state.reapKgc(time.nowMs(testing.io));
             try testing.expectEqual(completed.status, save_result.status);
-            _ = try finishKgcIfCompleted(testing.io, &state, save_result);
+            _ = try finishKgcIfCompleted(testing.io, logging.NoopLogger.logger(), &state, save_result);
         }
     }
 }
@@ -588,7 +600,7 @@ test "cron dispatches one pending AOF rewrite after a save and retries a failed 
         defer tx.end();
         const completed = state.reapKgc(time.nowMs(testing.io));
         try testing.expectEqual(PersistenceState.ReapResult.failed, completed.status);
-        _ = try finishKgcIfCompleted(testing.io, &state, completed);
+        _ = try finishKgcIfCompleted(testing.io, logging.NoopLogger.logger(), &state, completed);
     }
 
     _ = dispatchPendingWork(logging.NoopLogger.logger(), &state, &data_store, true);
@@ -763,7 +775,7 @@ test "a completed background save preserves changes made after its snapshot chan
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc(reap_ms);
-        _ = try finishKgcIfCompleted(testing.io, &persistence_state, reap_result);
+        _ = try finishKgcIfCompleted(testing.io, logging.NoopLogger.logger(), &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -812,7 +824,7 @@ test "a failed background save leaves changes dirty" {
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc(failure_ms);
-        _ = try finishKgcIfCompleted(testing.io, &persistence_state, reap_result);
+        _ = try finishKgcIfCompleted(testing.io, logging.NoopLogger.logger(), &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -864,7 +876,7 @@ test "triggerSaveIfDue starts a background save once writes through the real sto
     while (reap_result.status == .running) {
         var state_tx = try persistence_state.begin();
         reap_result = persistence_state.reapKgc(reap_ms);
-        _ = try finishKgcIfCompleted(testing.io, &persistence_state, reap_result);
+        _ = try finishKgcIfCompleted(testing.io, logging.NoopLogger.logger(), &persistence_state, reap_result);
         state_tx.end();
         tries += 1;
         if (tries > 10_000) return error.ChildNeverReaped;
@@ -1003,4 +1015,212 @@ test "triggerSaveIfDue retries at the cooldown boundary without another write" {
 
     triggerSaveIfDue(logging.NoopLogger.logger(), &data_store, &persistence_state, failure_ms + 5000, config);
     try testing.expectEqual(@as(usize, 1), mock_store.bgsave_calls);
+}
+
+test "cron reports KGC child failures once with generic or wait errors" {
+    const testing = std.testing;
+    const Wait = struct {
+        var bits: ?u32 = null;
+        var failure: ?anyerror = null;
+        fn run(_: std.posix.pid_t) anyerror!?u32 {
+            if (failure) |err| return err;
+            return bits;
+        }
+    };
+    const Case = struct { bits: ?u32, wait_error: ?anyerror = null, expected: ?anyerror = null };
+    for ([_]Case{
+        .{ .bits = null },
+        .{ .bits = 0 },
+        .{ .bits = 256, .expected = error.BackgroundSaveFailed },
+        .{ .bits = 1792, .expected = error.ChildExitedAbnormally },
+        .{ .bits = 9, .expected = error.ChildTerminatedAbnormally },
+        .{ .bits = null, .wait_error = error.NoChildProcess, .expected = error.NoChildProcess },
+        .{ .bits = null, .wait_error = error.Unexpected, .expected = error.Unexpected },
+    }) |case| {
+        Wait.bits = case.bits;
+        Wait.failure = case.wait_error;
+        var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid = Wait.run } });
+        var logger = logging.TestLogger.init();
+        var tx = try state.begin();
+        defer tx.end();
+        _ = state.tryStartKgc(.immediate);
+        state.recordChange();
+        state.recordChange();
+        state.setInFlightKgcSave(.{ .pid = 123, .captured_change_count = 1, .origin = .automatic });
+        const result = state.reapKgc(time.nowMs(testing.io));
+        _ = try finishKgcIfCompleted(testing.io, logger.logger(), &state, result);
+        if (case.expected) |expected| {
+            try testing.expectEqual(1, logger.recordedEvents().len);
+            const event = logger.recordedEvents()[0];
+            try testing.expectEqual(expected, event.source.?);
+            if (expected == error.BackgroundSaveFailed) try testing.expect(!event.has_trace);
+        } else {
+            try testing.expectEqual(0, logger.recordedEvents().len);
+        }
+        try testing.expectEqual(@as(u64, if (result.status == .succeeded) 1 else 2), state._change_count.load(.acquire));
+        if (result.status != .running) {
+            const count = logger.recordedEvents().len;
+            _ = try finishKgcIfCompleted(testing.io, logger.logger(), &state, state.reapKgc(time.nowMs(testing.io)));
+            try testing.expectEqual(count, logger.recordedEvents().len);
+            try testing.expect(!state.kgcInProgress());
+        }
+    }
+}
+
+test "cron reports AOF child failures with generic or wait errors" {
+    const testing = std.testing;
+    const Wait = struct {
+        var bits: ?u32 = null;
+        var failure: ?anyerror = null;
+        fn run(_: std.posix.pid_t) anyerror!?u32 {
+            if (failure) |err| return err;
+            return bits;
+        }
+    };
+    const Case = struct { bits: ?u32, wait_error: ?anyerror = null, expected: ?anyerror = null };
+    for ([_]Case{
+        .{ .bits = null },
+        .{ .bits = 0 },
+        .{ .bits = 256, .expected = error.AofRewriteFailed },
+        .{ .bits = 1792, .expected = error.ChildExitedAbnormally },
+        .{ .bits = 9, .expected = error.ChildTerminatedAbnormally },
+        .{ .bits = null, .wait_error = error.NoChildProcess, .expected = error.NoChildProcess },
+        .{ .bits = null, .wait_error = error.Unexpected, .expected = error.Unexpected },
+    }) |case| {
+        Wait.bits = case.bits;
+        Wait.failure = case.wait_error;
+        var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid = Wait.run } });
+        var backend = FinishRewriteJournal.init(testing.io);
+        var logger = logging.TestLogger.init();
+        const result = blk: {
+            var tx = try state.begin();
+            defer tx.end();
+            _ = state.tryStartAof(.immediate);
+            state.setInFlightAofRewrite(.{ .pid = 123, .base_seq = 2, .origin = .manual });
+            break :blk state.reapAof();
+        };
+        finishAofIfCompleted(logger.logger(), &state, backend.journal(), result);
+        try testing.expectEqual(@as(usize, if (result.status == .running) 0 else 1), backend.calls);
+        if (case.expected) |expected| {
+            try testing.expectEqual(1, logger.recordedEvents().len);
+            const event = logger.recordedEvents()[0];
+            try testing.expectEqual(expected, event.source.?);
+            try testing.expect(!event.has_trace);
+        } else {
+            try testing.expectEqual(0, logger.recordedEvents().len);
+        }
+    }
+}
+
+test "AOF failure is reported once across cron retries and shutdown" {
+    const testing = std.testing;
+    const drain = @import("persistence/drain.zig");
+    const Wait = struct {
+        var calls: usize = 0;
+        fn run(_: std.posix.pid_t) anyerror!?u32 {
+            calls += 1;
+            return 256;
+        }
+        fn blocking(pid: std.posix.pid_t) anyerror!u32 {
+            return (try @This().run(pid)).?;
+        }
+    };
+    Wait.calls = 0;
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid = Wait.run, .wait_pid_blocking = Wait.blocking } });
+    var backend = FinishRewriteJournal.init(testing.io);
+    backend.fail = true;
+    var logger = logging.TestLogger.init();
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        _ = state.tryStartAof(.immediate);
+        state.setInFlightAofRewrite(.{ .pid = 123, .base_seq = 2, .origin = .manual });
+    }
+    for (0..2) |_| {
+        const result = blk: {
+            var tx = try state.begin();
+            defer tx.end();
+            break :blk state.reapAof();
+        };
+        finishAofIfCompleted(logger.logger(), &state, backend.journal(), result);
+    }
+    try testing.expectEqual(1, Wait.calls);
+    try testing.expectEqual(3, logger.recordedEvents().len);
+    try testing.expectEqual(error.AofRewriteFailed, logger.recordedEvents()[0].source.?);
+    try testing.expect(!logger.recordedEvents()[0].has_trace);
+    for (logger.recordedEvents()[1..]) |event| try testing.expectEqual(error.TestRewriteCompletion, event.source.?);
+
+    backend.fail = false;
+    const result = drain.run(testing.io, logger.logger(), &state, backend.journal());
+    try testing.expectEqual(drain.Status.complete, result.status);
+    try testing.expectEqual(error.AofRewriteFailed, result.err.?);
+    try testing.expectEqual(3, logger.recordedEvents().len);
+    try testing.expectEqual(1, Wait.calls);
+    try testing.expect(!state.aofInProgress());
+
+    // A new operation owns a new report claim.
+    {
+        var tx = try state.begin();
+        defer tx.end();
+        _ = state.tryStartAof(.immediate);
+        state.setInFlightAofRewrite(.{ .pid = 124, .base_seq = 4, .origin = .manual });
+    }
+    const next_result = drain.run(testing.io, logger.logger(), &state, backend.journal());
+    try testing.expectEqual(error.AofRewriteFailed, next_result.err.?);
+    try testing.expectEqual(5, logger.recordedEvents().len);
+    try testing.expectEqual(error.AofRewriteFailed, logger.recordedEvents()[4].source.?);
+    try testing.expectEqual(2, Wait.calls);
+}
+
+test "shutdown reports child failures once and preserves abnormal exit errors" {
+    const testing = std.testing;
+    const drain = @import("persistence/drain.zig");
+    const Wait = struct {
+        var bits: u32 = 0;
+        var failure: ?anyerror = null;
+        fn blocking(_: std.posix.pid_t) anyerror!u32 {
+            if (failure) |err| return err;
+            return bits;
+        }
+    };
+    const Case = struct { bits: u32, wait_error: ?anyerror = null, expected: ?anyerror = null };
+    for ([_]enum { kgc, aof }{ .kgc, .aof }) |operation| {
+        for ([_]Case{
+            .{ .bits = 0 },
+            .{ .bits = 256, .expected = if (operation == .kgc) error.BackgroundSaveFailed else error.AofRewriteFailed },
+            .{ .bits = 1792, .expected = error.ChildExitedAbnormally },
+            .{ .bits = 9, .expected = error.ChildTerminatedAbnormally },
+            .{ .bits = 0, .wait_error = error.NoChildProcess, .expected = error.NoChildProcess },
+        }) |case| {
+            Wait.bits = case.bits;
+            Wait.failure = case.wait_error;
+            var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid_blocking = Wait.blocking } });
+            var backend = FinishRewriteJournal.init(testing.io);
+            var logger = logging.TestLogger.init();
+            {
+                var tx = try state.begin();
+                defer tx.end();
+                if (operation == .kgc) {
+                    _ = state.tryStartKgc(.immediate);
+                    state.setInFlightKgcSave(.{ .pid = 123, .captured_change_count = 0, .origin = .manual });
+                } else {
+                    _ = state.tryStartAof(.immediate);
+                    state.setInFlightAofRewrite(.{ .pid = 123, .base_seq = 2, .origin = .manual });
+                }
+            }
+            const result = drain.run(testing.io, logger.logger(), &state, if (operation == .aof) backend.journal() else null);
+            try testing.expectEqual(drain.Status.complete, result.status);
+            try testing.expectEqual(case.expected, result.err);
+            var error_count: usize = 0;
+            for (logger.recordedEvents()) |event| {
+                if (event.kind != .err) continue;
+                error_count += 1;
+                try testing.expectEqual(case.expected, event.source);
+                try testing.expect(!event.has_trace);
+            }
+            try testing.expectEqual(@as(usize, if (case.expected == null) 0 else 1), error_count);
+            try testing.expect(!state.kgcInProgress());
+            try testing.expect(!state.aofInProgress());
+        }
+    }
 }

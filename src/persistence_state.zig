@@ -55,6 +55,7 @@ pub const KgcReapResult = struct {
 pub const AofReapResult = struct {
     status: ReapResult,
     report_error: ?anyerror = null,
+    failure_reported: bool = false,
 };
 
 pub const KgcShutdownState = union(enum) {
@@ -240,6 +241,18 @@ pub fn setInFlightAofRewrite(self: *PersistenceState, rewrite: AofBackgroundRewr
 pub fn finishAof(self: *PersistenceState) void {
     self._completed_aof_rewrite = null;
     self._aof_in_progress = false;
+}
+
+/// Claim under a state session, then log outside it. Keep the claim with the
+/// cached completion across settlement retries and the handoff to shutdown.
+pub fn claimAofFailureReport(self: *PersistenceState) bool {
+    if (self._completed_aof_rewrite) |*completed| {
+        if (completed.status != .failed) return false;
+        if (completed.failure_reported) return false;
+        completed.failure_reported = true;
+        return true;
+    }
+    return false;
 }
 
 pub fn aofInProgress(self: *PersistenceState) bool {

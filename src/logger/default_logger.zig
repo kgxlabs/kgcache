@@ -1,8 +1,8 @@
 const std = @import("std");
 const Logger = @import("interface.zig");
 
-/// Logger for application threads. Persistence children also use it until child
-/// errors can be sent to the parent through a pipe.
+/// Logger for application threads. Persistence children must not use the mutex
+/// or I/O runtime inherited from the parent.
 const DefaultLogger = @This();
 
 _io: std.Io,

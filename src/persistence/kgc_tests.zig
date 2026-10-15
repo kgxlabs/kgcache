@@ -4,7 +4,6 @@ const object = @import("../object.zig");
 const time = @import("../time.zig");
 const KgcEncoder = @import("../codec/kgc_encoder.zig");
 const PersistenceState = @import("../persistence_state.zig");
-const logging = @import("../logger.zig");
 const KgcBackend = @import("kgc.zig");
 const init = KgcBackend.init;
 const InitError = KgcBackend.InitError;
@@ -270,9 +269,10 @@ test "fork failure keeps its source error and releases the background save claim
     try testing.expectEqual(PersistenceState.StartDecision.started, persistence_state.tryStartKgc(.immediate));
 }
 
-test "background child reports its storage source once through the normal logger" {
+fn expectBackgroundSaveFailure(mode: @import("child_test_helpers.zig").ChildLogger.Mode) !void {
     const testing = std.testing;
     const DefaultStorage = @import("../storage/default_storage.zig");
+    const child_tests = @import("child_test_helpers.zig");
 
     var storage_backend = DefaultStorage.init(testing.io, testing.allocator);
     var data_storage = storage_backend.storage();
@@ -282,66 +282,41 @@ test "background child reports its storage source once through the normal logger
         defer tx.end();
         _ = try data_storage.put("key", .{ .string = "value" }, .{ .expires_at = null });
     }
-
     var failing_vtable = data_storage.vtable.*;
-    failing_vtable.forEach = struct {
-        fn fail(_: *anyopaque, _: *anyopaque, _: *const fn (*anyopaque, []const u8, object.Object, ?time.UnixMs) anyerror!void) anyerror!void {
-            return error.TestChildDump;
-        }
-    }.fail;
+    failing_vtable.forEach = child_tests.failVisit;
     var failing_storage = data_storage;
     failing_storage.vtable = &failing_vtable;
 
-    var fds: [2]std.posix.fd_t = undefined;
-    if (std.c.pipe(&fds) != 0) return error.PipeFailed;
-    defer _ = std.c.close(fds[0]);
-    const saved_stderr = std.c.dup(std.posix.STDERR_FILENO);
-    if (saved_stderr < 0) return error.DupFailed;
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
+    var backend = try init(testing.io, testing.allocator, &state, "child-source-failure.kgc");
+    var logger: child_tests.ChildLogger = .{ .mode = mode, .parent_pid = std.c.getpid() };
+    backend._logger = logger.logger();
+    const holder = try std.Thread.spawn(.{}, child_tests.ChildLogger.hold, .{&logger});
     defer {
-        _ = std.c.dup2(saved_stderr, std.posix.STDERR_FILENO);
-        _ = std.c.close(saved_stderr);
+        logger.release.set(testing.io);
+        holder.join();
     }
-    if (std.c.dup2(fds[1], std.posix.STDERR_FILENO) < 0) return error.DupFailed;
+    logger.held.waitUncancelable(testing.io);
+    // Clean up a regression's stuck child before releasing the parent lock.
+    defer child_tests.cleanUpChild(&state, .kgc);
 
-    var persistence_state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false });
-    var backend_instance = try init(testing.io, testing.allocator, &persistence_state, "child-source-failure.kgc");
-    var default_logger = logging.DefaultLogger.init(testing.io);
-    backend_instance._logger = default_logger.logger();
     {
         var tx = try data_storage.begin();
         defer tx.end();
-        _ = try backend_instance.snapshot().bgsave(&.{failing_storage}, .manual);
+        try testing.expectEqual(PersistenceState.BackgroundStartOutcome.started, try backend.snapshot().bgsave(&.{failing_storage}, .automatic));
     }
-    if (std.c.dup2(saved_stderr, std.posix.STDERR_FILENO) < 0) return error.DupFailed;
-    _ = std.c.close(fds[1]);
+    try child_tests.expectFailedChild(&state, .kgc);
+    try testing.expect(state._in_flight_kgc_save == null);
+    try testing.expect(state._last_failed_save_ms != null);
+    try testing.expectEqual(0, logger.recorder.recordedEvents().len);
+}
 
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(testing.allocator);
-    var buffer: [512]u8 = undefined;
-    while (true) {
-        const count = std.c.read(fds[0], &buffer, buffer.len);
-        if (count < 0) {
-            if (std.posix.errno(count) == .INTR) continue;
-            return error.PipeReadFailed;
-        }
-        if (count == 0) break;
-        try output.appendSlice(testing.allocator, buffer[0..@intCast(count)]);
-    }
-    try testing.expectEqual(1, std.mem.count(u8, output.items, "TestChildDump"));
+test "background save failure avoids the child logger" {
+    try expectBackgroundSaveFailure(.guard);
+}
 
-    var result: PersistenceState.KgcReapResult = .{ .status = .running };
-    var tries: usize = 0;
-    while (result.status == .running) {
-        var tx = try persistence_state.begin();
-        result = persistence_state.reapKgc(time.nowMs(testing.io));
-        if (result.status != .running) persistence_state.finishKgc();
-        tx.end();
-        tries += 1;
-        if (tries > 10_000) return error.ChildNeverReaped;
-        try testing.io.sleep(.fromMilliseconds(1), .awake);
-    }
-    try testing.expectEqual(PersistenceState.ReapResult.failed, result.status);
-    try testing.expect(result.report_error == null);
+test "background save failure exits while the parent logger is locked" {
+    try expectBackgroundSaveFailure(.locked);
 }
 
 test "loading an out-of-range database preserves the decoder visitor error" {
