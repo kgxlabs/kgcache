@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,10 +10,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 )
 
 type suite struct {
@@ -52,6 +56,7 @@ type selection struct {
 var (
 	stableVersion = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	identifier    = regexp.MustCompile(`^[a-z][a-z0-9.-]*$`)
+	nativeCase    = regexp.MustCompile(`/(RESP[23]|default)(/|$)`)
 )
 
 func main() {
@@ -70,7 +75,9 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: run.go list|validate|deps|check|fmt|test [--profile ID | --library NAME] [-- test arguments]")
 	}
+
 	action := args[0]
+
 	switch action {
 	case "list", "validate", "deps", "check", "fmt", "test":
 	default:
@@ -83,6 +90,7 @@ func run(args []string) error {
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
+
 	if action != "test" && flags.NArg() != 0 {
 		return errors.New("test arguments are only allowed with test")
 	}
@@ -122,17 +130,40 @@ func run(args []string) error {
 			return err
 		}
 
-		args := []string{"test", "-mod=readonly", "-count=1"}
-		args = append(args, flags.Args()...)
-		args = append(args, "bootstrap_test.go")
+		focused, err := splitArguments(os.Getenv("GO_TEST_ARGS"))
+		if err != nil {
+			return err
+		}
+
+		focused = append(focused, flags.Args()...)
+		if err := validateTestArguments(focused); err != nil {
+			return err
+		}
+
+		if err := resolveTestPaths(); err != nil {
+			return err
+		}
+
+		harness := selection{profile: profile{ID: "go-harness"}, dir: filepath.Join(root, "go", "harness")}
+		if err := runNativeTests(harness, nil, false); err != nil {
+			return fmt.Errorf("shared Go fixture checks: %w", err)
+		}
+
 		for _, row := range selected {
-			if row.suite.Status != "planned" {
-				return errors.New("client execution requires the actual Go scenario implementation")
+			if row.suite.Status != "ready" {
+				return fmt.Errorf("%s: client suite is still planned", row.ID)
 			}
 
-			fmt.Printf("%s: running bootstrap placeholder (client suite remains planned)\n", row.ID)
-			if err := goRun(row.dir, args...); err != nil {
-				return fmt.Errorf("%s: bootstrap test: %w", row.ID, err)
+			if err := goRun(row.dir, "mod", "verify"); err != nil {
+				return fmt.Errorf("%s: verify dependencies: %w", row.ID, err)
+			}
+
+			if err := validateResolvedVersions(root, row); err != nil {
+				return fmt.Errorf("%s: %w", row.ID, err)
+			}
+
+			if err := runNativeTests(row, focused, true); err != nil {
+				return err
 			}
 		}
 
@@ -157,10 +188,240 @@ func run(args []string) error {
 		if err := goRun(row.dir, "mod", "verify"); err != nil {
 			return fmt.Errorf("%s: verify dependencies: %w", row.ID, err)
 		}
+
 		if err := validateResolvedVersions(root, row); err != nil {
 			return fmt.Errorf("%s: %w", row.ID, err)
 		}
+
 		fmt.Printf("%s: locked dependencies validated (%s suite)\n", row.ID, row.suite.Status)
+	}
+
+	return nil
+}
+
+func runNativeTests(row selection, focused []string, requireClientCases bool) error {
+	fmt.Printf("%s: native tests\n", row.ID)
+	args := append([]string{"test", "-timeout=5m"}, focused...)
+	args = append(args, "-json", "-mod=readonly", "-count=1", "./...")
+	interrupted, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	ctx, cancel := context.WithTimeout(interrupted, 5*time.Minute)
+	defer cancel()
+
+	cmd := goCommand(row.dir, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("%s: capture native output: %w", row.ID, err)
+	}
+
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%s: start native tests: %w", row.ID, err)
+	}
+
+	// The whole native process group is owned, including fixture children.
+	watchDone := make(chan struct{})
+	watchJoined := make(chan struct{})
+	go func() {
+		defer close(watchJoined)
+
+		select {
+		case <-ctx.Done():
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+
+			select {
+			case <-watchDone:
+			case <-time.After(5 * time.Second):
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+		case <-watchDone:
+		}
+	}()
+
+	decoder := json.NewDecoder(output)
+	passed := make(map[string]bool)
+	parents := make(map[string]bool)
+	var transcript []byte
+	var decodeErr error
+
+	for {
+		var event struct {
+			Action, Test, Output string
+		}
+		if err := decoder.Decode(&event); err != nil {
+			if err != io.EOF {
+				decodeErr = fmt.Errorf("decode native test event: %w", err)
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			}
+
+			break
+		}
+
+		fmt.Print(event.Output)
+		transcript = append(transcript, event.Output...)
+		if len(transcript) > 64*1024 {
+			transcript = append([]byte(nil), transcript[len(transcript)-64*1024:]...)
+		}
+
+		if event.Action == "run" {
+			if index := strings.LastIndex(event.Test, "/"); index >= 0 {
+				parents[event.Test[:index]] = true
+			}
+		}
+
+		if event.Action == "pass" && nativeCase.MatchString(event.Test) {
+			passed[event.Test] = true
+		}
+	}
+
+	waitErr := cmd.Wait()
+	close(watchDone)
+	<-watchJoined
+	groupErr := reapNativeGroup(cmd.Process.Pid)
+	if ctx.Err() != nil {
+		waitErr = errors.Join(waitErr, fmt.Errorf("native suite cancelled: %w", ctx.Err()))
+	}
+
+	err = errors.Join(decodeErr, waitErr, groupErr)
+	executed := 0
+
+	for name := range passed {
+		if !parents[name] {
+			executed++
+		}
+	}
+
+	if err == nil && requireClientCases && executed == 0 {
+		err = errors.New("zero executed client cases (fixture checks do not count)")
+	}
+
+	if err != nil {
+		if root := os.Getenv("KGCACHE_TEST_ARTIFACT_DIR"); root != "" {
+			if reportErr := os.MkdirAll(root, 0700); reportErr != nil {
+				err = errors.Join(err, reportErr)
+			} else {
+				reportErr := os.WriteFile(filepath.Join(root, row.ID+"-native.log"), transcript, 0600)
+				err = errors.Join(err, reportErr)
+			}
+		}
+
+		return fmt.Errorf("%s: native tests: %w", row.ID, err)
+	}
+
+	if requireClientCases {
+		fmt.Printf("%s: %d client cases executed\n", row.ID, executed)
+	}
+
+	return nil
+}
+
+func reapNativeGroup(pid int) error {
+	if err := syscall.Kill(-pid, 0); errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+
+	err := errors.New("native tests retained a process group after exit")
+	syscall.Kill(-pid, syscall.SIGTERM)
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+			return err
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	syscall.Kill(-pid, syscall.SIGKILL)
+
+	return err
+}
+
+func splitArguments(input string) ([]string, error) {
+	var args []string
+	var word strings.Builder
+	var quote rune
+	escaped, started := false, false
+
+	for _, char := range input {
+		switch {
+		case escaped:
+			word.WriteRune(char)
+			escaped = false
+		case char == '\\' && quote != '\'':
+			escaped, started = true, true
+		case quote != 0:
+			if char == quote {
+				quote = 0
+			} else {
+				word.WriteRune(char)
+			}
+		case char == '\'' || char == '"':
+			quote, started = char, true
+		case char == ' ' || char == '\t' || char == '\n':
+			if started {
+				args = append(args, word.String())
+				word.Reset()
+				started = false
+			}
+		default:
+			word.WriteRune(char)
+			started = true
+		}
+	}
+
+	if escaped || quote != 0 {
+		return nil, errors.New("GO_TEST_ARGS contains an unfinished escape or quote")
+	}
+
+	if started {
+		args = append(args, word.String())
+	}
+
+	return args, nil
+}
+
+func validateTestArguments(args []string) error {
+	flags := flag.NewFlagSet("native Go test arguments", flag.ContinueOnError)
+
+	for _, name := range []string{"run", "skip", "shuffle", "cpu"} {
+		flags.String(name, "", "native test option")
+	}
+
+	for _, name := range []string{"v", "race", "short", "failfast", "cover"} {
+		flags.Bool(name, false, "native test option")
+	}
+
+	flags.Int("parallel", 1, "test parallelism")
+	timeout := flags.Duration("timeout", 5*time.Minute, "native test timeout")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+
+	if flags.NArg() != 0 || *timeout <= 0 || *timeout > 5*time.Minute {
+		return errors.New("test arguments must be supported native flags, with a timeout between 0 and 5m")
+	}
+
+	return nil
+}
+
+func resolveTestPaths() error {
+	bin := os.Getenv("KGCACHE_BIN")
+	info, err := os.Stat(bin)
+	if !filepath.IsAbs(bin) || err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
+		return errors.New("KGCACHE_BIN must be an absolute regular executable path")
+	}
+
+	if root := os.Getenv("KGCACHE_TEST_ARTIFACT_DIR"); root != "" {
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return fmt.Errorf("resolve artifact root: %w", err)
+		}
+
+		return os.Setenv("KGCACHE_TEST_ARTIFACT_DIR", absolute)
 	}
 
 	return nil
@@ -172,6 +433,7 @@ func loadRegistry(root string) (registry, error) {
 	if err != nil {
 		return matrix, fmt.Errorf("open registry: %w", err)
 	}
+
 	defer file.Close()
 
 	decoder := json.NewDecoder(file)
@@ -179,40 +441,51 @@ func loadRegistry(root string) (registry, error) {
 	if err := decoder.Decode(&matrix); err != nil {
 		return matrix, fmt.Errorf("parse registry: %w", err)
 	}
+
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return matrix, errors.New("registry must contain one JSON object")
 	}
+
 	if matrix.SchemaVersion != 1 || len(matrix.Suites) == 0 || len(matrix.Profiles) == 0 {
 		return matrix, errors.New("registry requires schemaVersion 1, suites, and profiles")
 	}
+
 	suites := make(map[string]suite)
+
 	for _, s := range matrix.Suites {
 		if _, exists := suites[s.ID]; exists || !identifier.MatchString(s.ID) {
 			return matrix, fmt.Errorf("invalid or duplicate suite ID %q", s.ID)
 		}
+
 		validLanguage := s.Language == "go" || s.Language == "node"
 		validNames := identifier.MatchString(s.Library) && identifier.MatchString(s.APIGeneration)
 		if !validLanguage || !validNames || s.Package == "" {
 			return matrix, fmt.Errorf("%s: invalid language, library, API generation, or package", s.ID)
 		}
+
 		if s.Status != "planned" && s.Status != "ready" {
 			return matrix, fmt.Errorf("%s: status must be planned or ready", s.ID)
 		}
+
 		if s.SuiteDir != s.Language+"/"+s.Library+"/"+s.APIGeneration {
 			return matrix, fmt.Errorf("%s: suiteDir must match language/library/API generation", s.ID)
 		}
+
 		if _, err := registryDir(root, s.SuiteDir); err != nil {
 			return matrix, fmt.Errorf("%s: %w", s.ID, err)
 		}
+
 		suites[s.ID] = s
 	}
 
 	ids := make(map[string]bool)
+
 	for _, p := range matrix.Profiles {
 		s, exists := suites[p.SuiteID]
 		if ids[p.ID] || !identifier.MatchString(p.ID) || !exists {
 			return matrix, fmt.Errorf("%q: invalid/duplicate profile ID or unknown suite %q", p.ID, p.SuiteID)
 		}
+
 		ids[p.ID] = true
 
 		version := p.ClientVersion
@@ -220,24 +493,30 @@ func loadRegistry(root string) (registry, error) {
 			if !strings.HasPrefix(version, "v") {
 				return matrix, fmt.Errorf("%s: Go client version requires a v prefix", p.ID)
 			}
+
 			version = strings.TrimPrefix(version, "v")
 		}
+
 		validVersions := stableVersion.MatchString(version) && stableVersion.MatchString(p.RuntimeVersion)
 		validNPM := s.Language != "node" || stableVersion.MatchString(p.PackageManagerVersion)
 		if !validVersions || !validNPM {
 			return matrix, fmt.Errorf("%s: versions must be exact stable pins", p.ID)
 		}
+
 		if p.CI != "required" && p.CI != "advisory" {
 			return matrix, fmt.Errorf("%s: ci must be required or advisory", p.ID)
 		}
 
 		protocols := make(map[int]bool)
+
 		for _, protocol := range p.Protocols {
 			if (protocol != 2 && protocol != 3) || protocols[protocol] {
 				return matrix, fmt.Errorf("%s: protocols must contain distinct RESP2/RESP3 values", p.ID)
 			}
+
 			protocols[protocol] = true
 		}
+
 		if !protocols[p.ExpectedDefaultProtocol] {
 			return matrix, fmt.Errorf("%s: expected default must be a declared protocol", p.ID)
 		}
@@ -245,6 +524,7 @@ func loadRegistry(root string) (registry, error) {
 		if p.DependencyDir != s.SuiteDir && !strings.HasPrefix(p.DependencyDir, s.SuiteDir+"/profiles/") {
 			return matrix, fmt.Errorf("%s: dependencyDir must belong to its suite", p.ID)
 		}
+
 		if _, err := registryDir(root, p.DependencyDir); err != nil {
 			return matrix, fmt.Errorf("%s: %w", p.ID, err)
 		}
@@ -257,18 +537,22 @@ func selectProfiles(root string, matrix registry, profileID, library string) ([]
 	if profileID != "" && library != "" {
 		return nil, errors.New("--profile and --library cannot be combined")
 	}
+
 	suites := make(map[string]suite)
+
 	for _, s := range matrix.Suites {
 		suites[s.ID] = s
 	}
 
 	var selected []selection
+
 	for _, p := range matrix.Profiles {
 		s := suites[p.SuiteID]
 		if profileID != "" {
 			if p.ID != profileID {
 				continue
 			}
+
 			if s.Language != "go" {
 				return nil, fmt.Errorf("%s belongs to %s, not Go", p.ID, s.Language)
 			}
@@ -279,10 +563,12 @@ func selectProfiles(root string, matrix registry, profileID, library string) ([]
 		if p.DependencyDir != s.SuiteDir {
 			return nil, fmt.Errorf("%s: separate dependency workspaces require the step 04 runner", p.ID)
 		}
+
 		dir, err := registryDir(root, p.DependencyDir)
 		if err != nil {
 			return nil, err
 		}
+
 		selected = append(selected, selection{profile: p, suite: s, dir: dir})
 	}
 
@@ -305,6 +591,7 @@ func validateManifest(row selection) error {
 	if err != nil {
 		return err
 	}
+
 	if strings.TrimSpace(string(version)) != row.RuntimeVersion {
 		return errors.New(".go-version does not match runtimeVersion")
 	}
@@ -313,11 +600,13 @@ func validateManifest(row selection) error {
 	if err != nil {
 		return err
 	}
+
 	pins := map[string]string{
 		"go":                          row.RuntimeVersion,
 		row.suite.Package:             row.ClientVersion,
 		"github.com/stretchr/testify": "v1.11.1",
 	}
+
 	for name, version := range pins {
 		pin := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(name) + `\s+` + regexp.QuoteMeta(version) + `\s*(?://[^\n]*)?$`)
 		if !pin.Match(manifest) {
@@ -330,6 +619,7 @@ func validateManifest(row selection) error {
 
 func validateRuntime(rows []selection) error {
 	version := rows[0].RuntimeVersion
+
 	for _, row := range rows {
 		if row.RuntimeVersion != version {
 			return errors.New("selected profiles require different Go versions; invoke each --profile separately with its pinned runtime")
@@ -340,6 +630,7 @@ func validateRuntime(rows []selection) error {
 	if err != nil {
 		return fmt.Errorf("read Go runtime: %w", err)
 	}
+
 	installedVersion := strings.TrimSpace(string(actual))
 	if installedVersion != "go"+version {
 		return fmt.Errorf("selected profiles require Go %s; installed runtime is %s (set GO to the pinned executable)", version, installedVersion)
@@ -366,9 +657,11 @@ func checkCode(root string, rows []selection, format bool) error {
 	if err != nil {
 		return fmt.Errorf("format Go sources: %w", err)
 	}
+
 	if !format && len(output) != 0 {
 		return fmt.Errorf("run make fmt-go for:\n%s", output)
 	}
+
 	if format {
 		return nil
 	}
@@ -376,9 +669,11 @@ func checkCode(root string, rows []selection, format bool) error {
 	if err := goRun(filepath.Join(root, "go"), "vet", "run.go"); err != nil {
 		return fmt.Errorf("vet launcher: %w", err)
 	}
+
 	if err := goRun(filepath.Join(root, "go", "harness"), "vet", "-mod=readonly", "./..."); err != nil {
 		return fmt.Errorf("vet harness: %w", err)
 	}
+
 	for _, row := range rows {
 		if err := goRun(row.dir, "vet", "-mod=readonly", "./..."); err != nil {
 			return fmt.Errorf("%s: vet suite: %w", row.ID, err)
@@ -391,6 +686,7 @@ func checkCode(root string, rows []selection, format bool) error {
 func goRun(dir string, args ...string) error {
 	cmd := goCommand(dir, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+
 	return cmd.Run()
 }
 
@@ -403,6 +699,7 @@ func validateResolvedVersions(root string, row selection) error {
 		if errors.As(err, &child) {
 			return fmt.Errorf("resolve modules: %s: %w", strings.TrimSpace(string(child.Stderr)), err)
 		}
+
 		return fmt.Errorf("resolve modules: %w", err)
 	}
 
@@ -412,6 +709,7 @@ func validateResolvedVersions(root string, row selection) error {
 		"github.com/stretchr/testify": "v1.11.1",
 		"kgcache.test/clientharness":  "v0.0.0",
 	}
+
 	for decoder.More() {
 		var module struct {
 			Path, Version string
@@ -431,6 +729,7 @@ func validateResolvedVersions(root string, row selection) error {
 			if err != nil {
 				return err
 			}
+
 			if module.Replace == nil || filepath.Clean(module.Replace.Dir) != harness {
 				return errors.New("clientharness must use the local go/harness module")
 			}
@@ -452,10 +751,12 @@ func registryDir(root, relative string) (string, error) {
 	if relative == "" || filepath.IsAbs(relative) || filepath.ToSlash(filepath.Clean(relative)) != relative {
 		return "", fmt.Errorf("invalid registry directory %q", relative)
 	}
+
 	dir, err := filepath.EvalSymlinks(filepath.Join(root, relative))
 	if err != nil {
 		return "", fmt.Errorf("resolve directory %q: %w", relative, err)
 	}
+
 	if !strings.HasPrefix(dir, root+string(os.PathSeparator)) {
 		return "", fmt.Errorf("directory %q leaves the registry root", relative)
 	}
@@ -477,5 +778,6 @@ func goCommand(dir string, args ...string) *exec.Cmd {
 	cmd := exec.Command(command, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off")
+
 	return cmd
 }

@@ -8,7 +8,7 @@
       "apiGeneration": "v9",
       "package": "github.com/redis/go-redis/v9",
       "suiteDir": "go/go-redis/v9",
-      "status": "planned"
+      "status": "ready"
     },
     {
       "id": "node-redis-v6",

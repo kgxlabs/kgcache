@@ -4,7 +4,7 @@ const Request = @import("../request.zig");
 const KGHelpers = @import("../../helpers.zig");
 const time = @import("../../time.zig");
 
-pub const Options = std.StaticStringMap(*const Interface.OptionDefinition).initComptime(.{
+pub const Options = std.StaticStringMapWithEql(*const Interface.OptionDefinition, std.ascii.eqlIgnoreCase).initComptime(.{
     .{ "NX", &nx_def },
     .{ "XX", &xx_def },
     .{ "EX", &ex_def },
