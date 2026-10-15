@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
@@ -16,6 +17,7 @@ export interface ServerOptions {
   artifactDir?: string | null;
   reportFailures?: boolean;
   failureLabel?: string;
+  newPortOnRestart?: boolean;
 }
 
 interface ExitStatus {
@@ -59,9 +61,40 @@ export class Server {
 
     signal?.throwIfAborted();
 
+    const guard =
+      this.address && this.options.newPortOnRestart
+        ? await reserveEndpoint(this.address, signal)
+        : undefined;
+
+    const errors: unknown[] = [];
+
+    try {
+      await this.startProcess(executable, signal);
+    } catch (cause) {
+      errors.push(cause);
+    } finally {
+      if (guard) {
+        try {
+          await closeEndpoint(guard);
+        } catch (cause) {
+          errors.push(cause);
+        }
+      }
+    }
+
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+
+    if (errors.length) {
+      throw new AggregateError(errors, 'startup and endpoint cleanup failed');
+    }
+  }
+
+  private async startProcess(executable: string, signal?: AbortSignal): Promise<void> {
     this.config = [
       'bind 127.0.0.1',
-      `port ${this.address?.port ?? 0}`,
+      `port ${this.options.newPortOnRestart ? 0 : (this.address?.port ?? 0)}`,
       'reuse-address yes',
       'cron-interval-ms 20',
       'databases 2',
@@ -115,8 +148,12 @@ export class Server {
         throw new Error('child exited during startup', { cause: this.processError });
       }
 
-      if (this.address && address.port !== this.address.port) {
+      if (this.address && !this.options.newPortOnRestart && address.port !== this.address.port) {
         throw new Error('restart changed the endpoint');
+      }
+
+      if (this.address && this.options.newPortOnRestart && address.port === this.address.port) {
+        throw new Error('restart reused the former endpoint');
       }
 
       this.address = address;
@@ -347,6 +384,64 @@ function listFiles(root: string): string[] {
   }
 
   return files;
+}
+
+/** Keeps port 0 from selecting the endpoint used by the previous process. */
+async function reserveEndpoint(
+  address: { host: string; port: number },
+  signal?: AbortSignal,
+): Promise<net.Server> {
+  const guard = net.createServer((socket) => socket.destroy());
+  let onReady!: () => void;
+  let onError!: (cause: Error) => void;
+  const listening = new Promise<void>((resolve, reject) => {
+    onReady = resolve;
+    onError = reject;
+  });
+
+  guard.once('listening', onReady);
+  guard.once('error', onError);
+
+  try {
+    guard.listen(address);
+    await within(listening, 1000, () => guard.close());
+    signal?.throwIfAborted();
+
+    return guard;
+  } catch (cause) {
+    try {
+      await closeEndpoint(guard);
+    } catch (closeCause) {
+      throw new AggregateError([cause, closeCause], 'reserve and close former endpoint failed', {
+        cause: closeCause,
+      });
+    }
+
+    throw cause;
+  } finally {
+    guard.off('listening', onReady);
+    guard.off('error', onError);
+  }
+}
+
+async function closeEndpoint(guard: net.Server): Promise<void> {
+  if (!guard.listening) {
+    return;
+  }
+
+  await within(
+    new Promise<void>((resolve, reject) => {
+      guard.close((cause) => {
+        if (cause) {
+          reject(cause);
+        } else {
+          resolve();
+        }
+      });
+    }),
+    1000,
+    () => guard.close(),
+  );
 }
 
 /** Reads one bounded readiness record and removes every temporary listener. */

@@ -9,15 +9,23 @@ interface ClientOptions {
   protocol?: 2 | 3;
   database?: number;
   clientInfoTag?: string;
+  recovery?: boolean;
 }
 
 export type Client = ReturnType<typeof newClient>;
 export type Pool = ReturnType<typeof newPool>;
 
+interface TransportEvents {
+  errors: Error[];
+  reconnects: number;
+  ends: number;
+}
+
 interface OwnedClient {
   client: Client | Pool;
   errors: Error[];
-  state: { closing: boolean; closed: boolean };
+  state: { closing: boolean; closed: boolean; allowDisconnect: boolean };
+  events: TransportEvents;
   onError: (error: Error) => void;
   onEnd: () => void;
   onReconnect: () => void;
@@ -29,6 +37,7 @@ export interface Fixture {
   connect: (options?: ClientOptions) => Promise<Client>;
   connectPool: (options?: ClientOptions) => Promise<Pool>;
   close: (client: Client | Pool) => Promise<void>;
+  allowDisconnect: (client: Client | Pool, allowed: boolean) => TransportEvents;
 }
 
 export async function withFixture(
@@ -93,6 +102,17 @@ export async function withFixture(
 
         await closeClient(owned);
       },
+      allowDisconnect: (client, allowed) => {
+        const owned = clients.find((entry) => entry.client === client);
+
+        if (!owned) {
+          throw new Error('client does not belong to this fixture');
+        }
+
+        owned.state.allowDisconnect = allowed;
+
+        return owned.events;
+      },
     });
 
     await within(work, options.scenarioTimeoutMs ?? 45000, () => {
@@ -135,7 +155,11 @@ export async function withFixture(
 
     if (errors.length) {
       try {
-        server.retainFailure(label, new AggregateError(errors, `${name}: case failed`));
+        const history = clients.flatMap((owned) => owned.events.errors);
+        server.retainFailure(
+          label,
+          new AggregateError([...errors, ...history], `${name}: case failed`),
+        );
       } catch (cause) {
         errors.push(cause);
       }
@@ -281,27 +305,53 @@ function nativeOptions(server: Server, options: ClientOptions) {
       ...server.address,
       connectTimeout: 3000,
       socketTimeout: 3000,
-      reconnectStrategy: false as const,
+      reconnectStrategy: options.recovery ? reconnectDelay : (false as const),
     },
     commandOptions: { timeout: 3000 },
     disableOfflineQueue: true,
   };
 }
 
+function reconnectDelay(retries: number): number | Error {
+  if (retries >= 20) {
+    return new Error('reconnect attempts exhausted');
+  }
+
+  return Math.min(20 * (retries + 1), 100);
+}
+
 function ownClient(client: Client | Pool): OwnedClient {
   const errors: Error[] = [];
-  const state = { closing: false, closed: false };
+  const events: TransportEvents = { errors: [], reconnects: 0, ends: 0 };
+  const state = { closing: false, closed: false, allowDisconnect: false };
   const owned: OwnedClient = {
     client,
     errors,
     state,
-    onError: (error) => errors.push(error),
+    events,
+    onError: (error) => {
+      if (state.allowDisconnect) {
+        if (events.errors.length < 16) {
+          events.errors.push(error);
+        }
+      } else {
+        errors.push(error);
+      }
+    },
     onEnd: () => {
-      if (!state.closing) {
+      if (state.allowDisconnect) {
+        events.ends += 1;
+      } else if (!state.closing) {
         errors.push(new Error('unexpected client end'));
       }
     },
-    onReconnect: () => errors.push(new Error('unexpected reconnect')),
+    onReconnect: () => {
+      if (state.allowDisconnect) {
+        events.reconnects += 1;
+      } else {
+        errors.push(new Error('unexpected reconnect'));
+      }
+    },
   };
 
   client.on('error', owned.onError);
