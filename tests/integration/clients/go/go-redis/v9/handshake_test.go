@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"kgcache.test/clientharness"
 )
@@ -38,8 +39,8 @@ func TestHandshake(t *testing.T) {
 				return
 			}
 			assert.Equal(t, expected, info.Resp)
-			assert.Equal(t, "go-redis(,go1.26.9)", info.LibName)
-			assert.Equal(t, "9.22.0", info.LibVer)
+			assert.Equal(t, libraryName(""), info.LibName)
+			assert.Equal(t, redis.Version(), info.LibVer)
 		})
 	}
 }

@@ -32,12 +32,33 @@
       "ci": "required"
     },
     {
+      "id": "go-redis-v9.23.0",
+      "suiteId": "go-redis-v9",
+      "clientVersion": "v9.23.0",
+      "runtimeVersion": "1.26.9",
+      "dependencyDir": "go/go-redis/v9/profiles/go-redis-v9.23.0",
+      "protocols": [2, 3],
+      "expectedDefaultProtocol": 3,
+      "ci": "required"
+    },
+    {
       "id": "node-redis-6.2.1",
       "suiteId": "node-redis-v6",
       "clientVersion": "6.2.1",
       "runtimeVersion": "22.14.0",
       "packageManagerVersion": "10.9.2",
       "dependencyDir": "node/node-redis/v6",
+      "protocols": [2, 3],
+      "expectedDefaultProtocol": 3,
+      "ci": "required"
+    },
+    {
+      "id": "node-redis-6.2.0",
+      "suiteId": "node-redis-v6",
+      "clientVersion": "6.2.0",
+      "runtimeVersion": "22.14.0",
+      "packageManagerVersion": "10.9.2",
+      "dependencyDir": "node/node-redis/v6/profiles/node-redis-6.2.0",
       "protocols": [2, 3],
       "expectedDefaultProtocol": 3,
       "ci": "required"

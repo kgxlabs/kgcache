@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { command, withFixture } from '@/node-redis/v6/client';
+import { clientProfile, clientVersion, command, withFixture } from '@/node-redis/v6/client';
 import type { Client } from '@/node-redis/v6/client';
 import type { Server } from '@/harness/server';
 
@@ -19,7 +19,7 @@ test.each([
     const info = await command(client, client.clientInfo());
     expect(info.resp).toBe(expected);
     expect(info.libName).toBe('node-redis');
-    expect(info.libVer).toBe('6.2.1');
+    expect(info.libVer).toBe(clientVersion);
   });
 });
 
@@ -97,7 +97,7 @@ test('failure evidence names the profile and retains both assertion and transpor
 
     const bundles = fs.readdirSync(artifacts);
     expect(bundles).toHaveLength(1);
-    expect(bundles[0]).toMatch(/^node-redis-6\.2\.1-RESP2-combined-failure-/);
+    expect(bundles[0]!.startsWith(`${clientProfile}-RESP2-combined-failure-`)).toBe(true);
 
     const failure = JSON.parse(
       fs.readFileSync(path.join(artifacts, bundles[0]!, 'failure.json'), 'utf8'),

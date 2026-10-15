@@ -182,8 +182,8 @@ func poolConnectionIDs(t *testing.T, f *fixture, connections []*redis.Conn) []in
 		assert.NotContains(t, ids, info.ID, "held connections must have distinct IDs")
 		assert.Equal(t, 1, info.DB)
 		assert.Equal(t, f.protocol, info.Resp)
-		assert.Equal(t, "go-redis(pool,go1.26.9)", info.LibName)
-		assert.Equal(t, "9.22.0", info.LibVer)
+		assert.Equal(t, libraryName("pool"), info.LibName)
+		assert.Equal(t, redis.Version(), info.LibVer)
 		ids = append(ids, info.ID)
 	}
 

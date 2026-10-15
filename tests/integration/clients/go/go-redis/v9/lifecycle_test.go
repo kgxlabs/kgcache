@@ -59,8 +59,8 @@ func TestRecoveryAfterServerRestart(t *testing.T) {
 		}
 		assert.Equal(t, 1, info.DB)
 		assert.Equal(t, protocol, info.Resp)
-		assert.Equal(t, "go-redis(recovery,go1.26.9)", info.LibName)
-		assert.Equal(t, "9.22.0", info.LibVer)
+		assert.Equal(t, libraryName("recovery"), info.LibName)
+		assert.Equal(t, redis.Version(), info.LibVer)
 
 		reply, err := conn.Set(f.ctx, "after-restart", "recovered", 0).Result()
 		if !assert.NoError(t, err) || !assert.Equal(t, "OK", reply) {

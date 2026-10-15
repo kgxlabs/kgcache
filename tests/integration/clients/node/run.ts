@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 
 interface Suite {
   id: string;
@@ -38,7 +39,7 @@ interface Options {
   testArgs: string[];
 }
 
-interface NodeProfile extends Profile {
+export interface NodeProfile extends Profile {
   packageManagerVersion: string;
   suite: Suite;
   dir: string;
@@ -69,24 +70,26 @@ const suiteToolingPins = {
 };
 
 async function main(): Promise<void> {
+  const controller = new AbortController();
+  const onInterrupt = () => controller.abort(new Error('launcher interrupted'));
+  process.once('SIGINT', onInterrupt);
+  process.once('SIGTERM', onInterrupt);
+
   try {
-    await run(process.argv.slice(2));
+    await run(process.argv.slice(2), controller.signal);
   } catch (error) {
     console.error(`Node client profiles: ${errorMessage(error)}`);
     process.exitCode = error instanceof CommandError ? error.exitCode : 1;
+  } finally {
+    process.off('SIGINT', onInterrupt);
+    process.off('SIGTERM', onInterrupt);
   }
 }
 
-async function run(args: string[]): Promise<void> {
+async function run(args: string[], signal: AbortSignal): Promise<void> {
   const options = parseArgs(args);
   const rows = selectProfiles(loadRegistry(), options);
-  const first = rows[0];
-
-  if (!first) {
-    throw new Error('no Node profiles selected');
-  }
-
-  validateProject(nodeRoot, first, toolingPins);
+  validateProject(nodeRoot, projectRuntime(nodeRoot), toolingPins);
 
   for (const row of rows) {
     const runtime = fs.readFileSync(path.join(row.dir, '.node-version'), 'utf8').trim();
@@ -111,46 +114,182 @@ async function run(args: string[]): Promise<void> {
     return;
   }
 
-  await validateRuntime(rows);
+  await validateRuntime(rows, signal);
 
-  if (options.action === 'deps') {
-    await command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot);
+  if (options.action === 'validate') {
+    validateInstalled(nodeRoot, toolingPins);
+
+    for (const row of rows) {
+      console.log(`${row.id}: locked profile metadata validated (${row.suite.status} suite)`);
+    }
+
+    return;
   }
 
-  validateInstalled(nodeRoot, toolingPins);
+  if (options.action === 'deps') {
+    await command('npm', ['ci', '--no-audit', '--no-fund'], nodeRoot, signal);
+    validateInstalled(nodeRoot, toolingPins);
 
-  for (const row of rows) {
-    if (options.action === 'deps') {
-      await command('npm', ['ci', '--no-audit', '--no-fund'], row.dir);
-    }
+    // Prepare source suites for quality checks and direct native execution.
+    const suites = new Map(rows.map((row) => [row.suite.suiteDir, row.suite]));
 
-    validateInstalled(row.dir, {
-      [row.suite.package]: row.clientVersion,
-      ...suiteToolingPins,
-    });
+    for (const suite of suites.values()) {
+      const dir = registryDir(suite.suiteDir);
+      const version = dependencyPins(readJson(path.join(dir, 'package.json')))[suite.package];
 
-    if (options.action === 'test') {
-      if (row.suite.status === 'ready') {
-        await runTests(row, [
-          ...splitArguments(process.env.NODE_TEST_ARGS ?? ''),
-          ...options.testArgs,
-        ]);
-        continue;
+      if (!matches(stableVersion, version)) {
+        throw new Error(`${suite.id}: source suite must pin a stable client version`);
       }
 
-      console.log(`${row.id}: running bootstrap placeholder (client suite remains planned)`);
-      await command(
-        'npm',
-        ['test', '--', '--runTestsByPath', 'tests/bootstrap.test.ts', ...options.testArgs],
-        row.dir,
-      );
-    } else {
-      console.log(`${row.id}: locked dependencies validated (${row.suite.status} suite)`);
+      validateProject(dir, projectRuntime(dir), { [suite.package]: version, ...suiteToolingPins });
+      await command('npm', ['ci', '--no-audit', '--no-fund'], dir, signal);
+      validateInstalled(dir, { [suite.package]: version, ...suiteToolingPins });
     }
+  } else {
+    resolveTestPaths();
+    await command(
+      process.execPath,
+      ['--experimental-strip-types', '--test', 'run.test.ts'],
+      nodeRoot,
+      signal,
+    );
+  }
+
+  for (const row of rows) {
+    if (options.action === 'test' && row.suite.status !== 'ready') {
+      throw new Error(`${row.id}: client suite is still planned`);
+    }
+
+    await withProfileWorkspace(root, row, signal, async (active) => {
+      await command('npm', ['ci', '--no-audit', '--no-fund'], active.dir, signal);
+      validateInstalled(active.dir, {
+        [active.suite.package]: active.clientVersion,
+        ...suiteToolingPins,
+      });
+
+      if (options.action === 'test') {
+        await runTests(
+          active,
+          [...splitArguments(process.env.NODE_TEST_ARGS ?? ''), ...options.testArgs],
+          signal,
+        );
+      } else {
+        console.log(`${active.id}: locked dependencies validated (${active.suite.status} suite)`);
+      }
+    });
   }
 }
 
-async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
+export async function withProfileWorkspace(
+  sourceRoot: string,
+  row: NodeProfile,
+  signal: AbortSignal,
+  body: (active: NodeProfile) => Promise<void>,
+): Promise<void> {
+  signal.throwIfAborted();
+
+  const workspace = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), `kgcache-${row.id}-`)));
+  const errors: unknown[] = [];
+  console.log(`${row.id}: isolated workspace: ${workspace}`);
+
+  try {
+    const active = { ...row, dir: path.join(workspace, row.suite.suiteDir) };
+
+    for (const relative of [row.suite.suiteDir, 'node/harness']) {
+      fs.cpSync(path.join(sourceRoot, relative), path.join(workspace, relative), {
+        recursive: true,
+        filter: (source) => {
+          signal.throwIfAborted();
+
+          if (
+            [
+              'profiles',
+              'node_modules',
+              '.git',
+              '.workspaces',
+              'coverage',
+              'dist',
+              'build',
+              'test-artifacts',
+            ].includes(path.basename(source))
+          ) {
+            return false;
+          }
+
+          if (fs.lstatSync(source).isSymbolicLink()) {
+            throw new Error(`workspace source must not be a symbolic link: ${source}`);
+          }
+
+          return true;
+        },
+      });
+    }
+
+    for (const name of ['package.json', 'tsconfig.json']) {
+      copyRegularFile(path.join(sourceRoot, 'node', name), path.join(workspace, 'node', name));
+    }
+
+    for (const name of ['package.json', 'package-lock.json', '.node-version']) {
+      copyRegularFile(path.join(row.dir, name), path.join(active.dir, name));
+    }
+
+    signal.throwIfAborted();
+    await body(active);
+  } catch (cause) {
+    errors.push(cause);
+  } finally {
+    try {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    } catch (cause) {
+      errors.push(cause);
+    }
+  }
+
+  if (errors.length === 1) {
+    throw errors[0];
+  }
+
+  if (errors.length) {
+    throw new AggregateError(errors, 'profile execution and workspace cleanup failed');
+  }
+}
+
+function copyRegularFile(source: string, destination: string): void {
+  if (!fs.lstatSync(source).isFile()) {
+    throw new Error(`workspace source must be a regular file: ${source}`);
+  }
+
+  fs.copyFileSync(source, destination);
+}
+
+function projectRuntime(
+  dir: string,
+): Pick<NodeProfile, 'runtimeVersion' | 'packageManagerVersion'> {
+  const manifest = readJson(path.join(dir, 'package.json'));
+  const engines = object(manifest.engines, `${dir}: engines`);
+
+  if (!matches(stableVersion, engines.node) || !matches(stableVersion, engines.npm)) {
+    throw new Error(`${dir}: project runtimes must be exact stable pins`);
+  }
+
+  return { runtimeVersion: engines.node, packageManagerVersion: engines.npm };
+}
+
+function resolveTestPaths(): void {
+  const binary = process.env.KGCACHE_BIN;
+
+  if (!binary || !path.isAbsolute(binary) || !fs.statSync(binary).isFile()) {
+    throw new Error('KGCACHE_BIN must be an absolute regular executable path');
+  }
+
+  fs.accessSync(binary, fs.constants.X_OK);
+
+  if (process.env.KGCACHE_TEST_ARTIFACT_DIR) {
+    process.env.KGCACHE_TEST_ARTIFACT_DIR = path.resolve(process.env.KGCACHE_TEST_ARTIFACT_DIR);
+  }
+}
+
+async function runTests(row: NodeProfile, testArgs: string[], signal: AbortSignal): Promise<void> {
   const binary = process.env.KGCACHE_BIN;
 
   if (!binary || !path.isAbsolute(binary)) {
@@ -173,7 +312,44 @@ async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
       'npm',
       ['test', '--', ...testArgs, '--json', `--outputFile=${resultFile}`],
       row.dir,
+      signal,
+      false,
+      { KGCACHE_CLIENT_PROFILE: row.id },
     );
+    const results = readJson(resultFile);
+
+    if (!Array.isArray(results.testResults)) {
+      throw new Error(`${row.id}: Jest did not report test results`);
+    }
+
+    let executed = 0;
+    const clientRoot = path.join(row.dir, 'tests') + path.sep;
+
+    for (const raw of results.testResults as unknown[]) {
+      const suite = object(raw, 'Jest suite');
+
+      if (typeof suite.name !== 'string' || !suite.name.startsWith(clientRoot)) {
+        continue;
+      }
+
+      if (!Array.isArray(suite.assertionResults)) {
+        throw new Error(`${row.id}: missing client assertion results`);
+      }
+
+      for (const assertion of suite.assertionResults as unknown[]) {
+        const { status } = object(assertion, 'Jest assertion');
+
+        if (status === 'passed' || status === 'failed') {
+          executed += 1;
+        }
+      }
+    }
+
+    if (!executed) {
+      throw new Error(`${row.id}: zero executed client cases (fixture checks do not count)`);
+    }
+
+    console.log(`${row.id}: ${executed} client cases executed`);
   } catch (cause) {
     try {
       fs.writeFileSync(
@@ -205,41 +381,6 @@ async function runTests(row: NodeProfile, testArgs: string[]): Promise<void> {
 
     throw cause;
   }
-
-  const results = readJson(resultFile);
-
-  if (!Array.isArray(results.testResults)) {
-    throw new Error(`${row.id}: Jest did not report test results`);
-  }
-
-  let executed = 0;
-  const clientRoot = path.join(row.dir, 'tests') + path.sep;
-
-  for (const raw of results.testResults as unknown[]) {
-    const suite = object(raw, 'Jest suite');
-
-    if (typeof suite.name !== 'string' || !suite.name.startsWith(clientRoot)) {
-      continue;
-    }
-
-    if (!Array.isArray(suite.assertionResults)) {
-      throw new Error(`${row.id}: missing client assertion results`);
-    }
-
-    for (const assertion of suite.assertionResults as unknown[]) {
-      const { status } = object(assertion, 'Jest assertion');
-
-      if (status === 'passed' || status === 'failed') {
-        executed += 1;
-      }
-    }
-  }
-
-  if (!executed) {
-    throw new Error(`${row.id}: zero executed client cases (fixture checks do not count)`);
-  }
-
-  console.log(`${row.id}: ${executed} client cases executed`);
 }
 
 function splitArguments(input: string): string[] {
@@ -507,10 +648,6 @@ function selectProfiles({ profiles, suites }: Registry, options: Options): NodeP
       continue;
     }
 
-    if (profile.dependencyDir !== suite.suiteDir) {
-      throw new Error(`${profile.id}: separate dependency workspaces require the step 04 runner`);
-    }
-
     if (!profile.packageManagerVersion) {
       throw new Error(`${profile.id}: missing npm pin`);
     }
@@ -530,7 +667,11 @@ function selectProfiles({ profiles, suites }: Registry, options: Options): NodeP
   return selected;
 }
 
-function validateProject(dir: string, row: NodeProfile, pins: Record<string, string>): void {
+function validateProject(
+  dir: string,
+  row: Pick<NodeProfile, 'runtimeVersion' | 'packageManagerVersion'>,
+  pins: Record<string, string>,
+): void {
   const manifest = readJson(path.join(dir, 'package.json'));
   const lock = readJson(path.join(dir, 'package-lock.json'));
   const engines = object(manifest.engines, `${dir}: engines`);
@@ -568,7 +709,7 @@ function validateProject(dir: string, row: NodeProfile, pins: Record<string, str
   }
 }
 
-async function validateRuntime(rows: NodeProfile[]): Promise<void> {
+async function validateRuntime(rows: NodeProfile[], signal: AbortSignal): Promise<void> {
   const first = rows[0];
 
   if (!first) {
@@ -593,7 +734,7 @@ async function validateRuntime(rows: NodeProfile[]): Promise<void> {
     );
   }
 
-  const npmVersion = await command('npm', ['--version'], nodeRoot, true);
+  const npmVersion = await command('npm', ['--version'], nodeRoot, signal, true);
 
   if (npmVersion !== first.packageManagerVersion) {
     throw new Error(
@@ -673,8 +814,12 @@ async function command(
   executable: string,
   args: string[],
   dir: string,
+  signal: AbortSignal,
   capture = false,
+  extraEnv: NodeJS.ProcessEnv = {},
 ): Promise<string> {
+  signal.throwIfAborted();
+
   const child = spawn(executable, args, {
     cwd: dir,
     stdio: capture ? ['inherit', 'pipe', 'inherit'] : 'inherit',
@@ -682,6 +827,7 @@ async function command(
     detached: true,
     env: {
       ...process.env,
+      ...extraEnv,
       ...(process.env.KGCACHE_TEST_ARTIFACT_DIR
         ? { KGCACHE_TEST_ARTIFACT_DIR: path.resolve(process.env.KGCACHE_TEST_ARTIFACT_DIR) }
         : {}),
@@ -722,10 +868,25 @@ async function command(
     forceTimer = setTimeout(() => terminate('SIGKILL'), 3000);
   }, nativeTimeoutMs);
 
+  const onAbort = () => {
+    failure = new Error('native command cancelled', { cause: signal.reason });
+    terminate('SIGTERM');
+    clearTimeout(forceTimer);
+    forceTimer = setTimeout(() => terminate('SIGKILL'), 3000);
+  };
+
+  signal.addEventListener('abort', onAbort, { once: true });
+
+  if (signal.aborted) {
+    onAbort();
+  }
+
   try {
     const result = await closed;
 
-    if (expired && child.pid) {
+    if (child.pid && processGroupExists(child.pid)) {
+      failure ??= new Error('native command retained a process group after exit');
+      terminate('SIGTERM');
       const deadline = Date.now() + 3500;
 
       while (processGroupExists(child.pid) && Date.now() < deadline) {
@@ -747,6 +908,7 @@ async function command(
   } finally {
     clearTimeout(timer);
     clearTimeout(forceTimer);
+    signal.removeEventListener('abort', onAbort);
     child.removeAllListeners();
     child.stdout?.removeAllListeners();
   }
@@ -791,4 +953,6 @@ class CommandError extends Error {
   }
 }
 
-await main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}

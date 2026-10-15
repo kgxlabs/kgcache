@@ -39,9 +39,9 @@ func TestLiveClientListings(t *testing.T) {
 			db, protocol   int
 			label, version string
 		}{
-			{callerConn, 0, protocol, "go-redis(,go1.26.9)", "9.22.0"},
-			{peerConn, 1, peerProtocol, "go-redis(peer,go1.26.9)", "peer-version"},
-			{observerConn, 0, protocol, "go-redis(observer,go1.26.9)", "9.22.0"},
+			{callerConn, 0, protocol, libraryName(""), redis.Version()},
+			{peerConn, 1, peerProtocol, libraryName("peer"), "peer-version"},
+			{observerConn, 0, protocol, libraryName("observer"), redis.Version()},
 		} {
 			info, err := entry.conn.ClientInfo(f.ctx).Result()
 			if !assert.NoError(t, err) || !assert.Positive(t, info.ID) {

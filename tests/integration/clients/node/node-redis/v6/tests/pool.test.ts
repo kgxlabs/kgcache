@@ -4,7 +4,14 @@ import { once } from 'node:events';
 import { parseReport } from '@/harness/report';
 import { within } from '@/harness/server';
 import type { Server } from '@/harness/server';
-import { command, poll, protocols, withFixture, withPoolConnections } from '@/node-redis/v6/client';
+import {
+  clientVersion,
+  command,
+  poll,
+  protocols,
+  withFixture,
+  withPoolConnections,
+} from '@/node-redis/v6/client';
 import type { Client, Pool } from '@/node-redis/v6/client';
 
 test.each(protocols)('pool expands and reuses idle connections in RESP %i', async (protocol) => {
@@ -145,7 +152,7 @@ async function connectionIDs(clients: Client[], protocol: 2 | 3): Promise<bigint
       db: '1',
       resp: String(protocol),
       'lib-name': 'node-redis(pool)',
-      'lib-ver': '6.2.1',
+      'lib-ver': clientVersion,
     });
     expect(info.id).toBeGreaterThan(0n);
     ids.push(info.id);

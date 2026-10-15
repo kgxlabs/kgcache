@@ -12,6 +12,6 @@
     "paths": { "@/*": ["./*.ts"] },
     "types": ["node"]
   },
-  "include": ["run.ts", "eslint.config.ts", "harness/**/*.ts"],
+  "include": ["run.ts", "run.test.ts", "eslint.config.ts", "harness/**/*.ts"],
   "exclude": ["harness/**/*.test.ts"]
 }
