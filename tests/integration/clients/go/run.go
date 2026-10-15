@@ -691,10 +691,15 @@ func validateManifest(row selection) error {
 		return err
 	}
 
+	testify, err := testifyVersion(row.dir)
+	if err != nil {
+		return err
+	}
+
 	pins := map[string]string{
 		"go":                          row.RuntimeVersion,
 		row.suite.Package:             row.ClientVersion,
-		"github.com/stretchr/testify": "v1.11.1",
+		"github.com/stretchr/testify": testify,
 	}
 
 	for name, version := range pins {
@@ -802,9 +807,14 @@ func validateResolvedVersions(ctx context.Context, root string, row selection) e
 	}
 
 	decoder := json.NewDecoder(strings.NewReader(string(output)))
+	testify, err := testifyVersion(row.dir)
+	if err != nil {
+		return err
+	}
+
 	expected := map[string]string{
 		row.suite.Package:             row.ClientVersion,
-		"github.com/stretchr/testify": "v1.11.1",
+		"github.com/stretchr/testify": testify,
 		"kgcache.test/clientharness":  "v0.0.0",
 	}
 
@@ -843,6 +853,21 @@ func validateResolvedVersions(ctx context.Context, root string, row selection) e
 	}
 
 	return nil
+}
+
+func testifyVersion(dir string) (string, error) {
+	manifest, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return "", fmt.Errorf("read Testify pin: %w", err)
+	}
+
+	pin := regexp.MustCompile(`(?m)^\s*github\.com/stretchr/testify\s+v([^\s]+)\s*(?://[^\n]*)?$`)
+	matches := pin.FindAllSubmatch(manifest, -1)
+	if len(matches) != 1 || !stableVersion.Match(matches[0][1]) {
+		return "", errors.New("go.mod must pin one exact stable Testify version")
+	}
+
+	return "v" + string(matches[0][1]), nil
 }
 
 func registryDir(root, relative string) (string, error) {

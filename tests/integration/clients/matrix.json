@@ -32,6 +32,16 @@
       "ci": "required"
     },
     {
+      "id": "go-redis-v9.23.0",
+      "suiteId": "go-redis-v9",
+      "clientVersion": "v9.23.0",
+      "runtimeVersion": "1.26.9",
+      "dependencyDir": "go/go-redis/v9/profiles/go-redis-v9.23.0",
+      "protocols": [2, 3],
+      "expectedDefaultProtocol": 3,
+      "ci": "required"
+    },
+    {
       "id": "node-redis-6.2.1",
       "suiteId": "node-redis-v6",
       "clientVersion": "6.2.1",

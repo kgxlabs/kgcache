@@ -63,8 +63,8 @@ func TestCallerReports(t *testing.T) {
 				"db":        "0",
 				"cmd":       "client|info",
 				"resp":      fmt.Sprint(expected),
-				"lib-name":  "go-redis(,go1.26.9)",
-				"lib-ver":   "9.22.0",
+				"lib-name":  libraryName(""),
+				"lib-ver":   redis.Version(),
 				"name":      "",
 				"sub":       "0",
 				"psub":      "0",
@@ -118,7 +118,7 @@ func TestCallerReports(t *testing.T) {
 				return
 			}
 			assert.Equal(t, row.id, retained[0].id)
-			assert.Equal(t, "go-redis(retained-name,go1.26.9)", retained[0].fields["lib-name"])
+			assert.Equal(t, libraryName("retained-name"), retained[0].fields["lib-name"])
 			assert.Equal(t, "9.8.7", retained[0].fields["lib-ver"])
 			assert.Greater(t, retained[0].counters["tot-cmds"], row.counters["tot-cmds"])
 		})

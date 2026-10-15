@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -46,7 +48,11 @@ func newFixture(t *testing.T, protocol int, options fixtureOptions) *fixture {
 		protocolName = "RESPdefault"
 	}
 
-	options.FailureLabel = fmt.Sprintf("go-redis-v9.22.0-%s-%s", protocolName, t.Name())
+	profile := os.Getenv("KGCACHE_CLIENT_PROFILE")
+	if profile == "" {
+		profile = "go-redis-v" + redis.Version()
+	}
+	options.FailureLabel = fmt.Sprintf("%s-%s-%s", profile, protocolName, t.Name())
 	server, err := clientharness.New(options.Options)
 	if err != nil {
 		t.Fatal(err)
@@ -180,4 +186,8 @@ func poll(ctx context.Context, timeout time.Duration, observe func(context.Conte
 		case <-timer.C:
 		}
 	}
+}
+
+func libraryName(suffix string) string {
+	return fmt.Sprintf("go-redis(%s,%s)", suffix, runtime.Version())
 }

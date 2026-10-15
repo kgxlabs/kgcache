@@ -3,11 +3,25 @@
 The go-redis v9 and node-redis v6 suites run real clients against kgcache with
 explicit RESP2 and RESP3, plus a default handshake check. They cover strings and binary values,
 database selection, client reports, SET options and expiration, ordered pipelines,
-command errors, snapshot reload, and background persistence replies.
+command errors, snapshot reload, background persistence replies, pools, reconnects,
+concurrent clients, database isolation, and shutdown cleanup.
 
 Use Go 1.26.9 and Node 22.14.0 with its bundled npm 10.9.2. Put those tools on
 `PATH`. The launchers check installed versions and never download runtimes.
 The server build and Zig tests need only Zig 0.16.0.
+
+## Tested versions
+
+Each row runs the full suite with RESP2, RESP3, and the default handshake. Every
+listed profile is required in CI. These results apply to the exact versions shown.
+
+| Profile | Client | Runtime | Package manager |
+| --- | --- | --- | --- |
+| go-redis-v9.22.0 | go-redis v9.22.0 | Go 1.26.9 | Go modules |
+| go-redis-v9.23.0 | go-redis v9.23.0 | Go 1.26.9 | Go modules |
+| node-redis-6.2.1 | node-redis 6.2.1 | Node 22.14.0 | npm 10.9.2 |
+
+## Running tests
 
 You can also unpack the official Go distribution into `.client-tools/go` and
 the official Node distribution into `.client-tools/node` at the repository root.
@@ -48,7 +62,7 @@ An alternate Go executable can be selected with `make GO=/path/to/go check-go`.
 `test-go` and `test-node` build the
 Debug server and prepare dependencies. [Client CI](../../../.github/workflows/client-tests.yml)
 has separate Go and Node jobs after [unit and process integration tests](../../../.github/workflows/zig-tests.yml)
-pass. Each client job runs its pinned compatibility profile and
+pass. Each client job runs one pinned compatibility profile and
 uploads failure evidence.
 
 Select a registered profile or filter required profiles by library:
@@ -63,7 +77,11 @@ make test-node CLIENT_PROFILE=node-redis-6.2.1 NODE_TEST_ARGS='--testPathPattern
 
 The Node example selects its pipeline cases. Conflicting
 selectors, unknown profiles, and profiles for the wrong language fail. Default
-language commands select all required profiles. Use selectors with individual
+language commands select all required profiles. Each selected profile gets a
+temporary copy of its suite and shared fixture with its own locked dependencies.
+The launchers verify the resolved client version and remove the workspace after
+success, failure, or cancellation. Artifacts stay outside that workspace.
+Baseline manifests and locks remain unchanged. Use selectors with individual
 language commands; aggregate commands cover both required language sets.
 
 Each native launcher accepts `list`, `validate`, `deps`, or `test`, followed by

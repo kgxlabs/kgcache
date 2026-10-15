@@ -8,14 +8,26 @@ permissions:
 
 jobs:
   go-redis:
-    name: go-redis v9.22.0 tests
+    name: go-redis ${{ matrix.version }} tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: go-redis-v9.22.0
+            version: v9.22.0
+            go: '1.26.9'
+            lock: tests/integration/clients/go/go-redis/v9/go.sum
+          - profile: go-redis-v9.23.0
+            version: v9.23.0
+            go: '1.26.9'
+            lock: tests/integration/clients/go/go-redis/v9/profiles/go-redis-v9.23.0/go.sum
     env:
-      CLIENT_PROFILE: go-redis-v9.22.0
+      CLIENT_PROFILE: ${{ matrix.profile }}
       GOTOOLCHAIN: local
       GOWORK: 'off'
-      KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/go-redis-v9.22.0
+      KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/${{ matrix.profile }}
 
     steps:
       - name: Check out repository
@@ -26,9 +38,9 @@ jobs:
       - name: Install pinned Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.9'
+          go-version: ${{ matrix.go }}
           cache: true
-          cache-dependency-path: tests/integration/clients/go/go-redis/v9/go.sum
+          cache-dependency-path: ${{ matrix.lock }}
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -45,14 +57,14 @@ jobs:
         run: make check-go
 
       - name: Run go-redis compatibility cases against this checkout
-        run: make test-go CLIENT_PROFILE=go-redis-v9.22.0
+        run: make test-go CLIENT_PROFILE="$CLIENT_PROFILE"
 
       - name: Upload go-redis failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: go-redis-v9.22.0-failures
-          path: test-artifacts/go-redis-v9.22.0
+          name: ${{ matrix.profile }}-failures
+          path: test-artifacts/${{ matrix.profile }}
           if-no-files-found: ignore
           retention-days: 7
 
