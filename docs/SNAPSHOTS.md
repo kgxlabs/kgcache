@@ -112,11 +112,19 @@ tick 2: waitpid(WNOHANG) → still running → no-op
 tick 3: waitpid(WNOHANG) → still running → no-op
 tick 4: waitpid(WNOHANG) → exited
           ├─ success: account for the captured changes
-          └─ failure: keep all changes dirty; the child attempts to log its source
+          └─ failure: keep all changes dirty; the parent reports the failure
         then clear the in-progress flag
 ```
 
-If the child has not exited yet, the poll is a no-op. Once it has, `PersistenceState` clears the recorded child, returns its status and captured change count, and keeps the save claim active until the cron loop finishes accounting for the result. A successful child marks the captured changes as saved. A failed child leaves every change dirty. The child attempts to report a failed save through the logger before exiting; cron does not report an ordinary failed exit again. Cron does report a reaper error if waiting for the child fails. The cron loop releases the save claim only after this work is complete.
+If the child has not exited yet, the poll is a no-op. Once it has,
+`PersistenceState` clears the recorded child, returns its status and captured
+change count, and keeps the save claim active until cron finishes accounting
+for the result. A successful child marks the captured changes as saved. A
+failed child leaves every change dirty. The child exits without logging;
+the parent reports `BackgroundSaveFailed` for an ordinary exit of 1, or the
+existing reaper error for a wait or abnormal-exit failure. The child's original
+error and trace are temporarily unavailable. Cron releases the save claim only
+after this work is complete. See [Errors and logging](ERRORS.md).
 
 During shutdown, kgcache stops accepting work and stops cron, then drains and
 joins all client workers. A worker can start `BGSAVE` while it is finishing a

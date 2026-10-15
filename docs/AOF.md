@@ -106,6 +106,12 @@ rewrite does not publish its base. The server tries to delete the incomplete
 base and keeps the manifest and incremental files that contain writes. If
 deletion fails, startup reconciliation can remove the orphaned file later.
 
+The parent reports an ordinary failed child exit as `AofRewriteFailed`, even
+when rollback succeeds. The child's original error and trace are temporarily
+unavailable. A failure already reported by cron is not logged again during
+shutdown. It still counts as a shutdown error if shutdown handles that
+completion. See [Errors and logging](ERRORS.md).
+
 Rewrite completion happens before the final AOF flush and sync described
 above. The live AOF file closes only after the rewrite is settled and that
 final flush is attempted. If rewrite state cannot be settled, shutdown leaves

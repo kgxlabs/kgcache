@@ -12,7 +12,7 @@ source to a boundary that can report it.
 | Application | Report configuration, server creation, runtime, and shutdown failures. Return a nonzero process status. |
 | Connection | Send a fixed RESP error for expected client errors. Report internal failures once and send a generic RESP error when output is safe. Report unexpected read/write failures once with their original source. |
 | Cron | Report failed automatic work, then retry on a later tick when appropriate. A busy save or rewrite is an expected condition. |
-| Persistence child | Attempt to report a failed save or rewrite before exiting. Cron accounts for an ordinary failed exit without repeating that report. |
+| Persistence child | Exit with status 0 on success or 1 on a caught failure. The parent reports a failed operation once through cron or shutdown. |
 | Server shutdown | Report failed child exits, wait failures, and result handling failures. Return the first shutdown error after completing remaining safe cleanup. |
 
 A failed operation and a failed cleanup are separate errors, so each can have
@@ -42,23 +42,30 @@ messages to stdout and error events to stderr. `NoopLogger` and `TestLogger`
 use the same interface, so domain code can run with either one without changes.
 The logger implementation must handle concurrent calls.
 
-Terminal reports pass the original error and `@errorReturnTrace()` to
-`logger.err`. A trace describes the error return path, not whether an
-operation partly succeeded. It can be absent if error return tracing is
-disabled by the build or unavailable at the call site. The project build
+Reports from operations within the parent pass the original error and
+`@errorReturnTrace()` to `logger.err`. A trace describes the error return path,
+not whether an operation partly succeeded. It can be absent if error return
+tracing is disabled by the build or unavailable at the call site. The project build
 enables tracing for the executable and tests in every optimization mode,
 including release modes. Logger sinks must consume a trace during the call;
 they cannot keep its pointer. `DefaultLogger` ignores its own output failures
 because it has no other sink through which to report them.
 
-Persistence children currently use the borrowed logger directly to report
-their own errors. The production application passes `DefaultLogger`. Sending
-child errors to the parent through a pipe is tracked in issue #118. The
-current logger uses a mutex for threads, and its behavior after `fork()` has
-not been proven safe in all conditions. During shutdown, the parent also logs
-a failed child exit after reaping it. The parent knows the exit status, but
-does not receive the child's source error, so both processes may report the
-same failure until child-to-parent error reporting is available.
+Persistence children do not call the logger. When a `BGSAVE` or
+`BGREWRITEAOF` child exits with status 1, the parent reports
+`BackgroundSaveFailed` or `AofRewriteFailed`. The original child error,
+failing stage, and trace are temporarily unavailable. Generic completion
+reports carry no trace; abnormal exits and wait failures retain the errors
+the parent can identify. A failed rewrite is still reported when its rollback
+succeeds. A cached AOF failure is reported once across cron retries and shutdown.
+
+This is a temporary mitigation for inherited logger locks. Background
+persistence remains experimental: other inherited runtime locks may still
+block child work, and shutdown has no strict deadline. Source-aware reporting
+and the remaining child writer review are tracked in
+[issue #118](https://github.com/kgxlabs/kgcache/issues/118), standard-stream
+collection in [issue #227](https://github.com/kgxlabs/kgcache/issues/227),
+and shutdown budgets in [issue #162](https://github.com/kgxlabs/kgcache/issues/162).
 
 Tests may ignore errors while removing scratch files or closing a backend in
 deferred fixture cleanup. Those cleanup calls are outside the assertion under
