@@ -1,9 +1,12 @@
 import { createClient, createClientPool } from 'redis';
+import { createRequire } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Server, within } from '@/harness/server';
 import type { ServerOptions } from '@/harness/server';
 
 export const protocols = [2, 3] as const;
+export const clientVersion = installedClientVersion();
+export const clientProfile = process.env.KGCACHE_CLIENT_PROFILE ?? `node-redis-${clientVersion}`;
 
 interface ClientOptions {
   protocol?: 2 | 3;
@@ -46,7 +49,7 @@ export async function withFixture(
   body: (fixture: Fixture) => Promise<void>,
   options: ServerOptions & { scenarioTimeoutMs?: number } = {},
 ): Promise<void> {
-  const label = `node-redis-6.2.1-RESP${protocol ?? 'default'}-${name}`;
+  const label = `${clientProfile}-RESP${protocol ?? 'default'}-${name}`;
   const server = new Server({ ...options, failureLabel: label });
   const clients: OwnedClient[] = [];
   const controller = new AbortController();
@@ -391,4 +394,20 @@ function destroy(
   if (client.isOpen) {
     client.destroy();
   }
+}
+
+function installedClientVersion(): string {
+  const manifest: unknown = createRequire(import.meta.url)('redis/package.json');
+
+  if (
+    typeof manifest !== 'object'
+    || manifest === null
+    || !('version' in manifest)
+    || typeof manifest.version !== 'string'
+    || !/^\d+\.\d+\.\d+$/.test(manifest.version)
+  ) {
+    throw new Error('installed redis package must declare an exact stable version');
+  }
+
+  return manifest.version;
 }

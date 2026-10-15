@@ -1,5 +1,5 @@
 import { parseReport } from '@/harness/report';
-import { command, poll, protocols, withFixture } from '@/node-redis/v6/client';
+import { clientVersion, command, poll, protocols, withFixture } from '@/node-redis/v6/client';
 
 test.each(protocols)('CLIENT LIST retains independent live peers in RESP %i', async (protocol) => {
   await withFixture('live-client-list', protocol, async ({ connect, close, signal }) => {
@@ -25,7 +25,7 @@ test.each(protocols)('CLIENT LIST retains independent live peers in RESP %i', as
       db: '0',
       resp: String(protocol),
       'lib-name': 'node-redis',
-      'lib-ver': '6.2.1',
+      'lib-ver': clientVersion,
     });
     expect(rows.find((row) => row.id === peerInfo.id)!.fields).toMatchObject({
       db: '1',

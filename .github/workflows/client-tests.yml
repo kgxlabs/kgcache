@@ -69,12 +69,27 @@ jobs:
           retention-days: 7
 
   node-redis:
-    name: node-redis 6.2.1 tests
+    name: node-redis ${{ matrix.version }} tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: node-redis-6.2.1
+            version: 6.2.1
+            node: '22.14.0'
+            npm: '10.9.2'
+            lock: tests/integration/clients/node/node-redis/v6/package-lock.json
+          - profile: node-redis-6.2.0
+            version: 6.2.0
+            node: '22.14.0'
+            npm: '10.9.2'
+            lock: tests/integration/clients/node/node-redis/v6/profiles/node-redis-6.2.0/package-lock.json
     env:
-      CLIENT_PROFILE: node-redis-6.2.1
-      KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/node-redis-6.2.1
+      CLIENT_PROFILE: ${{ matrix.profile }}
+      NPM_VERSION: ${{ matrix.npm }}
+      KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/${{ matrix.profile }}
 
     steps:
       - name: Check out repository
@@ -85,15 +100,15 @@ jobs:
       - name: Install pinned Node and bundled npm
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '22.14.0'
+          node-version: ${{ matrix.node }}
           package-manager-cache: false
           cache: npm
           cache-dependency-path: |
             tests/integration/clients/node/package-lock.json
-            tests/integration/clients/node/node-redis/v6/package-lock.json
+            ${{ matrix.lock }}
 
       - name: Verify bundled npm
-        run: test "$(npm --version)" = '10.9.2'
+        run: test "$(npm --version)" = "$NPM_VERSION"
 
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
@@ -110,13 +125,13 @@ jobs:
         run: make check-node
 
       - name: Run node-redis compatibility cases against this checkout
-        run: make test-node CLIENT_PROFILE=node-redis-6.2.1
+        run: make test-node CLIENT_PROFILE="$CLIENT_PROFILE"
 
       - name: Upload node-redis failure evidence
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: node-redis-6.2.1-failures
-          path: test-artifacts/node-redis-6.2.1
+          name: ${{ matrix.profile }}-failures
+          path: test-artifacts/${{ matrix.profile }}
           if-no-files-found: ignore
           retention-days: 7

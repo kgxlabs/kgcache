@@ -20,6 +20,7 @@ listed profile is required in CI. These results apply to the exact versions show
 | go-redis-v9.22.0 | go-redis v9.22.0 | Go 1.26.9 | Go modules |
 | go-redis-v9.23.0 | go-redis v9.23.0 | Go 1.26.9 | Go modules |
 | node-redis-6.2.1 | node-redis 6.2.1 | Node 22.14.0 | npm 10.9.2 |
+| node-redis-6.2.0 | node-redis 6.2.0 | Node 22.14.0 | npm 10.9.2 |
 
 ## Running tests
 

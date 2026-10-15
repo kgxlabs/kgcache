@@ -1,7 +1,14 @@
 import fs from 'node:fs';
 import { parseReport } from '@/harness/report';
 import type { Server } from '@/harness/server';
-import { command, poll, protocols, withFixture, withPoolConnections } from '@/node-redis/v6/client';
+import {
+  clientVersion,
+  command,
+  poll,
+  protocols,
+  withFixture,
+  withPoolConnections,
+} from '@/node-redis/v6/client';
 import type { Client } from '@/node-redis/v6/client';
 
 test.each(protocols)(
@@ -40,7 +47,7 @@ test.each(protocols)(
         db: 1,
         resp: protocol,
         libName: 'node-redis(recovery)',
-        libVer: '6.2.1',
+        libVer: clientVersion,
       });
 
       const observer = await connect();

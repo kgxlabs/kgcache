@@ -1,6 +1,6 @@
 import { RESP_TYPES } from 'redis';
 import { parseReport } from '@/harness/report';
-import { command, withFixture } from '@/node-redis/v6/client';
+import { clientVersion, command, withFixture } from '@/node-redis/v6/client';
 
 test.each([2 as const, 3 as const, undefined])(
   'caller report and identity RESP %s',
@@ -30,7 +30,7 @@ test.each([2 as const, 3 as const, undefined])(
         cmd: 'client|info',
         resp: String(protocol ?? 3),
         'lib-name': 'node-redis',
-        'lib-ver': '6.2.1',
+        'lib-ver': clientVersion,
         name: '',
         sub: '0',
         psub: '0',
