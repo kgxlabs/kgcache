@@ -22,6 +22,7 @@ type clientOptions struct {
 	protocol       int
 	identitySuffix string
 	poolSize       int
+	recovery       bool
 }
 
 type fixtureOptions struct {
@@ -97,12 +98,19 @@ func (f *fixture) client(t *testing.T, options clientOptions) *redis.Client {
 		idleTimeout = time.Minute
 	}
 
+	maxRetries := -1
+	if options.recovery {
+		maxRetries = 2
+	}
+
 	client := redis.NewClient(&redis.Options{
 		Addr:                  f.server.Address(),
 		Protocol:              protocol,
 		DB:                    options.db,
 		IdentitySuffix:        options.identitySuffix,
-		MaxRetries:            -1,
+		MaxRetries:            maxRetries,
+		MinRetryBackoff:       20 * time.Millisecond,
+		MaxRetryBackoff:       100 * time.Millisecond,
 		PoolSize:              poolSize,
 		MaxActiveConns:        poolSize,
 		ConnMaxIdleTime:       idleTimeout,
