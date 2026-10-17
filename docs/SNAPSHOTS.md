@@ -135,6 +135,9 @@ it reports a timeout and sends `SIGKILL` to remaining children. Zero skips the
 graceful wait, but completed children are still collected before termination.
 Shutdown does not retry a failed save.
 
+The budget starts once, after workers join. Finishing an operation does not
+reset the time limit.
+
 After termination, the server allows up to 1000 ms to collect child exits. If a
 child remains unresolved, it returns an error and retains resources still needed
 by persistence. This bounds child polling, not disk operations, client draining,

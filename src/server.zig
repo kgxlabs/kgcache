@@ -203,8 +203,11 @@ pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
         cleanup_error = err;
     };
 
+    var shutdown_context = persistence_drain.Context.init(self._io, .{
+        .grace_ms = self._config.persistence_shutdown_grace_ms,
+    });
     const journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
-    const drain_result = persistence_drain.runWithOptions(self._io, self._logger, &self._persistence_state, journal, .{ .grace_ms = self._config.persistence_shutdown_grace_ms });
+    const drain_result = shutdown_context.run(self._io, self._logger, &self._persistence_state, journal);
 
     if (cleanup_error == null) cleanup_error = drain_result.err;
     switch (drain_result.status) {
