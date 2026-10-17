@@ -28,6 +28,7 @@ const definitions = [_]DirectiveDefinition{
     integerDirective("active-expire-batch-size", "active_expire_batch_size", i8, 1, std.math.maxInt(i8)),
     integerDirective("active-expire-threshold-percent", "active_expire_threshold_percent", i8, 1, 100),
     booleanDirective("exclusive-bg-persistence", "exclusive_bg_persistence"),
+    integerDirective("persistence-shutdown-grace-ms", "persistence_shutdown_grace_ms", u32, 0, std.math.maxInt(u32)),
     saveDirective(),
     booleanDirective("appendonly", "append_only"),
     enumDirective("appendfsync", "append_fsync", Config.AppendFsync),
@@ -374,7 +375,7 @@ test {
 test "find returns static definitions and matches names case-sensitively" {
     const testing = std.testing;
     const entries = all();
-    try testing.expectEqual(21, entries.len);
+    try testing.expectEqual(22, entries.len);
 
     for (entries, 0..) |definition, index| {
         try testing.expect(find(definition.name).? == &entries[index]);
