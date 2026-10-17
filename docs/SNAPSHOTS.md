@@ -129,9 +129,17 @@ after this work is complete. See [Errors and logging](ERRORS.md).
 During shutdown, kgcache stops accepting work and stops cron, then drains and
 joins all client workers. A worker can start `BGSAVE` while it is finishing a
 request, so the server checks for tracked children after the workers have
-joined. For each tracked child, it logs `BGSAVE` and the PID immediately before
-waiting. The wait has no deadline: a child that never exits can delay shutdown
-indefinitely. Shutdown does not terminate the child or retry a failed save.
+joined. The server logs each operation and PID, then polls both children under
+one shared `persistence-shutdown-grace-ms` budget (default 10000 ms). At expiry,
+it reports a timeout and sends `SIGKILL` to remaining children. Zero skips the
+graceful wait, but completed children are still collected before termination.
+Shutdown does not retry a failed save.
+
+After termination, the server allows up to 1000 ms to collect child exits. If a
+child remains unresolved, it returns an error and retains resources still needed
+by persistence. This bounds child polling, not disk operations, client draining,
+or the kernel's ability to terminate a process. A killed child may leave a
+snapshot temporary file; it is not treated as a completed snapshot.
 
 The server reaps the child and handles its result before releasing snapshot
 state or the borrowed logger. A successful save becomes the latest completed

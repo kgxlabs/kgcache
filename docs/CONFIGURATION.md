@@ -132,6 +132,7 @@ Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config pa
 | `auto-aof-rewrite-percentage` | `--auto-aof-rewrite-percentage 100` | `100` | Rewrite after incremental data grows by this percentage; `0` disables automatic rewrites |
 | `auto-aof-rewrite-min-size` | `--auto-aof-rewrite-min-size 67108864` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
 | `aof-load-truncated` | `--aof-load-truncated yes` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
+| `persistence-shutdown-grace-ms` | `--persistence-shutdown-grace-ms 10000` | `10000` | Shared graceful child wait after workers join; expiry sends SIGKILL, followed by up to 1000 ms for reaping; `0` skips the graceful wait |
 | `bgsave-retry-delay-ms` | `--bgsave-retry-delay-ms 5000` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
 
 The input buffer grows as needed up to 1 MiB and retains its grown capacity until the connection ends. Configured values above 1 MiB remain accepted, but the initial allocation is clamped to 1 MiB. See [TCP request limits](#tcp-request-limits) for the limits on individual commands.
@@ -154,6 +155,7 @@ All limits are inclusive. `usize` is the size of a machine word in the server bu
 | `save <seconds> <changes>` | `seconds`: 1 to 9223372036854775807; `changes`: 1 to 4294967295 |
 | `auto-aof-rewrite-percentage` | 0 to 4294967295; `0` disables automatic rewrites |
 | `auto-aof-rewrite-min-size` | 0 to maximum `usize` |
+| `persistence-shutdown-grace-ms` | 0 to 4294967295; `0` skips the graceful child wait |
 | `bgsave-retry-delay-ms` | 0 to 9223372036854775807; `0` means no retry delay |
 
 ## TCP request limits

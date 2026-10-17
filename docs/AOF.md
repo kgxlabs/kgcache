@@ -94,10 +94,14 @@ separate from the signal handler and listener wake-up behavior.
 
 After cron and all client workers have joined, the server waits for every
 tracked `BGSAVE` and `BGREWRITEAOF` child. A worker may start one while its
-connection is draining. The server logs the operation and PID immediately
-before each wait, then reaps the child. There is no shutdown deadline: a child
-that never exits can delay shutdown indefinitely. Shutdown does not terminate
-the child or retry a failed operation.
+connection is draining. The server logs each operation and PID, then polls both
+children using one monotonic `persistence-shutdown-grace-ms` budget (default
+10000 ms). At expiry, it reports a timeout, sends `SIGKILL` to remaining children,
+and allows up to 1000 ms to reap them. Zero skips the graceful wait. Shutdown
+does not retry a failed operation. A terminated rewrite follows the failed
+rewrite path below. If a child cannot be reaped within the cleanup period,
+shutdown returns an error and retains persistence resources. The budget covers
+child polling, not filesystem operations or the kernel's termination latency.
 
 The server handles each result while the persistence backends and borrowed
 logger are still alive. A successful rewrite publishes its new base and the

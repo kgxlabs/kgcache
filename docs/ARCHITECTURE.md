@@ -89,7 +89,8 @@ snapshot and AOF children, then accounts for the save or finishes the rewrite.
 Only after that does it close AOF and release Store, Storage, persistence,
 and allocator-owned state. The logger owner keeps the logger alive through child completion and
 cleanup. A requested shutdown of a client connection is cooperative and does
-not produce an error event. The child wait has no deadline; see
+not produce an error event. Child polling has a shared grace period followed by
+termination and a bounded reap period; see
 [Snapshots](SNAPSHOTS.md#reaping-why-it-cant-happen-inside-bgsave) and
 [AOF](AOF.md#shutdown).
 

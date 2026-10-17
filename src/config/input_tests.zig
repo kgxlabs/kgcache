@@ -41,6 +41,7 @@ fn expectEquivalentInput(
 test "file and CLI numeric settings accept the same boundaries and reject invalid values" {
     const testing = std.testing;
     const cases = .{
+        .{ .name = "persistence-shutdown-grace-ms", .field = "persistence_shutdown_grace_ms", .minimum = @as(i128, 0), .maximum = std.math.maxInt(u32) },
         .{ .name = "port", .field = "port", .minimum = @as(i128, 0), .maximum = std.math.maxInt(u16) },
         .{ .name = "connection-buffer-size", .field = "connection_buffer_size", .minimum = @as(i128, 1), .maximum = std.math.maxInt(usize) },
         .{ .name = "databases", .field = "num_databases", .minimum = @as(i128, 1), .maximum = @min(std.math.maxInt(u32), std.math.maxInt(usize)) },

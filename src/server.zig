@@ -198,11 +198,12 @@ pub fn destroy(self: *Server) anyerror!void {
     };
 
     const journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
-    const drain_result = persistence_drain.run(self._io, self._logger, &self._persistence_state, journal);
+    const drain_result = persistence_drain.runWithOptions(self._io, self._logger, &self._persistence_state, journal, .{ .grace_ms = self._config.persistence_shutdown_grace_ms });
 
     if (cleanup_error == null) cleanup_error = drain_result.err;
     switch (drain_result.status) {
         .complete => {},
+        .children_unresolved => return cleanup_error orelse error.PersistenceChildrenUnresolved,
         .aof_unresolved => return cleanup_error orelse error.AofRewriteUnsettled,
     }
 

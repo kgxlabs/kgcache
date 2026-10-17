@@ -71,7 +71,7 @@ pub const AofShutdownState = union(enum) {
 
 pub const Process = struct {
     wait_pid: *const fn (std.posix.pid_t) anyerror!?u32 = waitPidSystem,
-    wait_pid_blocking: *const fn (std.posix.pid_t) anyerror!u32 = waitPidBlockingSystem,
+    kill_pid: *const fn (std.posix.pid_t) anyerror!void = killPidSystem,
 };
 
 pub const Options = struct {
@@ -272,23 +272,21 @@ pub fn aofShutdownState(self: *const PersistenceState) AofShutdownState {
     return if (self._in_flight_aof_rewrite) |rewrite| .{ .child = rewrite } else .no_child;
 }
 
-pub fn waitForKgcShutdown(self: *PersistenceState, now_ms: time.UnixMs) anyerror!KgcReapResult {
+pub fn pollKgcShutdown(self: *PersistenceState, now_ms: time.UnixMs) anyerror!KgcReapResult {
     var state_tx = self.beginUncancelable();
     defer state_tx.end();
 
-    const save = self._in_flight_kgc_save orelse return error.NoTrackedKgcChild;
-    const child = try self.waitForPid(save.pid);
-    return self.completeKgcReap(save, child, now_ms);
+    if (self._in_flight_kgc_save == null) return error.NoTrackedKgcChild;
+    return self.reapKgc(now_ms);
 }
 
-pub fn waitForAofShutdown(self: *PersistenceState) anyerror!AofReapResult {
+pub fn pollAofShutdown(self: *PersistenceState) anyerror!AofReapResult {
     var state_tx = self.beginUncancelable();
     defer state_tx.end();
 
     if (self._completed_aof_rewrite) |completed| return completed;
-    const rewrite = self._in_flight_aof_rewrite orelse return error.NoTrackedAofChild;
-    const child = try self.waitForPid(rewrite.pid);
-    return self.completeAofReap(child);
+    if (self._in_flight_aof_rewrite == null) return error.NoTrackedAofChild;
+    return self.reapAof();
 }
 
 pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
@@ -337,14 +335,6 @@ fn reapPid(self: *PersistenceState, pid: std.posix.pid_t) ChildResult {
     return decodeChildStatus(bits);
 }
 
-fn waitForPid(self: *PersistenceState, pid: std.posix.pid_t) anyerror!ChildResult {
-    const bits = self._process.wait_pid_blocking(pid) catch |err| switch (err) {
-        error.NoChildProcess => return .{ .status = .failed, .report_error = err },
-        else => return err,
-    };
-    return decodeChildStatus(bits);
-}
-
 fn decodeChildStatus(bits: u32) ChildResult {
     if (!std.c.W.IFEXITED(bits)) {
         return .{ .status = .failed, .report_error = error.ChildTerminatedAbnormally };
@@ -359,35 +349,29 @@ fn decodeChildStatus(bits: u32) ChildResult {
 
 fn waitPidSystem(pid: std.posix.pid_t) anyerror!?u32 {
     var status: c_int = undefined;
-    while (true) {
-        const result = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
-        if (result == 0) return null;
+    const result = std.posix.system.waitpid(pid, &status, std.c.W.NOHANG);
+    if (result == 0) return null;
 
-        if (result < 0) {
-            switch (std.posix.errno(result)) {
-                .INTR => continue,
-                .CHILD => return error.NoChildProcess,
-                else => return error.Unexpected,
-            }
+    if (result < 0) {
+        switch (std.posix.errno(result)) {
+            // Return to the caller so shutdown can check its deadline even
+            // when signals repeatedly interrupt polling.
+            .INTR => return null,
+            .CHILD => return error.NoChildProcess,
+            else => return error.Unexpected,
         }
-
-        return @bitCast(status);
     }
+
+    return @bitCast(status);
 }
 
-fn waitPidBlockingSystem(pid: std.posix.pid_t) anyerror!u32 {
-    var status: c_int = undefined;
-    while (true) {
-        const result = std.posix.system.waitpid(pid, &status, 0);
-        if (result < 0) {
-            switch (std.posix.errno(result)) {
-                .INTR => continue,
-                .CHILD => return error.NoChildProcess,
-                else => return error.Unexpected,
-            }
-        }
-        return @bitCast(status);
-    }
+/// Signal only. The drain loop retains ownership until polling confirms exit.
+pub fn killChild(self: *PersistenceState, pid: std.posix.pid_t) !void {
+    try self._process.kill_pid(pid);
+}
+
+fn killPidSystem(pid: std.posix.pid_t) anyerror!void {
+    try std.posix.kill(pid, .KILL);
 }
 
 pub fn terminateAndReapChild(pid: std.posix.pid_t) void {

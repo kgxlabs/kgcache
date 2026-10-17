@@ -620,3 +620,52 @@ test "shutdown drains a BGSAVE started by a client worker while workers join" {
 test "shutdown preserves worker cleanup error after failed BGSAVE" {
     try runWorkerBgsaveShutdown(true, true);
 }
+
+test "shutdown kills stuck persistence children and restart keeps committed data" {
+    lockGates();
+    defer gate_mutex.unlock();
+    for ([_]bool{ false, true }) |append_only| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        var gate = try ChildGate.init(false);
+        defer gate.deinit();
+        kgc_gate = &gate;
+        aof_gate = &gate;
+        defer {
+            kgc_gate = null;
+            aof_gate = null;
+        }
+        var config = scratch.config(append_only);
+        config.persistence_shutdown_grace_ms = 0;
+        var logger = logging.TestLogger.init();
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+        var destroyed = false;
+        defer if (!destroyed) {
+            gate.release();
+            server.destroy() catch {};
+        };
+        try setValue(server, "saved-key", "previous");
+        if (!append_only) try server._store.save();
+        try setValue(server, "saved-key", "latest");
+        if (append_only) {
+            server._aof.?._fork = forkAof;
+            _ = try server._store.bgrewriteaof(.manual);
+            try setValue(server, "later-key", "acknowledged");
+        } else {
+            server._kgc._fork = forkKgc;
+            _ = try server._store.bgsave(.manual);
+        }
+        const pid = try gate.awaitReady();
+        const result: ?anyerror = blk: {
+            server.destroy() catch |err| break :blk err;
+            break :blk null;
+        };
+        destroyed = true;
+        try testing.expectEqual(error.PersistenceShutdownTimeout, result.?);
+        try expectReaped(pid);
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        defer restarted.destroy() catch unreachable;
+        try expectValue(restarted, "saved-key", if (append_only) "latest" else "previous");
+        if (append_only) try expectValue(restarted, "later-key", "acknowledged");
+    }
+}

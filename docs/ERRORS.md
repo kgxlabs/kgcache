@@ -61,11 +61,12 @@ succeeds. A cached AOF failure is reported once across cron retries and shutdown
 
 This is a temporary mitigation for inherited logger locks. Background
 persistence remains experimental: other inherited runtime locks may still
-block child work, and shutdown has no strict deadline. Source-aware reporting
-and the remaining child writer review are tracked in
+block child work. Shutdown bounds child polling, signals overdue children, and
+retains persistence resources if reaping remains unresolved. Filesystem cleanup
+has no strict deadline. Source-aware reporting and the remaining child writer
+review are tracked in
 [issue #118](https://github.com/kgxlabs/kgcache/issues/118), standard-stream
-collection in [issue #227](https://github.com/kgxlabs/kgcache/issues/227),
-and shutdown budgets in [issue #162](https://github.com/kgxlabs/kgcache/issues/162).
+collection in [issue #227](https://github.com/kgxlabs/kgcache/issues/227).
 
 Tests may ignore errors while removing scratch files or closing a backend in
 deferred fixture cleanup. Those cleanup calls are outside the assertion under

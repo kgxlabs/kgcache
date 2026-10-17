@@ -176,17 +176,18 @@ test "CLI prepares every directive in argv order beside process arguments" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var cli = try Cli.parse(&arena, .{ .vector = &.{
-        "kgcache",                 "--bind",                            "0.0.0.0",                   "--port",                     "7000",
-        "--reuse-address",         "no",                                "--connection-buffer-size",  "2048",                       "--databases",
-        "4",                       "--dir",                             "data files",                "--dbfilename",               "state.kgc",
-        "--cron-interval-ms",      "250",                               "--active-expire-budget-ms", "15",                         "--active-expire-batch-size",
-        "30",                      "--active-expire-threshold-percent", "50",                        "--exclusive-bg-persistence", "no",
-        "--save",                  "60",                                "1",                         "--ready-fd",                 "3",
-        "cache.conf",              "--appendonly",                      "yes",                       "--appendfsync",              "always",
-        "--appenddirname",         "history",                           "--appendfilename",          "journal.aof",                "--auto-aof-rewrite-percentage",
-        "0",                       "--auto-aof-rewrite-min-size",       "2048",                      "--aof-load-truncated",       "no",
-        "--bgsave-retry-delay-ms", "0",                                 "--port",                    "7001",                       "--save",
-        "",                        "--save",                            "300",                       "10",
+        "kgcache",                         "--bind",                            "0.0.0.0",                   "--port",                      "7000",
+        "--reuse-address",                 "no",                                "--connection-buffer-size",  "2048",                        "--databases",
+        "4",                               "--dir",                             "data files",                "--dbfilename",                "state.kgc",
+        "--cron-interval-ms",              "250",                               "--active-expire-budget-ms", "15",                          "--active-expire-batch-size",
+        "30",                              "--active-expire-threshold-percent", "50",                        "--exclusive-bg-persistence",  "no",
+        "--persistence-shutdown-grace-ms", "10000",                             "--save",                    "60",                          "1",
+        "--ready-fd",                      "3",                                 "cache.conf",                "--appendonly",                "yes",
+        "--appendfsync",                   "always",                            "--appenddirname",           "history",                     "--appendfilename",
+        "journal.aof",                     "--auto-aof-rewrite-percentage",     "0",                         "--auto-aof-rewrite-min-size", "2048",
+        "--aof-load-truncated",            "no",                                "--bgsave-retry-delay-ms",   "0",                           "--port",
+        "7001",                            "--save",                            "",                          "--save",                      "300",
+        "10",
     } });
     defer cli.deinit();
     try testing.expectEqualStrings("cache.conf", cli.config_path.?);

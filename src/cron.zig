@@ -1121,12 +1121,9 @@ test "AOF failure is reported once across cron retries and shutdown" {
             calls += 1;
             return 256;
         }
-        fn blocking(pid: std.posix.pid_t) anyerror!u32 {
-            return (try @This().run(pid)).?;
-        }
     };
     Wait.calls = 0;
-    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid = Wait.run, .wait_pid_blocking = Wait.blocking } });
+    var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid = Wait.run } });
     var backend = FinishRewriteJournal.init(testing.io);
     backend.fail = true;
     var logger = logging.TestLogger.init();
@@ -1178,7 +1175,7 @@ test "shutdown reports child failures once and preserves abnormal exit errors" {
     const Wait = struct {
         var bits: u32 = 0;
         var failure: ?anyerror = null;
-        fn blocking(_: std.posix.pid_t) anyerror!u32 {
+        fn run(_: std.posix.pid_t) anyerror!?u32 {
             if (failure) |err| return err;
             return bits;
         }
@@ -1194,7 +1191,7 @@ test "shutdown reports child failures once and preserves abnormal exit errors" {
         }) |case| {
             Wait.bits = case.bits;
             Wait.failure = case.wait_error;
-            var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid_blocking = Wait.blocking } });
+            var state = PersistenceState.init(testing.io, .{ .mutual_exclusive = false, .process = .{ .wait_pid = Wait.run } });
             var backend = FinishRewriteJournal.init(testing.io);
             var logger = logging.TestLogger.init();
             {

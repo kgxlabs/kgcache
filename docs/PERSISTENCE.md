@@ -22,7 +22,8 @@ Both methods can be enabled:
 Background persistence remains experimental. Failed background work is reported
 by the parent with a generic operation error; the child's source error and trace
 are temporarily unavailable. Other inherited runtime locks may still block a
-child, and shutdown has no strict deadline. See [Errors and logging](ERRORS.md).
+child. Shutdown bounds child polling and terminates overdue children, but this
+is not a strict deadline for all cleanup. See [Errors and logging](ERRORS.md).
 
 Start with [Snapshots](SNAPSHOTS.md) for `SAVE` and `BGSAVE`, or
 [Append-only file](AOF.md) for AOF setup and recovery.
