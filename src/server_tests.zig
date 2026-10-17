@@ -172,7 +172,7 @@ test "create builds the full object graph and destroy leaks nothing" {
     const testing = std.testing;
 
     const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
-    try server.destroy();
+    try server.destroy(.cleanup);
 }
 
 test "snapshot and AOF persistence use relative and absolute dir" {
@@ -197,7 +197,7 @@ test "snapshot and AOF persistence use relative and absolute dir" {
 
             {
                 const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-                defer server.destroy() catch unreachable;
+                defer server.destroy(.cleanup) catch unreachable;
                 _ = try server._store.set(.{
                     .key = "persistent",
                     .value = "snapshot-value",
@@ -232,7 +232,7 @@ test "snapshot and AOF persistence use relative and absolute dir" {
             }
 
             const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-            defer restarted.destroy() catch unreachable;
+            defer restarted.destroy(.cleanup) catch unreachable;
             var loaded = try restarted._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
             defer loaded.deinit();
             try testing.expectEqualStrings(if (append_only) "aof-value" else "snapshot-value", loaded.value.string);
@@ -277,7 +277,7 @@ test "server destroy keeps Store alive until a connection command finishes" {
     const testing = std.testing;
     const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
     var server_destroyed = false;
-    defer if (!server_destroyed) server.destroy() catch unreachable;
+    defer if (!server_destroyed) server.destroy(.cleanup) catch unreachable;
 
     var blocking_store: BlockingStore = .{ .inner = server._store, .io = testing.io };
     server._store = blocking_store.interface();
@@ -294,7 +294,7 @@ test "server destroy keeps Store alive until a connection command finishes" {
         result: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            self.server.destroy() catch |err| {
+            self.server.destroy(.cleanup) catch |err| {
                 self.result = err;
             };
         }
@@ -341,7 +341,7 @@ test "create with appendonly off builds no aof backend and creates no append dir
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
     try testing.expect(server._aof == null);
-    try server.destroy();
+    try server.destroy(.cleanup);
 
     try testing.expectError(error.FileNotFound, cwd.openDir(testing.io, dirname, .{}));
 }
@@ -364,7 +364,7 @@ test "create with appendonly on opens the append directory and destroy leaves no
     var dir = try cwd.openDir(testing.io, dirname, .{});
     dir.close(testing.io);
 
-    try server.destroy();
+    try server.destroy(.cleanup);
 }
 
 test "destroy releases server state after AOF close failure" {
@@ -385,7 +385,7 @@ test "destroy releases server state after AOF close failure" {
     file.close(testing.io);
     aof._file = null;
 
-    try testing.expectError(error.MissingLiveAofFile, server.destroy());
+    try testing.expectError(error.MissingLiveAofFile, server.destroy(.cleanup));
 }
 
 test "create with appendonly on does not load the kgc snapshot" {
@@ -406,7 +406,7 @@ test "create with appendonly on does not load the kgc snapshot" {
     config.dbfilename = snapshot_path;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy() catch unreachable;
+    defer server.destroy(.cleanup) catch unreachable;
 
     const loaded = try server._store.get("foo", 0);
     try testing.expect(loaded == null);
@@ -425,7 +425,7 @@ test "create with appendonly off still loads the kgc snapshot" {
     config.dbfilename = snapshot_path;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy() catch unreachable;
+    defer server.destroy(.cleanup) catch unreachable;
 
     var loaded = try server._store.get("foo", 0) orelse return error.TestUnexpectedResult;
     defer loaded.deinit();
@@ -465,7 +465,7 @@ test "replay does not append to the file it is replaying" {
     config.append_dirname = dirname;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy() catch unreachable;
+    defer server.destroy(.cleanup) catch unreachable;
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
     defer dir.close(testing.io);
@@ -492,7 +492,7 @@ test "replay leaves the dirty count at zero" {
     config.append_dirname = dirname;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy() catch unreachable;
+    defer server.destroy(.cleanup) catch unreachable;
 
     try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
 }
@@ -602,7 +602,7 @@ test "manifest without incrementals is repaired and server remains writable" {
     config.append_fsync = .always;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy() catch unreachable;
+    defer server.destroy(.cleanup) catch unreachable;
 
     const repaired_manifest = try Manifest.read(
         testing.io,
@@ -661,11 +661,11 @@ test "writes survive a simulated restart" {
             .keepttl = false,
             .response = null,
         }, 1);
-        try first.destroy();
+        try first.destroy(.cleanup);
     }
 
     const second = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer second.destroy() catch unreachable;
+    defer second.destroy(.cleanup) catch unreachable;
 
     var persistent = try second._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
     defer persistent.deinit();

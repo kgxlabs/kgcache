@@ -184,7 +184,7 @@ const DestroyTask = struct {
     err: ?anyerror = null,
 
     fn run(self: *DestroyTask) void {
-        self.server.destroy() catch |err| {
+        self.server.destroy(.cleanup) catch |err| {
             self.err = err;
         };
         self.finished.store(true, .release);
@@ -351,7 +351,7 @@ test "shutdown waits for active BGSAVE and restart loads its snapshot" {
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
-        server.destroy() catch {};
+        server.destroy(.cleanup) catch {};
     };
     server._kgc._fork = forkKgc;
     try setValue(server, "snapshot-key", "saved");
@@ -363,7 +363,7 @@ test "shutdown waits for active BGSAVE and restart loads its snapshot" {
     try expectReaped(pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy() catch unreachable;
+    defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "snapshot-key", "saved");
 }
 
@@ -384,7 +384,7 @@ test "shutdown waits for active BGREWRITEAOF and restart replays later writes" {
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
-        server.destroy() catch {};
+        server.destroy(.cleanup) catch {};
     };
     server._aof.?._fork = forkAof;
     try setValue(server, "base-key", "base-value");
@@ -397,7 +397,7 @@ test "shutdown waits for active BGREWRITEAOF and restart replays later writes" {
     try expectReaped(pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy() catch unreachable;
+    defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "base-key", "base-value");
     try expectValue(restarted, "later-key", "later-value");
 
@@ -425,7 +425,7 @@ test "failed BGSAVE during shutdown keeps the previous snapshot" {
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
-        server.destroy() catch {};
+        server.destroy(.cleanup) catch {};
     };
     try setValue(server, "snapshot-key", "previous");
     try server._store.save();
@@ -443,7 +443,7 @@ test "failed BGSAVE during shutdown keeps the previous snapshot" {
     try expectReaped(pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy() catch unreachable;
+    defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "snapshot-key", "previous");
 }
 
@@ -464,7 +464,7 @@ test "failed BGREWRITEAOF during shutdown keeps acknowledged writes" {
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
-        server.destroy() catch {};
+        server.destroy(.cleanup) catch {};
     };
     server._aof.?._fork = forkAof;
     try setValue(server, "before-key", "before-value");
@@ -481,7 +481,7 @@ test "failed BGREWRITEAOF during shutdown keeps acknowledged writes" {
     try expectReaped(pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy() catch unreachable;
+    defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "before-key", "before-value");
     try expectValue(restarted, "after-key", "after-value");
 
@@ -514,7 +514,7 @@ test "shutdown waits for both BGSAVE and BGREWRITEAOF children" {
     defer if (!server_destroyed) {
         save_gate.release();
         rewrite_gate.release();
-        server.destroy() catch {};
+        server.destroy(.cleanup) catch {};
     };
     server._kgc._fork = forkKgc;
     server._aof.?._fork = forkAof;
@@ -546,7 +546,7 @@ test "shutdown waits for both BGSAVE and BGREWRITEAOF children" {
     try expectReaped(rewrite_pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy() catch unreachable;
+    defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "both-key", "both-value");
 }
 
@@ -567,7 +567,7 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
-        server.destroy() catch {};
+        server.destroy(.cleanup) catch {};
     };
 
     try setValue(server, "worker-key", "previous");
@@ -609,7 +609,7 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
     try expectReaped(pid);
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy() catch unreachable;
+    defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "worker-key", if (fail_child) "previous" else "from-worker");
 }
 
@@ -642,7 +642,7 @@ test "shutdown kills stuck persistence children and restart keeps committed data
         var destroyed = false;
         defer if (!destroyed) {
             gate.release();
-            server.destroy() catch {};
+            server.destroy(.cleanup) catch {};
         };
         try setValue(server, "saved-key", "previous");
         if (!append_only) try server._store.save();
@@ -657,14 +657,14 @@ test "shutdown kills stuck persistence children and restart keeps committed data
         }
         const pid = try gate.awaitReady();
         const result: ?anyerror = blk: {
-            server.destroy() catch |err| break :blk err;
+            server.destroy(.cleanup) catch |err| break :blk err;
             break :blk null;
         };
         destroyed = true;
         try testing.expectEqual(error.PersistenceShutdownTimeout, result.?);
         try expectReaped(pid);
         const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-        defer restarted.destroy() catch unreachable;
+        defer restarted.destroy(.cleanup) catch unreachable;
         try expectValue(restarted, "saved-key", if (append_only) "latest" else "previous");
         if (append_only) try expectValue(restarted, "later-key", "acknowledged");
     }

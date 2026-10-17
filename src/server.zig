@@ -18,6 +18,11 @@ pub const ReadyCallback = struct {
     notify: *const fn (*anyopaque, std.Io.net.IpAddress) anyerror!void,
 };
 
+pub const StopReason = enum {
+    clean_signal,
+    cleanup,
+};
+
 _io: std.Io,
 _allocator: std.mem.Allocator,
 _config: Config,
@@ -189,7 +194,8 @@ pub fn run(self: *Server, ready_callback: ?ReadyCallback) !void {
 /// so the storage backends must not be deinitialized separately here.
 /// Returns the first cleanup source after releasing safe resources. An
 /// unresolved child keeps persistence resources alive.
-pub fn destroy(self: *Server) anyerror!void {
+pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
+    _ = reason;
     self.stopCron();
 
     var cleanup_error: ?anyerror = null;
@@ -294,7 +300,7 @@ test "server owns and joins the cron thread" {
     config.cron_interval_ms = 1;
 
     const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer server.destroy() catch unreachable;
+    defer server.destroy(.cleanup) catch unreachable;
 
     try server.startCron();
     try testing.expect(server._cron_thread != null);
