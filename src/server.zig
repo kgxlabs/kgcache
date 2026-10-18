@@ -206,6 +206,7 @@ pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
         .grace_ms = self._config.persistence_shutdown_grace_ms,
     });
     const journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
+    @import("persistence/test_control.zig").draining();
     var drain_result = shutdown_context.run(self._io, self._logger, &self._persistence_state, journal);
     if (cleanup_error == null) cleanup_error = drain_result.err;
 

@@ -16,7 +16,10 @@ const restart_same_port = @import("suites/restart_same_port.zig");
 const two_servers = @import("suites/two_servers.zig");
 const process_harness = @import("suites/process_harness.zig");
 const aof_recovery = @import("suites/aof_recovery.zig");
+const aof_shutdown = @import("suites/aof_shutdown.zig");
 const snapshot_shutdown = @import("suites/snapshot_shutdown.zig");
+const active_persistence = @import("suites/active_persistence.zig");
+const persistence_failures = @import("suites/persistence_failures.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
@@ -24,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
 
     const executable_path = args.next() orelse return error.MissingExecutablePath;
     const fake_executable_path = args.next() orelse return error.MissingFakeExecutablePath;
+    const controlled_executable_path = args.next() orelse return error.MissingControlledExecutablePath;
     if (args.next() != null) return error.UnexpectedArgument;
     if (!std.fs.path.isAbsolute(executable_path)) return error.ExecutablePathNotAbsolute;
 
@@ -33,6 +37,8 @@ pub fn main(init: std.process.Init) !void {
     if (fake_stat.kind != .file) return error.FakeExecutablePathNotFile;
     const fake_absolute_path = try std.Io.Dir.cwd().realPathFileAlloc(init.io, fake_executable_path, init.gpa);
     defer init.gpa.free(fake_absolute_path);
+    const controlled_absolute_path = try std.Io.Dir.cwd().realPathFileAlloc(init.io, controlled_executable_path, init.gpa);
+    defer init.gpa.free(controlled_absolute_path);
 
     const artifact_dir = std.process.Environ.getPosix(init.minimal.environ, "KGCACHE_TEST_ARTIFACT_DIR");
     try ping_smoke.run(init.io, init.gpa, executable_path, artifact_dir);
@@ -47,7 +53,10 @@ pub fn main(init: std.process.Init) !void {
     try invalid_config.run(init.io, init.gpa, executable_path, artifact_dir);
     try configuration.run(init.io, init.gpa, executable_path, artifact_dir);
     try aof_recovery.run(init.io, init.gpa, executable_path, artifact_dir);
+    try aof_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try snapshot_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
+    try active_persistence.run(init.io, init.gpa, executable_path, controlled_absolute_path, artifact_dir);
+    try persistence_failures.run(init.io, init.gpa, executable_path, controlled_absolute_path, artifact_dir);
     try idle_clients_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try transport_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try restart_same_port.run(init.io, init.gpa, executable_path, artifact_dir);

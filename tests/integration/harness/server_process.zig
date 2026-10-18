@@ -1,8 +1,11 @@
 const std = @import("std");
+pub const control_protocol = @import("persistence_test_protocol");
+const failure_artifacts = @import("failure_artifacts.zig");
 
 const log_limit = 16 * 1024;
 
 pub const Options = struct {
+    case_name: []const u8 = "process fixture",
     startup_timeout_ms: i64 = 5_000,
     read_timeout_ms: i64 = 3_000,
     stop_timeout_ms: i64 = 5_000,
@@ -17,6 +20,8 @@ pub const Options = struct {
     auto_ready_fd: bool = true,
     artifact_dir: ?[]const u8 = null,
     report_failures: bool = true,
+    control_child: ?control_protocol.Backend = null,
+    control_stage: control_protocol.Stage = .synced,
 };
 
 pub const ServerProcess = struct {
@@ -37,6 +42,16 @@ pub const ServerProcess = struct {
     failed: bool = false,
     failure_reported: bool = false,
     ready_buffer: [128]u8 = undefined,
+    control_events: ?std.posix.fd_t = null,
+    control_release: ?std.posix.fd_t = null,
+    last_control_event: ?control_protocol.Event = null,
+    run_number: usize = 0,
+    phase: []const u8 = "created",
+    failure_error: ?anyerror = null,
+    failure_saved: bool = false,
+    ready_ok: bool = false,
+    last_signal: ?std.posix.SIG = null,
+    forced_kill: bool = false,
 
     pub fn create(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, options: Options) !*ServerProcess {
         const self = try createStopped(io, allocator, executable_path, options);
@@ -87,9 +102,45 @@ pub const ServerProcess = struct {
     pub fn start(self: *ServerProcess) !void {
         if (self.pid != null) return error.AlreadyRunning;
         if (self.options.config_subpath != null and self.options.config_arg_index > self.options.extra_args.len) return error.InvalidConfigArgumentIndex;
+        if (self.failed) self.saveFailure();
+        self.run_number += 1;
+        self.phase = "startup";
+        self.failure_error = null;
+        self.failure_saved = false;
+        self.ready_ok = false;
+        self.last_signal = null;
+        self.forced_kill = false;
         self.failure_reported = false;
         self.last_exit_status = null;
         self.ready_bytes_read = 0;
+        self.closeControl();
+        self.last_control_event = null;
+
+        var control_env = std.process.Environ.Map.init(self.allocator);
+        defer control_env.deinit();
+        var inherited_events: ?std.posix.fd_t = null;
+        defer {
+            if (inherited_events) |fd| _ = std.c.close(fd);
+        }
+        var inherited_release: ?std.posix.fd_t = null;
+        defer {
+            if (inherited_release) |fd| _ = std.c.close(fd);
+        }
+        if (self.options.control_child) |backend| {
+            var events: [2]std.posix.fd_t = undefined;
+            if (std.c.pipe(&events) != 0) return error.PipeFailed;
+            self.control_events = events[0];
+            inherited_events = events[1];
+            var release: [2]std.posix.fd_t = undefined;
+            if (std.c.pipe(&release) != 0) return error.PipeFailed;
+            inherited_release = release[0];
+            self.control_release = release[1];
+            if (std.c.fcntl(events[0], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
+            if (std.c.fcntl(release[1], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
+            const setting = try std.fmt.allocPrint(self.allocator, "{d} {d} {s} {s}", .{ events[1], release[0], @tagName(backend), @tagName(self.options.control_stage) });
+            defer self.allocator.free(setting);
+            try control_env.put("KGCACHE_TEST_CONTROL", setting);
+        }
 
         const port: u16 = if (self.address) |address| address.getPort() else 0;
         if (self.config_path) |path| {
@@ -135,6 +186,7 @@ pub const ServerProcess = struct {
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
+            .environ_map = if (self.options.control_child != null) &control_env else null,
         });
         self.pid = child.id.?;
         _ = std.c.close(ready_fds[1]);
@@ -191,6 +243,8 @@ pub const ServerProcess = struct {
             return error.StartupExited;
         }
         self.address = selected;
+        self.ready_ok = true;
+        self.phase = "RESP checks";
     }
 
     pub fn stop(self: *ServerProcess) !void {
@@ -202,8 +256,7 @@ pub const ServerProcess = struct {
     }
 
     pub fn stopExpectingExit(self: *ServerProcess, signal: std.posix.SIG, expected_code: u8) !void {
-        const pid = self.pid orelse return error.NotRunning;
-        std.posix.kill(pid, signal) catch |err| switch (err) {
+        self.sendSignal(signal) catch |err| switch (err) {
             error.ProcessNotFound => {},
             else => {
                 self.failed = true;
@@ -213,6 +266,17 @@ pub const ServerProcess = struct {
                 return err;
             },
         };
+        try self.waitForExit(expected_code);
+    }
+
+    pub fn sendSignal(self: *ServerProcess, signal: std.posix.SIG) !void {
+        const pid = self.pid orelse return error.NotRunning;
+        self.phase = "shutdown";
+        self.last_signal = signal;
+        try std.posix.kill(pid, signal);
+    }
+
+    pub fn waitForExit(self: *ServerProcess, expected_code: u8) !void {
         const deadline = now(self.io) + self.options.stop_timeout_ms;
         while (self.pid != null) {
             const status = self.pollExit() catch |err| {
@@ -229,6 +293,7 @@ pub const ServerProcess = struct {
                     self.report("shutdown", error.UncleanShutdown);
                     return error.UncleanShutdown;
                 }
+                self.phase = "after shutdown checks";
                 return;
             }
             if (now(self.io) >= deadline) {
@@ -247,6 +312,49 @@ pub const ServerProcess = struct {
                 return err;
             };
         }
+    }
+
+    pub fn waitForControl(self: *ServerProcess, stage: control_protocol.Stage) !control_protocol.Event {
+        self.phase = "child control";
+        var event: control_protocol.Event = undefined;
+        self.readExact(self.control_events orelse return error.MissingChildControl, std.mem.asBytes(&event)) catch |err| {
+            self.report("child control", err);
+            return err;
+        };
+        const previous_event = self.last_control_event;
+        self.last_control_event = event;
+        if (event.server_pid != self.pid or event.operation != 1 or event.stage != stage) return error.UnexpectedChildStage;
+        if (event.backend != self.options.control_child) return error.WrongControlledBackend;
+        if (previous_event) |previous| {
+            if (event.child_pid != previous.child_pid or event.backend != previous.backend) return error.WrongControlledChild;
+        }
+        return event;
+    }
+
+    pub fn releaseChild(self: *ServerProcess) !void {
+        try self.sendChildCommand('r');
+    }
+
+    pub fn failChildWrite(self: *ServerProcess) !void {
+        try self.sendChildCommand('f');
+    }
+
+    fn sendChildCommand(self: *ServerProcess, command: u8) !void {
+        if (try self.pollExit() != null) return error.ServerExitedBeforeChildRelease;
+        const fd = self.control_release orelse return error.MissingChildControl;
+        while (true) {
+            const n = std.c.write(fd, @ptrCast(&command), 1);
+            if (n < 0 and std.posix.errno(n) == .INTR) continue;
+            if (n != 1) return error.ChildReleaseFailed;
+            return;
+        }
+    }
+
+    fn closeControl(self: *ServerProcess) void {
+        if (self.control_release) |fd| _ = std.c.close(fd);
+        if (self.control_events) |fd| _ = std.c.close(fd);
+        self.control_release = null;
+        self.control_events = null;
     }
 
     pub fn restart(self: *ServerProcess) !void {
@@ -272,6 +380,14 @@ pub const ServerProcess = struct {
     }
 
     pub fn destroy(self: *ServerProcess) void {
+        if (self.pid != null and self.control_release != null) {
+            self.failed = true;
+            // Let the server reap a held child before forcing parent cleanup.
+            _ = std.c.close(self.control_release.?);
+            self.control_release = null;
+            self.stop() catch {};
+        }
+        self.closeControl();
         if (self.pid != null) {
             self.failed = true;
             self.forceKill();
@@ -342,6 +458,7 @@ pub const ServerProcess = struct {
 
     fn forceKill(self: *ServerProcess) void {
         const pid = self.pid orelse return;
+        self.forced_kill = true;
         std.posix.kill(pid, .KILL) catch {};
         var status: c_int = 0;
         while (true) {
@@ -351,6 +468,7 @@ pub const ServerProcess = struct {
                 std.debug.panic("integration: waitpid failed while reaping child {d}", .{pid});
             }
         }
+        self.last_exit_status = @bitCast(status);
         self.pid = null;
     }
 
@@ -362,6 +480,8 @@ pub const ServerProcess = struct {
     }
 
     fn report(self: *ServerProcess, phase: []const u8, err: anyerror) void {
+        self.phase = phase;
+        self.failure_error = err;
         if (!self.options.report_failures) return;
         self.failure_reported = true;
         std.log.err("integration: {s} failed: {s}; stdout: {s}; stderr: {s}", .{
@@ -370,36 +490,54 @@ pub const ServerProcess = struct {
     }
 
     fn saveFailure(self: *ServerProcess) void {
-        const parent = self.options.artifact_dir orelse return;
-        const name = std.fs.path.basename(self.data_dir);
-        const path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ parent, name }) catch |err| {
-            std.log.err("integration: cannot name failure artifact: {s}", .{@errorName(err)});
+        if (self.options.artifact_dir == null or self.failure_saved) return;
+        self.captureFailure() catch |err| {
+            std.log.err("integration: cannot capture failure artifacts: {s}", .{@errorName(err)});
             return;
         };
+        self.failure_saved = true;
+    }
+
+    fn captureFailure(self: *ServerProcess) !void {
+        const parent = self.options.artifact_dir.?;
+        const name = std.fs.path.basename(self.data_dir);
+        const path = try std.fmt.allocPrint(self.allocator, "{s}/{s}-run-{d}", .{ parent, name, self.run_number });
         defer self.allocator.free(path);
         const cwd = std.Io.Dir.cwd();
-        cwd.createDirPath(self.io, path) catch |err| {
-            std.log.err("integration: cannot create artifact directory: {s}", .{@errorName(err)});
-            return;
-        };
-        const dir = cwd.openDir(self.io, path, .{}) catch |err| {
-            std.log.err("integration: cannot open artifact directory: {s}", .{@errorName(err)});
-            return;
-        };
+        try cwd.createDirPath(self.io, path);
+        const dir = try cwd.openDir(self.io, path, .{});
         defer dir.close(self.io);
         const config = self.config orelse "";
-        dir.writeFile(self.io, .{ .sub_path = "kgcache.conf", .data = config[0..@min(config.len, log_limit)] }) catch |err| {
-            std.log.err("integration: cannot save config artifact: {s}", .{@errorName(err)});
-            return;
-        };
-        dir.writeFile(self.io, .{ .sub_path = "stdout.log", .data = self.stdout.bytes() }) catch |err| {
-            std.log.err("integration: cannot save stdout artifact: {s}", .{@errorName(err)});
-            return;
-        };
-        dir.writeFile(self.io, .{ .sub_path = "stderr.log", .data = self.stderr.bytes() }) catch |err| {
-            std.log.err("integration: cannot save stderr artifact: {s}", .{@errorName(err)});
-            return;
-        };
+        try dir.writeFile(self.io, .{ .sub_path = "kgcache.conf", .data = config[0..@min(config.len, log_limit)] });
+        try dir.writeFile(self.io, .{ .sub_path = "stdout.log", .data = self.stdout.bytes() });
+        try dir.writeFile(self.io, .{ .sub_path = "stderr.log", .data = self.stderr.bytes() });
+        try dir.writeFile(self.io, .{ .sub_path = "ready.txt", .data = self.ready_buffer[0..self.ready_bytes_read] });
+        var status_buffer: [2048]u8 = undefined;
+        var status = std.Io.Writer.fixed(&status_buffer);
+        const exit_code: ?u8 = if (self.last_exit_status) |bits| (if (std.c.W.IFEXITED(bits)) @intCast(std.c.W.EXITSTATUS(bits)) else null) else null;
+        const exit_signal: ?u32 = if (self.last_exit_status) |bits| (if (std.c.W.IFSIGNALED(bits)) @intFromEnum(std.c.W.TERMSIG(bits)) else null) else null;
+        try status.print("case={s}\nrun={d}\nphase={s}\nerror={s}\nready={any}\nexit_status={?d}\nexit_code={?d}\nexit_signal={?d}\nrequested_signal={?d}\nforced_kill={any}\nconfig_truncated={any}\nstdout_truncated={any}\nstderr_truncated={any}\n", .{
+            self.options.case_name[0..@min(self.options.case_name.len, 128)],
+            self.run_number,
+            self.phase,
+            if (self.failure_error) |err| @errorName(err) else "none",
+            self.ready_ok,
+            self.last_exit_status,
+            exit_code,
+            exit_signal,
+            if (self.last_signal) |signal| @as(?u32, @intFromEnum(signal)) else null,
+            self.forced_kill,
+            config.len > log_limit,
+            self.stdout.truncated,
+            self.stderr.truncated,
+        });
+        if (self.last_control_event) |event| {
+            try status.print("server_pid={d}\nchild_pid={d}\noperation={d}\nbackend={s}\nchild_stage={s}\nchild_status={d}\n", .{
+                event.server_pid, event.child_pid, event.operation, @tagName(event.backend), @tagName(event.stage), event.status,
+            });
+        }
+        try dir.writeFile(self.io, .{ .sub_path = "status.txt", .data = status.buffered() });
+        try failure_artifacts.copyFiles(self.io, self.allocator, self.data_dir, dir);
         if (self.options.report_failures) std.log.info("integration: failure artifacts: {s}", .{path});
     }
 };

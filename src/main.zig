@@ -4,6 +4,7 @@ const ConfigLoader = @import("config/loader.zig");
 const Server = @import("server.zig");
 const ReadyPipe = @import("readiness.zig");
 const logging = @import("logger.zig");
+const test_control = @import("persistence/test_control.zig");
 
 var shutdown_event: std.Io.Event = .unset;
 var shutdown_signal_number: std.atomic.Value(u32) = .init(0);
@@ -54,6 +55,8 @@ const RunOutcome = union(enum) {
 };
 
 pub fn main(init: std.process.Init) u8 {
+    test_control.init(init.minimal.environ) catch return 1;
+    defer test_control.deinit();
     // Server borrows this logger. Keep its storage alive for the full Server lifetime.
     var default_logger = logging.DefaultLogger.init(init.io);
     const logger = default_logger.logger();

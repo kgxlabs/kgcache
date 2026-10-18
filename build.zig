@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
 
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    build_options.addOption(bool, "persistence_test_controls", false);
 
     const exe = b.addExecutable(.{
         .name = "kgcache",
@@ -65,12 +66,32 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/protocol/compatibility_fixtures.zig"),
     }));
 
-    integration_runner.root_module.addImport("server_process", b.createModule(.{
+    const control_protocol = b.createModule(.{
+        .root_source_file = b.path("src/persistence/test_control_protocol.zig"),
+    });
+    const server_process = b.createModule(.{
         .root_source_file = b.path("tests/integration/harness/server_process.zig"),
         .target = b.graph.host,
         .optimize = optimize,
         .link_libc = true,
-    }));
+    });
+    server_process.addImport("persistence_test_protocol", control_protocol);
+    integration_runner.root_module.addImport("server_process", server_process);
+
+    const control_options = b.addOptions();
+    control_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    control_options.addOption(bool, "persistence_test_controls", true);
+    const controlled_server = b.addExecutable(.{
+        .name = "kgcache-controlled-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .error_tracing = true,
+            .link_libc = true,
+        }),
+    });
+    controlled_server.root_module.addOptions("build_options", control_options);
 
     const fake_server = b.addExecutable(.{
         .name = "kgcache-fake-server",
@@ -85,6 +106,7 @@ pub fn build(b: *std.Build) void {
     run_integration.step.dependOn(&install_exe.step);
     run_integration.addArg(b.getInstallPath(.bin, exe.out_filename));
     run_integration.addArtifactArg(fake_server);
+    run_integration.addArtifactArg(controlled_server);
     run_integration.has_side_effects = true;
 
     const integration_step = b.step("test-integration", "Run process integration tests");
