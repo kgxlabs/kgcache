@@ -373,6 +373,7 @@ fn waitPidSystem(pid: std.posix.pid_t) anyerror!?u32 {
         }
     }
 
+    @import("persistence/test_control.zig").reaped(pid, @bitCast(status));
     return @bitCast(status);
 }
 

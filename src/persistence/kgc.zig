@@ -8,6 +8,7 @@ const KgcDecoder = @import("../codec/kgc_decoder.zig");
 const PersistenceState = @import("../persistence_state.zig");
 const Store = @import("../store/interface.zig");
 const logging = @import("../logger.zig");
+const test_control = @import("test_control.zig");
 
 const KgcBackend = @This();
 
@@ -155,6 +156,7 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
     }
     self._background_path = output_path;
     errdefer self._background_path = null;
+    const controlled = test_control.claim();
     const pid = try self._fork();
 
     if (pid == 0) {
@@ -168,10 +170,12 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
         // TODO: replace the child encoder and I/O with a fork-safe writer (#118).
         // Logging here could wait forever on a mutex copied during fork.
         self.dump(storages, output) catch std.c._exit(1);
+        test_control.childSynced(controlled);
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
         // using _exit to sidestep clearing the buffered data (at the time of fork) completely
         std.c._exit(0);
     }
+    test_control.track(controlled, pid);
 
     // Fork succeeded, so cancellation must not leave the child untracked.
     const registration_error: ?PersistenceState.PendingStartError = blk: {

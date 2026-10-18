@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const control_protocol = @import("persistence_test_protocol");
 
 const log_limit = 16 * 1024;
 
@@ -17,6 +18,7 @@ pub const Options = struct {
     auto_ready_fd: bool = true,
     artifact_dir: ?[]const u8 = null,
     report_failures: bool = true,
+    control_child: bool = false,
 };
 
 pub const ServerProcess = struct {
@@ -37,6 +39,9 @@ pub const ServerProcess = struct {
     failed: bool = false,
     failure_reported: bool = false,
     ready_buffer: [128]u8 = undefined,
+    control_events: ?std.posix.fd_t = null,
+    control_release: ?std.posix.fd_t = null,
+    last_control_event: ?control_protocol.Event = null,
 
     pub fn create(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, options: Options) !*ServerProcess {
         const self = try createStopped(io, allocator, executable_path, options);
@@ -90,6 +95,34 @@ pub const ServerProcess = struct {
         self.failure_reported = false;
         self.last_exit_status = null;
         self.ready_bytes_read = 0;
+        self.closeControl();
+        self.last_control_event = null;
+
+        var control_env = std.process.Environ.Map.init(self.allocator);
+        defer control_env.deinit();
+        var inherited_events: ?std.posix.fd_t = null;
+        defer {
+            if (inherited_events) |fd| _ = std.c.close(fd);
+        }
+        var inherited_release: ?std.posix.fd_t = null;
+        defer {
+            if (inherited_release) |fd| _ = std.c.close(fd);
+        }
+        if (self.options.control_child) {
+            var events: [2]std.posix.fd_t = undefined;
+            if (std.c.pipe(&events) != 0) return error.PipeFailed;
+            self.control_events = events[0];
+            inherited_events = events[1];
+            var release: [2]std.posix.fd_t = undefined;
+            if (std.c.pipe(&release) != 0) return error.PipeFailed;
+            inherited_release = release[0];
+            self.control_release = release[1];
+            if (std.c.fcntl(events[0], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
+            if (std.c.fcntl(release[1], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
+            const setting = try std.fmt.allocPrint(self.allocator, "{d} {d}", .{ events[1], release[0] });
+            defer self.allocator.free(setting);
+            try control_env.put("KGCACHE_TEST_CONTROL", setting);
+        }
 
         const port: u16 = if (self.address) |address| address.getPort() else 0;
         if (self.config_path) |path| {
@@ -135,6 +168,7 @@ pub const ServerProcess = struct {
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
+            .environ_map = if (self.options.control_child) &control_env else null,
         });
         self.pid = child.id.?;
         _ = std.c.close(ready_fds[1]);
@@ -213,6 +247,10 @@ pub const ServerProcess = struct {
                 return err;
             },
         };
+        try self.waitForExit(expected_code);
+    }
+
+    pub fn waitForExit(self: *ServerProcess, expected_code: u8) !void {
         const deadline = now(self.io) + self.options.stop_timeout_ms;
         while (self.pid != null) {
             const status = self.pollExit() catch |err| {
@@ -249,6 +287,35 @@ pub const ServerProcess = struct {
         }
     }
 
+    pub fn waitForControl(self: *ServerProcess, stage: control_protocol.Stage) !control_protocol.Event {
+        var event: control_protocol.Event = undefined;
+        try self.readExact(self.control_events orelse return error.MissingChildControl, std.mem.asBytes(&event));
+        if (event.server_pid != self.pid or event.operation != 1 or event.stage != stage) return error.UnexpectedChildStage;
+        if (self.last_control_event) |previous| {
+            if (event.child_pid != previous.child_pid or event.backend != previous.backend) return error.WrongControlledChild;
+        }
+        self.last_control_event = event;
+        return event;
+    }
+
+    pub fn releaseChild(self: *ServerProcess) !void {
+        if (try self.pollExit() != null) return error.ServerExitedBeforeChildRelease;
+        const fd = self.control_release orelse return error.MissingChildControl;
+        while (true) {
+            const n = std.c.write(fd, "r", 1);
+            if (n < 0 and std.posix.errno(n) == .INTR) continue;
+            if (n != 1) return error.ChildReleaseFailed;
+            return;
+        }
+    }
+
+    fn closeControl(self: *ServerProcess) void {
+        if (self.control_release) |fd| _ = std.c.close(fd);
+        if (self.control_events) |fd| _ = std.c.close(fd);
+        self.control_release = null;
+        self.control_events = null;
+    }
+
     pub fn restart(self: *ServerProcess) !void {
         if (self.pid != null) try self.stop();
         try self.start();
@@ -272,6 +339,14 @@ pub const ServerProcess = struct {
     }
 
     pub fn destroy(self: *ServerProcess) void {
+        if (self.pid != null and self.control_release != null) {
+            self.failed = true;
+            // Let the server reap a held child before forcing parent cleanup.
+            _ = std.c.close(self.control_release.?);
+            self.control_release = null;
+            self.stop() catch {};
+        }
+        self.closeControl();
         if (self.pid != null) {
             self.failed = true;
             self.forceKill();
