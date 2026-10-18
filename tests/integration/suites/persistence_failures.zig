@@ -10,6 +10,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         const rewrite = failure == .rewrite_write;
         const write_failure = failure == .snapshot_write or rewrite;
         const server = try support.ServerProcess.createStopped(io, allocator, controlled_path, .{
+            .case_name = @tagName(failure),
             .extra_config = if (rewrite)
                 "dir data\nappendonly yes\nappendfsync always\nauto-aof-rewrite-percentage 0\nsave \"\"\npersistence-shutdown-grace-ms 1000\n"
             else
@@ -50,7 +51,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             if (rewrite) try resp_client.sendAndExpect(io, server, fd, "*3\r\n$3\r\nSET\r\n$5\r\nlater\r\n$5\r\nadded\r\n", "+OK\r\n");
         }
         const stop_started = std.Io.Clock.awake.now(io).toMilliseconds();
-        try std.posix.kill(server.pid.?, .TERM);
+        try server.sendSignal(.TERM);
         if (rewrite) {
             _ = try server.waitForControl(.draining);
         } else {

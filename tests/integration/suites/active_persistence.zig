@@ -11,6 +11,7 @@ fn checkSnapshot(io: std.Io, allocator: std.mem.Allocator, executable_path: []co
     std.log.info("integration: signal stop during BGSAVE started", .{});
     for ([_]bool{ false, true }) |controlled| {
         const server = try support.ServerProcess.create(io, allocator, if (controlled) controlled_path else executable_path, .{
+            .case_name = if (controlled) "BGSAVE overlap" else "BGSAVE stop",
             .extra_config = if (controlled)
                 "appendonly no\nsave \"\"\ndbfilename state.kgc\n"
             else
@@ -32,7 +33,7 @@ fn checkSnapshot(io: std.Io, allocator: std.mem.Allocator, executable_path: []co
             }
         }
         if (controlled) {
-            try std.posix.kill(server.pid.?, .TERM);
+            try server.sendSignal(.TERM);
             _ = try server.waitForControl(.draining);
             try server.releaseChild();
             const reaped = try server.waitForControl(.reaped);
@@ -59,6 +60,7 @@ fn checkRewrite(io: std.Io, allocator: std.mem.Allocator, executable_path: []con
     std.log.info("integration: signal stop during AOF rewrite started", .{});
     for ([_]bool{ false, true }) |controlled| {
         const server = try support.ServerProcess.create(io, allocator, if (controlled) controlled_path else executable_path, .{
+            .case_name = if (controlled) "AOF rewrite overlap" else "AOF rewrite stop",
             .extra_config = "appendonly yes\nappendfsync always\nauto-aof-rewrite-percentage 0\nsave \"\"\ndbfilename state.kgc\n",
             .control_child = if (controlled) .aof else null,
             .artifact_dir = artifact_dir,
@@ -80,7 +82,7 @@ fn checkRewrite(io: std.Io, allocator: std.mem.Allocator, executable_path: []con
             }
         }
         if (controlled) {
-            try std.posix.kill(server.pid.?, .TERM);
+            try server.sendSignal(.TERM);
             _ = try server.waitForControl(.draining);
             try server.releaseChild();
             const reaped = try server.waitForControl(.reaped);

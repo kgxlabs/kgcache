@@ -191,6 +191,7 @@ fn checkLogCaptureLimit(io: std.Io, allocator: std.mem.Allocator, fake_executabl
 
 fn checkHungProcess(io: std.Io, allocator: std.mem.Allocator, fake_executable_path: []const u8, artifact_root: []const u8) !void {
     const hung = try ServerProcess.create(io, allocator, fake_executable_path, .{
+        .case_name = "artifact shutdown timeout",
         .extra_config = "fake-mode stop-timeout\n",
         .stop_timeout_ms = 200,
         .read_timeout_ms = 100,
@@ -200,6 +201,16 @@ fn checkHungProcess(io: std.Io, allocator: std.mem.Allocator, fake_executable_pa
     var hung_live = true;
     defer if (hung_live) hung.destroy();
     const hung_pid = hung.pid.?;
+    const source = try std.Io.Dir.cwd().openDir(io, hung.data_dir, .{});
+    defer source.close(io);
+    try source.createDir(io, "data", .default_dir);
+    const snapshot_bytes = "snapshot\x00fixture\n";
+    try source.writeFile(io, .{ .sub_path = "data/state.kgc", .data = snapshot_bytes });
+    {
+        const oversized = try source.createFile(io, "data/oversized.kgc", .{});
+        defer oversized.close(io);
+        try oversized.setLength(io, 1024 * 1024 + 1);
+    }
 
     var pipe_fds: [2]std.posix.fd_t = undefined;
     if (std.c.pipe(&pipe_fds) != 0) return error.PipeFailed;
@@ -220,15 +231,29 @@ fn checkHungProcess(io: std.Io, allocator: std.mem.Allocator, fake_executable_pa
         if (err != error.ProcessNotFound) return err;
     }
     if (std.mem.indexOf(u8, hung.stderr.bytes(), "fake shutdown hang") == null) return error.MissingCapturedLog;
-    const saved_log_path = try std.fmt.allocPrint(allocator, "{s}/{s}/stderr.log", .{
-        artifact_root, std.fs.path.basename(hung.data_dir),
+    const bundle_path = try std.fmt.allocPrint(allocator, "{s}/{s}-run-{d}", .{
+        artifact_root, std.fs.path.basename(hung.data_dir), hung.run_number,
     });
-    defer allocator.free(saved_log_path);
+    defer allocator.free(bundle_path);
     hung.destroy();
     hung_live = false;
-    const saved_log = try std.Io.Dir.cwd().readFileAlloc(io, saved_log_path, allocator, .limited(16 * 1024 + 1));
+    const bundle = try std.Io.Dir.cwd().openDir(io, bundle_path, .{});
+    defer bundle.close(io);
+    const saved_log = try bundle.readFileAlloc(io, "stderr.log", allocator, .limited(16 * 1024 + 1));
     defer allocator.free(saved_log);
     if (std.mem.indexOf(u8, saved_log, "fake shutdown hang") == null) return error.MissingSavedLog;
+    const saved_snapshot = try bundle.readFileAlloc(io, "files/data/state.kgc", allocator, .limited(1024));
+    defer allocator.free(saved_snapshot);
+    if (!std.mem.eql(u8, snapshot_bytes, saved_snapshot)) return error.WrongSnapshotArtifact;
+    const status = try bundle.readFileAlloc(io, "status.txt", allocator, .limited(2048));
+    defer allocator.free(status);
+    for ([_][]const u8{ "case=artifact shutdown timeout\n", "phase=shutdown\n", "error=ShutdownTimeout\n", "ready=true\n", "forced_kill=true\n" }) |field| {
+        if (std.mem.indexOf(u8, status, field) == null) return error.MissingStatusArtifact;
+    }
+    const listing = try bundle.readFileAlloc(io, "files.txt", allocator, .limited(64 * 1024));
+    defer allocator.free(listing);
+    if (std.mem.indexOf(u8, listing, "data/oversized.kgc\t1048577 bytes\tomitted: byte limit") == null) return error.MissingArtifactLimit;
+    try std.testing.expectError(error.FileNotFound, bundle.access(io, "files/data/oversized.kgc", .{}));
 }
 
 fn expectStartError(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, options: harness.Options, expected: anyerror) !void {

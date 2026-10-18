@@ -17,6 +17,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         const config = try std.fmt.allocPrint(allocator, "appendonly yes\nappendfsync {s}\nauto-aof-rewrite-percentage 0\nsave \"\"\ndbfilename state.kgc\n", .{case.policy});
         defer allocator.free(config);
         const server = try support.ServerProcess.create(io, allocator, executable_path, .{
+            .case_name = if (repeated_restart) "AOF restart cycles" else "AOF clean signal stop",
             .extra_config = config,
             .artifact_dir = artifact_dir,
         });
