@@ -19,6 +19,7 @@ const aof_recovery = @import("suites/aof_recovery.zig");
 const aof_shutdown = @import("suites/aof_shutdown.zig");
 const snapshot_shutdown = @import("suites/snapshot_shutdown.zig");
 const active_persistence = @import("suites/active_persistence.zig");
+const persistence_failures = @import("suites/persistence_failures.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
@@ -55,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
     try aof_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try snapshot_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try active_persistence.run(init.io, init.gpa, executable_path, controlled_absolute_path, artifact_dir);
+    try persistence_failures.run(init.io, init.gpa, executable_path, controlled_absolute_path, artifact_dir);
     try idle_clients_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try transport_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try restart_same_port.run(init.io, init.gpa, executable_path, artifact_dir);

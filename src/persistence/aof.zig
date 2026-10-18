@@ -334,6 +334,7 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
 
         // The parent reports a generic failure until issue #118 adds source errors.
         // Logging here could wait forever on a mutex copied during fork.
+        @import("test_control.zig").childBeforeWrite(controlled) catch std.c._exit(1);
         self.writeBase(storages, base_seq) catch std.c._exit(1);
         @import("test_control.zig").childSynced(controlled);
 

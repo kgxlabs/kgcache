@@ -1,5 +1,5 @@
 pub const Backend = enum(u8) { kgc, aof };
-pub const Stage = enum(u8) { synced, draining, reaped };
+pub const Stage = enum(u8) { before_write, synced, draining, reaped };
 
 // One raw pipe write keeps records from the server and child together.
 pub const Event = extern struct {

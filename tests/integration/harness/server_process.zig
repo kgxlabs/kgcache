@@ -19,6 +19,7 @@ pub const Options = struct {
     artifact_dir: ?[]const u8 = null,
     report_failures: bool = true,
     control_child: ?control_protocol.Backend = null,
+    control_stage: control_protocol.Stage = .synced,
 };
 
 pub const ServerProcess = struct {
@@ -119,7 +120,7 @@ pub const ServerProcess = struct {
             self.control_release = release[1];
             if (std.c.fcntl(events[0], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
             if (std.c.fcntl(release[1], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
-            const setting = try std.fmt.allocPrint(self.allocator, "{d} {d} {s}", .{ events[1], release[0], @tagName(backend) });
+            const setting = try std.fmt.allocPrint(self.allocator, "{d} {d} {s} {s}", .{ events[1], release[0], @tagName(backend), @tagName(self.options.control_stage) });
             defer self.allocator.free(setting);
             try control_env.put("KGCACHE_TEST_CONTROL", setting);
         }
@@ -300,10 +301,18 @@ pub const ServerProcess = struct {
     }
 
     pub fn releaseChild(self: *ServerProcess) !void {
+        try self.sendChildCommand('r');
+    }
+
+    pub fn failChildWrite(self: *ServerProcess) !void {
+        try self.sendChildCommand('f');
+    }
+
+    fn sendChildCommand(self: *ServerProcess, command: u8) !void {
         if (try self.pollExit() != null) return error.ServerExitedBeforeChildRelease;
         const fd = self.control_release orelse return error.MissingChildControl;
         while (true) {
-            const n = std.c.write(fd, "r", 1);
+            const n = std.c.write(fd, @ptrCast(&command), 1);
             if (n < 0 and std.posix.errno(n) == .INTR) continue;
             if (n != 1) return error.ChildReleaseFailed;
             return;

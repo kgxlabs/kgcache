@@ -169,6 +169,7 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
         // TODO: send child source errors to the parent (#118).
         // TODO: replace the child encoder and I/O with a fork-safe writer (#118).
         // Logging here could wait forever on a mutex copied during fork.
+        test_control.childBeforeWrite(controlled) catch std.c._exit(1);
         self.dump(storages, output) catch std.c._exit(1);
         test_control.childSynced(controlled);
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
