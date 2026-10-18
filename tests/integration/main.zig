@@ -16,6 +16,7 @@ const restart_same_port = @import("suites/restart_same_port.zig");
 const two_servers = @import("suites/two_servers.zig");
 const process_harness = @import("suites/process_harness.zig");
 const aof_recovery = @import("suites/aof_recovery.zig");
+const aof_shutdown = @import("suites/aof_shutdown.zig");
 const snapshot_shutdown = @import("suites/snapshot_shutdown.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -47,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
     try invalid_config.run(init.io, init.gpa, executable_path, artifact_dir);
     try configuration.run(init.io, init.gpa, executable_path, artifact_dir);
     try aof_recovery.run(init.io, init.gpa, executable_path, artifact_dir);
+    try aof_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try snapshot_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try idle_clients_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try transport_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
