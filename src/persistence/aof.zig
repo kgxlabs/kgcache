@@ -322,6 +322,7 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
     if (old_file) |file| file.close(self._io);
 
     // start the fork
+    const controlled = @import("test_control.zig").claim(.aof);
     const pid = try self._fork();
 
     if (pid == 0) {
@@ -334,11 +335,13 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
         // The parent reports a generic failure until issue #118 adds source errors.
         // Logging here could wait forever on a mutex copied during fork.
         self.writeBase(storages, base_seq) catch std.c._exit(1);
+        @import("test_control.zig").childSynced(controlled);
 
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
         // using _exit to sidestep clearing the buffered data (at the time of fork) completely
         std.c._exit(0);
     }
+    @import("test_control.zig").track(controlled, pid);
 
     const previous_pending_base_seq = self._pending_base_seq;
     const previous_rewrite_settled = self._rewrite_settled;

@@ -5,6 +5,7 @@ const enabled = @import("build_options").persistence_test_controls;
 var event_fd: ?std.posix.fd_t = null;
 var release_fd: ?std.posix.fd_t = null;
 var server_pid: i32 = 0;
+var backend: protocol.Backend = .kgc;
 var next_operation: std.atomic.Value(u32) = .init(0);
 var selected_pid: std.atomic.Value(i32) = .init(0);
 
@@ -15,6 +16,7 @@ pub fn init(environ: std.process.Environ) !void {
     var fields = std.mem.tokenizeScalar(u8, setting, ' ');
     event_fd = try std.fmt.parseInt(i32, fields.next() orelse return error.InvalidTestControl, 10);
     release_fd = try std.fmt.parseInt(i32, fields.next() orelse return error.InvalidTestControl, 10);
+    backend = std.meta.stringToEnum(protocol.Backend, fields.next() orelse return error.InvalidTestControl) orelse return error.InvalidTestControl;
     if (fields.next() != null or event_fd.? < 3 or release_fd.? < 3) return error.InvalidTestControl;
     server_pid = std.c.getpid();
 }
@@ -25,9 +27,9 @@ pub fn deinit() void {
     if (release_fd) |fd| _ = std.c.close(fd);
 }
 
-pub fn claim() bool {
+pub fn claim(candidate: protocol.Backend) bool {
     if (!enabled) return false;
-    return event_fd != null and next_operation.fetchAdd(1, .monotonic) == 0;
+    return event_fd != null and candidate == backend and next_operation.fetchAdd(1, .monotonic) == 0;
 }
 
 pub fn track(selected: bool, pid: i32) void {
@@ -64,7 +66,7 @@ fn emit(stage: protocol.Stage, pid: i32, status: u32) bool {
         .child_pid = pid,
         .operation = 1,
         .status = status,
-        .backend = .kgc,
+        .backend = backend,
         .stage = stage,
     };
     while (true) {

@@ -156,7 +156,7 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
     }
     self._background_path = output_path;
     errdefer self._background_path = null;
-    const controlled = test_control.claim();
+    const controlled = test_control.claim(.kgc);
     const pid = try self._fork();
 
     if (pid == 0) {

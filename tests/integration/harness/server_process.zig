@@ -18,7 +18,7 @@ pub const Options = struct {
     auto_ready_fd: bool = true,
     artifact_dir: ?[]const u8 = null,
     report_failures: bool = true,
-    control_child: bool = false,
+    control_child: ?control_protocol.Backend = null,
 };
 
 pub const ServerProcess = struct {
@@ -108,7 +108,7 @@ pub const ServerProcess = struct {
         defer {
             if (inherited_release) |fd| _ = std.c.close(fd);
         }
-        if (self.options.control_child) {
+        if (self.options.control_child) |backend| {
             var events: [2]std.posix.fd_t = undefined;
             if (std.c.pipe(&events) != 0) return error.PipeFailed;
             self.control_events = events[0];
@@ -119,7 +119,7 @@ pub const ServerProcess = struct {
             self.control_release = release[1];
             if (std.c.fcntl(events[0], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
             if (std.c.fcntl(release[1], std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC)) != 0) return error.FcntlFailed;
-            const setting = try std.fmt.allocPrint(self.allocator, "{d} {d}", .{ events[1], release[0] });
+            const setting = try std.fmt.allocPrint(self.allocator, "{d} {d} {s}", .{ events[1], release[0], @tagName(backend) });
             defer self.allocator.free(setting);
             try control_env.put("KGCACHE_TEST_CONTROL", setting);
         }
@@ -168,7 +168,7 @@ pub const ServerProcess = struct {
             .stdin = .ignore,
             .stdout = .pipe,
             .stderr = .pipe,
-            .environ_map = if (self.options.control_child) &control_env else null,
+            .environ_map = if (self.options.control_child != null) &control_env else null,
         });
         self.pid = child.id.?;
         _ = std.c.close(ready_fds[1]);
@@ -291,6 +291,7 @@ pub const ServerProcess = struct {
         var event: control_protocol.Event = undefined;
         try self.readExact(self.control_events orelse return error.MissingChildControl, std.mem.asBytes(&event));
         if (event.server_pid != self.pid or event.operation != 1 or event.stage != stage) return error.UnexpectedChildStage;
+        if (event.backend != self.options.control_child) return error.WrongControlledBackend;
         if (self.last_control_event) |previous| {
             if (event.child_pid != previous.child_pid or event.backend != previous.backend) return error.WrongControlledChild;
         }
