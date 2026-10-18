@@ -14,8 +14,9 @@ test "final snapshot follows the stop reason, AOF mode, dirty state, and opt-out
         enabled: bool = true,
         dirty: bool = true,
         saved: bool = false,
+        grace_ms: u32 = 10_000,
     }{
-        .{ .dirty = false },
+        .{ .dirty = false, .grace_ms = 0 },
         .{ .reason = .cleanup },
         .{ .enabled = false },
         .{ .append_only = true },
@@ -26,6 +27,7 @@ test "final snapshot follows the stop reason, AOF mode, dirty state, and opt-out
         defer scratch.deinit();
         var config = scratch.config(case.append_only);
         config.shutdown_save = case.enabled;
+        config.persistence_shutdown_grace_ms = case.grace_ms;
         const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
         var needs_destroy = true;
         defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
@@ -82,39 +84,79 @@ test "zero grace fails a required final save without forking" {
     try expectValue(restarted, "key", "previous");
 }
 
-test "final snapshot publication failure preserves the previous file and reports its source" {
+test "final snapshot I/O failures preserve the previous file and report a parent error" {
     const Fail = struct {
+        fn create(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+            return error.AccessDenied;
+        }
+
+        fn write(_: ?*anyopaque, _: std.Io.File, _: []const u8, _: []const []const u8, _: usize, _: u64) std.Io.File.WritePositionalError!usize {
+            return error.InputOutput;
+        }
+
+        fn sync(_: ?*anyopaque, _: std.Io.File) std.Io.File.SyncError!void {
+            return error.InputOutput;
+        }
+
         fn rename(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
             return error.CrossDevice;
         }
     };
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    const config = scratch.config(false);
-    var logger = logging.TestLogger.init();
-    const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
-    var needs_destroy = true;
-    defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
-    try setValue(server, "key", "previous");
-    try server._store.save();
-    try setValue(server, "key", "latest");
-    var io_vtable = testing.io.vtable.*;
-    io_vtable.dirRename = Fail.rename;
-    server._kgc._io = .{ .userdata = testing.io.userdata, .vtable = &io_vtable };
-    needs_destroy = false;
-    try testing.expectError(error.CrossDevice, server.destroy(.clean_signal));
-    var reports: usize = 0;
-    for (logger.recordedEvents()) |event| {
-        if (event.kind == .err) {
-            try testing.expectEqual(error.CrossDevice, event.source.?);
+    for ([_]enum { open, write, sync, rename }{ .open, .write, .sync, .rename }) |failure| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        const config = scratch.config(false);
+        var logger = logging.TestLogger.init();
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+        var needs_destroy = true;
+        defer if (needs_destroy) server.destroy(.cleanup) catch {};
+        try setValue(server, "key", "previous");
+        try server._store.save();
+        const original = try scratch.tmp.dir.openFile(testing.io, config.dbfilename, .{});
+        defer original.close(testing.io);
+        try setValue(server, "key", "latest");
+        var io_vtable = testing.io.vtable.*;
+        const expected: anyerror = switch (failure) {
+            .open => blk: {
+                io_vtable.dirCreateFile = Fail.create;
+                break :blk error.AccessDenied;
+            },
+            .write => blk: {
+                io_vtable.fileWritePositional = Fail.write;
+                break :blk error.BackgroundSaveFailed;
+            },
+            .sync => blk: {
+                io_vtable.fileSync = Fail.sync;
+                break :blk error.BackgroundSaveFailed;
+            },
+            .rename => blk: {
+                io_vtable.dirRename = Fail.rename;
+                break :blk error.CrossDevice;
+            },
+        };
+        server._kgc._io = .{ .userdata = testing.io.userdata, .vtable = &io_vtable };
+        needs_destroy = false;
+        try testing.expectError(expected, server.destroy(.clean_signal));
+        var reports: usize = 0;
+        for (logger.recordedEvents()) |event| {
+            if (event.kind != .err) continue;
+            try testing.expectEqual(expected, event.source.?);
             reports += 1;
         }
-    }
-    try testing.expectEqual(1, reports);
+        try testing.expectEqual(1, reports);
+        const before = try original.stat(testing.io);
+        const after = try scratch.tmp.dir.statFile(testing.io, config.dbfilename, .{});
+        try testing.expectEqual(before.inode, after.inode);
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy(.cleanup) catch unreachable;
-    try expectValue(restarted, "key", "previous");
+        var dir = try std.Io.Dir.cwd().openDir(testing.io, scratch.data_dir, .{ .iterate = true });
+        defer dir.close(testing.io);
+        var files = dir.iterate();
+        while (try files.next(testing.io)) |entry| try testing.expectEqualStrings(config.dbfilename, entry.name);
+
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        defer restarted.destroy(.cleanup) catch unreachable;
+        try expectValue(restarted, "key", "previous");
+    }
 }
 
 const Scratch = struct {
@@ -164,6 +206,7 @@ const ChildGate = struct {
     pid: std.atomic.Value(std.posix.pid_t) = .init(0),
     forked: std.Io.Event = .unset,
     fail_child: bool,
+    pause_after_sync: bool = false,
     released: bool = false,
 
     fn init(fail_child: bool) !ChildGate {
@@ -185,22 +228,26 @@ const ChildGate = struct {
             return error.ChildForkFailed;
         }
         if (rc == 0) {
-            _ = std.c.close(self.ready[0]);
-            _ = std.c.close(self.release_pipe[1]);
-            var token = [_]u8{1};
-            if (std.c.write(self.ready[1], &token, 1) != 1) std.c._exit(2);
-            while (true) {
-                const count = std.c.read(self.release_pipe[0], &token, 1);
-                if (count == 1) break;
-                if (count < 0 and std.posix.errno(count) == .INTR) continue;
-                std.c._exit(2);
-            }
+            if (!self.pause_after_sync) self.holdChild();
             if (self.fail_child) std.c._exit(1);
             return 0;
         }
         self.pid.store(@intCast(rc), .release);
         self.forked.set(testing.io);
         return @intCast(rc);
+    }
+
+    fn holdChild(self: *ChildGate) void {
+        _ = std.c.close(self.ready[0]);
+        _ = std.c.close(self.release_pipe[1]);
+        var token = [_]u8{1};
+        if (std.c.write(self.ready[1], &token, 1) != 1) std.c._exit(2);
+        while (true) {
+            const count = std.c.read(self.release_pipe[0], &token, 1);
+            if (count == 1) return;
+            if (count < 0 and std.posix.errno(count) == .INTR) continue;
+            std.c._exit(2);
+        }
     }
 
     fn awaitReady(self: *ChildGate) !std.posix.pid_t {
@@ -258,6 +305,160 @@ fn forkKgc() anyerror!std.posix.pid_t {
 
 fn forkAof() anyerror!std.posix.pid_t {
     return aof_gate.?.fork();
+}
+
+// Release real children at exact fake-clock times, then collect their exits.
+const ShutdownClock = struct {
+    var ms: i64 = 0;
+    var first_finish_ms: i64 = 0;
+    var final_finish_ms: i64 = 0;
+    var first_pid: std.posix.pid_t = 0;
+    var first_gate: *ChildGate = undefined;
+    var first_finished: bool = false;
+    var final_ready: bool = false;
+    var killed_pid: ?std.posix.pid_t = null;
+
+    fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+        if (clock != .awake) return testing.io.vtable.now(userdata, clock);
+        return .{ .nanoseconds = @as(i96, ms) * std.time.ns_per_ms };
+    }
+
+    fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        const next_finish = if (first_finished) final_finish_ms else first_finish_ms;
+        var end = ms + timeout.duration.raw.toMilliseconds();
+        if (next_finish > ms) end = @min(end, next_finish);
+        ms = end;
+    }
+
+    fn fork() anyerror!std.posix.pid_t {
+        if (ms >= 40) return error.ForkAfterWorkDeadline;
+        return kgc_gate.?.fork();
+    }
+
+    fn sync(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+        try testing.io.vtable.fileSync(userdata, file);
+        kgc_gate.?.holdChild();
+    }
+
+    fn wait(pid: std.posix.pid_t) anyerror!?u32 {
+        if (killed_pid == pid) return waitForExit(pid);
+        if (pid == first_pid) {
+            if (ms < first_finish_ms) return null;
+            first_finished = true;
+            first_gate.release();
+            return waitForExit(pid);
+        }
+        if (!final_ready) {
+            _ = try kgc_gate.?.awaitReady();
+            final_ready = true;
+        }
+        if (ms < final_finish_ms) return null;
+        kgc_gate.?.release();
+        return waitForExit(pid);
+    }
+
+    fn kill(pid: std.posix.pid_t) anyerror!void {
+        try std.posix.kill(pid, .KILL);
+        killed_pid = pid;
+    }
+
+    fn waitForExit(pid: std.posix.pid_t) !?u32 {
+        var status: c_int = undefined;
+        while (true) {
+            const result = std.posix.system.waitpid(pid, &status, 0);
+            if (result == pid) return @bitCast(status);
+            if (result < 0 and std.posix.errno(result) == .INTR) continue;
+            return error.UnexpectedChildWait;
+        }
+    }
+};
+
+test "final save uses the original deadline and preserves an earlier failure" {
+    lockGates();
+    defer gate_mutex.unlock();
+    const cases = [_]struct {
+        first_finish_ms: i64 = 30,
+        final_finish_ms: i64 = 39,
+        first_fails: bool = false,
+        expected: ?anyerror = null,
+        restored: []const u8 = "latest",
+        finish_ms: i64 = 39,
+    }{
+        .{ .final_finish_ms = 50, .expected = error.PersistenceShutdownTimeout, .restored = "captured", .finish_ms = 40 },
+        .{},
+        .{ .first_finish_ms = 40, .expected = error.PersistenceShutdownTimeout, .restored = "captured", .finish_ms = 40 },
+        .{ .first_fails = true, .expected = error.BackgroundSaveFailed },
+    };
+    for (cases) |case| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        var first_gate = try ChildGate.init(case.first_fails);
+        defer first_gate.deinit();
+        var final_gate = try ChildGate.init(false);
+        final_gate.pause_after_sync = true;
+        defer final_gate.deinit();
+        kgc_gate = &first_gate;
+        defer kgc_gate = null;
+        ShutdownClock.ms = 0;
+        ShutdownClock.first_finish_ms = case.first_finish_ms;
+        ShutdownClock.final_finish_ms = case.final_finish_ms;
+        ShutdownClock.first_finished = false;
+        ShutdownClock.first_gate = &first_gate;
+        ShutdownClock.final_ready = false;
+        ShutdownClock.killed_pid = null;
+
+        var config = scratch.config(false);
+        config.persistence_shutdown_grace_ms = 40;
+        var logger = logging.TestLogger.init();
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+        var needs_destroy = true;
+        defer if (needs_destroy) {
+            first_gate.release();
+            final_gate.release();
+            server.destroy(.cleanup) catch {};
+        };
+        try setValue(server, "key", "previous");
+        try server._store.save();
+        try setValue(server, "key", "captured");
+        server._kgc._fork = forkKgc;
+        _ = try server._store.bgsave(.manual);
+        ShutdownClock.first_pid = try first_gate.awaitReady();
+        try setValue(server, "key", "latest");
+        kgc_gate = &final_gate;
+        server._kgc._fork = ShutdownClock.fork;
+
+        var io_vtable = testing.io.vtable.*;
+        io_vtable.now = ShutdownClock.now;
+        io_vtable.sleep = ShutdownClock.sleep;
+        io_vtable.fileSync = ShutdownClock.sync;
+        const io: std.Io = .{ .userdata = testing.io.userdata, .vtable = &io_vtable };
+        server._io = io;
+        server._kgc._io = io;
+        server._persistence_state._process = .{ .wait_pid = ShutdownClock.wait, .kill_pid = ShutdownClock.kill };
+        needs_destroy = false;
+        const result: ?anyerror = blk: {
+            server.destroy(.clean_signal) catch |err| break :blk err;
+            break :blk null;
+        };
+        try testing.expectEqual(case.expected, result);
+        try testing.expectEqual(case.finish_ms, ShutdownClock.ms);
+        try expectReaped(ShutdownClock.first_pid);
+        const final_pid = final_gate.pid.load(.acquire);
+        if (final_pid > 0) try expectReaped(final_pid);
+
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        defer restarted.destroy(.cleanup) catch unreachable;
+        try expectValue(restarted, "key", case.restored);
+        if (case.expected) |expected| {
+            var reported = false;
+            for (logger.recordedEvents()) |event| {
+                if (event.source) |source| {
+                    if (source == expected) reported = true;
+                }
+            }
+            try testing.expect(reported);
+        }
+    }
 }
 
 const WaitObserver = struct {

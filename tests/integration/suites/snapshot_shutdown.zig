@@ -55,6 +55,8 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         }
         try server.stop();
     }
+    try checkFailedFinalSaves(io, allocator, executable_path, artifact_dir);
+    try checkRepeatedSignals(io, allocator, executable_path, artifact_dir);
     try checkEmptyDatabase(io, allocator, executable_path, artifact_dir);
     try checkSnapshotContents(io, allocator, executable_path, artifact_dir);
     std.log.info("integration: final shutdown snapshot passed", .{});
@@ -64,6 +66,100 @@ fn expectSameSnapshot(io: std.Io, dir: std.Io.Dir, original: std.Io.File) !void 
     const before = try original.stat(io);
     const after = try dir.statFile(io, "state.kgc", .{});
     if (before.inode != after.inode) return error.UnexpectedSnapshotReplacement;
+}
+
+fn checkFailedFinalSaves(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
+    const cases = [_]struct {
+        grace_ms: u32 = 0,
+        dirty: bool = true,
+        move_directory: bool = false,
+        source: ?[]const u8 = null,
+        exit_code: u8 = 0,
+    }{
+        .{ .dirty = false },
+        .{ .source = "PersistenceShutdownTimeout", .exit_code = 1 },
+        .{ .grace_ms = 1_000, .move_directory = true, .source = "FileNotFound", .exit_code = 1 },
+    };
+    for (cases) |case| {
+        const config = try std.fmt.allocPrint(allocator, "appendonly no\nsave \"\"\ndir data\ndbfilename state.kgc\npersistence-shutdown-grace-ms {d}\n", .{case.grace_ms});
+        defer allocator.free(config);
+        const server = try support.ServerProcess.createStopped(io, allocator, executable_path, .{
+            .extra_config = config,
+            .artifact_dir = artifact_dir,
+        });
+        defer server.destroy();
+        errdefer server.failed = true;
+        var root = try std.Io.Dir.cwd().openDir(io, server.data_dir, .{});
+        defer root.close(io);
+        try root.createDir(io, "data", .default_dir);
+        var data = try root.openDir(io, "data", .{});
+        defer data.close(io);
+        try server.start();
+        {
+            const client = try server.address.?.connect(io, .{ .mode = .stream });
+            defer client.close(io);
+            const fd = client.socket.handle;
+            try resp_client.sendAndExpect(io, server, fd, "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\nold\r\n", "+OK\r\n");
+            try resp_client.sendAndExpect(io, server, fd, "*1\r\n$4\r\nSAVE\r\n", "+OK\r\n");
+            if (case.dirty) try resp_client.sendAndExpect(io, server, fd, "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nfresh\r\n", "+OK\r\n");
+        }
+        const original = try data.openFile(io, "state.kgc", .{});
+        defer original.close(io);
+        if (case.move_directory) try root.rename("data", root, "saved-data", io);
+        try server.stopExpectingExit(.TERM, case.exit_code);
+        if (case.source) |source| {
+            const in_stdout = std.mem.indexOf(u8, server.stdout.bytes(), source) != null;
+            const in_stderr = std.mem.indexOf(u8, server.stderr.bytes(), source) != null;
+            if (!in_stdout and !in_stderr) return error.MissingShutdownError;
+        }
+        if (case.move_directory) try root.rename("saved-data", root, "data", io);
+        try expectSameSnapshot(io, data, original);
+        try server.start();
+        {
+            const client = try server.address.?.connect(io, .{ .mode = .stream });
+            defer client.close(io);
+            try resp_client.sendAndExpect(io, server, client.socket.handle, "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n", "$3\r\nold\r\n");
+        }
+        try server.stop();
+    }
+}
+
+fn checkRepeatedSignals(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {
+    const server = try support.ServerProcess.create(io, allocator, executable_path, .{
+        .extra_config = "appendonly no\nsave \"\"\ndbfilename state.kgc\n",
+        .artifact_dir = artifact_dir,
+    });
+    defer server.destroy();
+    errdefer server.failed = true;
+    {
+        const client = try server.address.?.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        try resp_client.sendAndExpect(io, server, client.socket.handle, "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nfresh\r\n", "+OK\r\n");
+    }
+    // Queue both stop signals before allowing the server to handle either one.
+    const pid = server.pid.?;
+    try std.posix.kill(pid, .STOP);
+    var status: c_int = undefined;
+    while (true) {
+        const result = std.posix.system.waitpid(pid, &status, std.c.W.UNTRACED);
+        if (result == pid and std.c.W.IFSTOPPED(@bitCast(status))) break;
+        if (result < 0 and std.posix.errno(result) == .INTR) continue;
+        return error.ServerDidNotStop;
+    }
+    try std.posix.kill(pid, .TERM);
+    try std.posix.kill(pid, .INT);
+    try std.posix.kill(pid, .TERM);
+    try server.stopWithSignal(.CONT);
+    const owners = std.mem.count(u8, server.stdout.bytes(), "app: cleaning up server") +
+        std.mem.count(u8, server.stderr.bytes(), "app: cleaning up server");
+    if (owners != 1) return error.RepeatedShutdown;
+    try server.start();
+    {
+        const client = try server.address.?.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        try resp_client.sendAndExpect(io, server, client.socket.handle, "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n", "$5\r\nfresh\r\n");
+    }
+    try server.stop();
 }
 
 fn checkEmptyDatabase(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, artifact_dir: ?[]const u8) !void {

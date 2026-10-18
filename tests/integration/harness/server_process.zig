@@ -198,6 +198,10 @@ pub const ServerProcess = struct {
     }
 
     pub fn stopWithSignal(self: *ServerProcess, signal: std.posix.SIG) !void {
+        return self.stopExpectingExit(signal, 0);
+    }
+
+    pub fn stopExpectingExit(self: *ServerProcess, signal: std.posix.SIG, expected_code: u8) !void {
         const pid = self.pid orelse return error.NotRunning;
         std.posix.kill(pid, signal) catch |err| switch (err) {
             error.ProcessNotFound => {},
@@ -220,7 +224,7 @@ pub const ServerProcess = struct {
             };
             if (status) |code| {
                 self.joinDrainer();
-                if (!std.c.W.IFEXITED(code) or std.c.W.EXITSTATUS(code) != 0) {
+                if (!std.c.W.IFEXITED(code) or std.c.W.EXITSTATUS(code) != expected_code) {
                     self.failed = true;
                     self.report("shutdown", error.UncleanShutdown);
                     return error.UncleanShutdown;
