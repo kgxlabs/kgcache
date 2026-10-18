@@ -57,6 +57,11 @@
 # dbfilename dump.kgc
 # Changing persistence paths or names does not move or convert old files.
 
+# Save remaining dirty snapshot data on a clean SIGINT or SIGTERM stop.
+# Applies only when AOF is off. Uses the remaining persistence shutdown budget.
+# Set no to opt out. save "" disables periodic saves only.
+# shutdown-save yes
+
 # How often, in milliseconds, background work runs. This includes active
 # expiration, AOF flushing, save checks, and child-process cleanup.
 # Range: 1 to 9223372036854775807.
@@ -88,8 +93,8 @@
 # writes happened in the last <seconds> seconds since the last save.
 # This directive may be repeated; if ANY rule's condition is met, a
 # background save is triggered. With no `save` line at all (the
-# default), automatic saving is disabled -- SAVE/BGSAVE still work
-# on demand.
+# default), periodic saving is disabled. SAVE and BGSAVE still work on demand.
+# A clean stop still saves dirty data unless shutdown-save is no.
 # Ranges: seconds 1 to 9223372036854775807; changes 1 to 4294967295.
 # Use two values separated by spaces or tabs, or save "" to clear prior rules.
 # save 3600 1

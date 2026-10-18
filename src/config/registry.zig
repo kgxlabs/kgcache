@@ -30,6 +30,7 @@ const definitions = [_]DirectiveDefinition{
     booleanDirective("exclusive-bg-persistence", "exclusive_bg_persistence"),
     integerDirective("persistence-shutdown-grace-ms", "persistence_shutdown_grace_ms", u32, 0, std.math.maxInt(u32)),
     saveDirective(),
+    booleanDirective("shutdown-save", "shutdown_save"),
     booleanDirective("appendonly", "append_only"),
     enumDirective("appendfsync", "append_fsync", Config.AppendFsync),
     stringDirective("appenddirname", "append_dirname", Config.validateAppendDirname),
@@ -375,7 +376,7 @@ test {
 test "find returns static definitions and matches names case-sensitively" {
     const testing = std.testing;
     const entries = all();
-    try testing.expectEqual(22, entries.len);
+    try testing.expectEqual(23, entries.len);
 
     for (entries, 0..) |definition, index| {
         try testing.expect(find(definition.name).? == &entries[index]);

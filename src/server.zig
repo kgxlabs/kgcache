@@ -195,7 +195,6 @@ pub fn run(self: *Server, ready_callback: ?ReadyCallback) !void {
 /// Returns the first cleanup source after releasing safe resources. An
 /// unresolved child keeps persistence resources alive.
 pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
-    _ = reason;
     self.stopCron();
 
     var cleanup_error: ?anyerror = null;
@@ -207,9 +206,28 @@ pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
         .grace_ms = self._config.persistence_shutdown_grace_ms,
     });
     const journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
-    const drain_result = shutdown_context.run(self._io, self._logger, &self._persistence_state, journal);
-
+    var drain_result = shutdown_context.run(self._io, self._logger, &self._persistence_state, journal);
     if (cleanup_error == null) cleanup_error = drain_result.err;
+
+    const should_save_snapshot =
+        drain_result.status == .complete and
+        reason == .clean_signal and
+        self._aof == null and
+        self._config.shutdown_save and
+        self._persistence_state.captureSnapshotChangeCount() > 0;
+
+    if (should_save_snapshot) final_save: {
+        // TODO: refactor this behind a shutdown interface: https://github.com/kgxlabs/kgcache/issues/231
+        self._kgc.saveOnShutdown(self._data_storages, shutdown_context.workDeadlineMs()) catch |err| {
+            self._logger.err("server: final snapshot failed to start", err, @errorReturnTrace());
+            if (cleanup_error == null) cleanup_error = err;
+            break :final_save;
+        };
+
+        drain_result = shutdown_context.run(self._io, self._logger, &self._persistence_state, journal);
+        if (cleanup_error == null) cleanup_error = drain_result.err;
+    }
+
     switch (drain_result.status) {
         .complete => {},
         .children_unresolved => return cleanup_error orelse error.PersistenceChildrenUnresolved,

@@ -50,6 +50,10 @@ pub const Context = struct {
         return @max(0, self._work_deadline_ms -| std.Io.Clock.awake.now(io).toMilliseconds());
     }
 
+    pub fn workDeadlineMs(self: *const Context) i64 {
+        return self._work_deadline_ms;
+    }
+
     /// Call after cron and all client workers have joined.
     pub fn run(
         self: *Context,
@@ -58,7 +62,7 @@ pub const Context = struct {
         state: *PersistenceState,
         maybe_aof: ?JournalPersistence,
     ) Result {
-        // TODO: replace this with proper logger after this issue: https://github.com/kgxlabs/kgcache/issues/227
+        // TODO: add child output to shutdown logs (#227).
         logChildren(logger, state);
 
         while (true) {

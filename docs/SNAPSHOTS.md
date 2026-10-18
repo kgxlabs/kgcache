@@ -111,7 +111,7 @@ tick 1: fork() ── child starts dumping
 tick 2: waitpid(WNOHANG) → still running → no-op
 tick 3: waitpid(WNOHANG) → still running → no-op
 tick 4: waitpid(WNOHANG) → exited
-          ├─ success: account for the captured changes
+          ├─ success: publish the snapshot, then account for captured changes
           └─ failure: keep all changes dirty; the parent reports the failure
         then clear the in-progress flag
 ```
@@ -119,8 +119,10 @@ tick 4: waitpid(WNOHANG) → exited
 If the child has not exited yet, the poll is a no-op. Once it has,
 `PersistenceState` clears the recorded child, returns its status and captured
 change count, and keeps the save claim active until cron finishes accounting
-for the result. A successful child marks the captured changes as saved. A
-failed child leaves every change dirty. The child exits without logging;
+for the result. The child writes and syncs a unique temporary file. After a
+successful child exit, the parent replaces the snapshot with that file.
+Only then are the captured changes marked as saved. A failed child or failed
+replacement leaves every change dirty. The child exits without logging;
 the parent reports `BackgroundSaveFailed` for an ordinary exit of 1, or the
 existing reaper error for a wait or abnormal-exit failure. The child's original
 error and trace are temporarily unavailable. Cron releases the save claim only
@@ -133,7 +135,7 @@ joined. The server logs each operation and PID, then polls both children under
 one shared `persistence-shutdown-grace-ms` budget (default 10000 ms). At expiry,
 it reports a timeout and sends `SIGKILL` to remaining children. Zero skips the
 graceful wait, but completed children are still collected before termination.
-Shutdown does not retry a failed save.
+Shutdown does not retry a failed final save.
 
 The budget starts once, after workers join. Finishing an operation does not
 reset the time limit.
@@ -156,6 +158,26 @@ latest one. Shutdown reports the failure and continues safe cleanup. See
 By default, a `BGSAVE` and an AOF background rewrite are mutually exclusive. A manual `BGSAVE` or `BGREWRITEAOF` request for the other kind is scheduled and starts after the active operation finishes. Repeated requests coalesce into one scheduled operation. If that operation cannot start, it remains scheduled and is tried again. Starting a scheduled save does not count as a successful save.
 
 Turning exclusivity off (`exclusive-bg-persistence no`) is possible but not recommended. It lets one `BGSAVE` and one AOF rewrite run at the same time. Two children then share the parent's COW memory, so every later parent write may require page copies for both children.
+
+## Saving on clean shutdown
+
+With AOF off, `shutdown-save yes` saves dirty data on SIGINT or SIGTERM.
+This is the default. Workers and existing saves finish before the dirty count
+is checked. An unchanged store needs no extra save. Deleting the last key still
+counts as a change and needs a snapshot of the empty database.
+
+The server starts one final child and polls it directly because cron has stopped.
+The child uses only the remaining shutdown budget. A required save that fails or
+times out makes the process exit with code 1. The previous complete snapshot
+stays in place until the parent can publish a successful save.
+
+Use `shutdown-save no` to opt out. `save ""` disables periodic saves only.
+AOF mode and failure cleanup do not request an extra snapshot on stop.
+
+The save writes the full dataset, even if only one key changed. Large datasets
+may need a longer `persistence-shutdown-grace-ms` value. SIGKILL or a supervisor
+forcing exit before completion can leave the latest changes unsaved.
+The directory-sync limit in issue #64 is unchanged.
 
 ## Automatic background saving (condition-based snapshots)
 

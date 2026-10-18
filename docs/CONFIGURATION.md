@@ -133,6 +133,7 @@ Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config pa
 | `auto-aof-rewrite-min-size` | `--auto-aof-rewrite-min-size 67108864` | `67108864` | Minimum total AOF size before automatic rewrite, in bytes |
 | `aof-load-truncated` | `--aof-load-truncated yes` | `yes` | Remove an incomplete command at the end of the last incremental file (`yes`/`no`) |
 | `persistence-shutdown-grace-ms` | `--persistence-shutdown-grace-ms 10000` | `10000` | Shared graceful child wait after workers join; expiry sends SIGKILL, followed by up to 1000 ms for reaping; `0` skips the graceful wait |
+| `shutdown-save` | `--shutdown-save no` | `yes` | Save remaining dirty snapshot data on a clean SIGINT or SIGTERM stop when AOF is off |
 | `bgsave-retry-delay-ms` | `--bgsave-retry-delay-ms 5000` | `5000` | Wait after an automatic background save fails before retrying; `0` means no retry delay |
 
 The input buffer grows as needed up to 1 MiB and retains its grown capacity until the connection ends. Configured values above 1 MiB remain accepted, but the initial allocation is clamped to 1 MiB. See [TCP request limits](#tcp-request-limits) for the limits on individual commands.
@@ -247,8 +248,8 @@ only one of these jobs can run at a time.
 
 ## Automatic background saving (`save`)
 
-By default, kgcache only saves when a client runs `SAVE` or `BGSAVE`. Add
-one or more `save <seconds> <changes>` lines to enable automatic `BGSAVE`:
+By default, periodic saving is off. Clean shutdown can still save dirty data.
+Add one or more `save <seconds> <changes>` lines to enable automatic `BGSAVE`:
 
 ```
 save 3600 1
@@ -271,6 +272,27 @@ To replace file rules with one CLI rule after a clear:
 ```bash
 ./zig-out/bin/kgcache cache.conf --save '' --save 60 1
 ```
+
+## Saving on clean shutdown
+
+`shutdown-save yes` is the default. When AOF is off, a clean SIGINT or SIGTERM
+stop saves remaining dirty data. The server first stops writers and waits for
+existing persistence children. If those saves cover all changes, it skips the
+extra save.
+
+Use `shutdown-save no` or `--shutdown-save no` to disable this behavior.
+`save ""` disables periodic saving only. Failure cleanup does not request a new
+snapshot. AOF keeps its own final flush and sync policy.
+
+Each snapshot is a full copy of the data. The final save uses only the time
+left in `persistence-shutdown-grace-ms`. It does not reset the deadline.
+A required save that fails or times out makes the server exit with code 1.
+Zero grace rejects a required final save without starting a child.
+
+Older versions did not save remaining dirty changes on stop. Existing configs
+now save on clean shutdown even with `save ""` or no save rules. Add
+`shutdown-save no` if you want to keep the previous stop behavior.
+Forced termination before completion cannot guarantee that dirty data is saved.
 
 ## AOF settings
 

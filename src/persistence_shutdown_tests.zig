@@ -7,6 +7,116 @@ const logging = @import("logger.zig");
 
 const testing = std.testing;
 
+test "final snapshot follows the stop reason, AOF mode, dirty state, and opt-out" {
+    const cases = [_]struct {
+        reason: Server.StopReason = .clean_signal,
+        append_only: bool = false,
+        enabled: bool = true,
+        dirty: bool = true,
+        saved: bool = false,
+    }{
+        .{ .dirty = false },
+        .{ .reason = .cleanup },
+        .{ .enabled = false },
+        .{ .append_only = true },
+        .{ .saved = true },
+    };
+    for (cases) |case| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        var config = scratch.config(case.append_only);
+        config.shutdown_save = case.enabled;
+        const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        var needs_destroy = true;
+        defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
+        if (case.dirty) try setValue(server, "key", "latest");
+        needs_destroy = false;
+        try server.destroy(case.reason);
+
+        if (case.saved) {
+            try scratch.tmp.dir.access(testing.io, config.dbfilename, .{});
+        } else {
+            try testing.expectError(error.FileNotFound, scratch.tmp.dir.access(testing.io, config.dbfilename, .{}));
+        }
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        defer restarted.destroy(.cleanup) catch unreachable;
+        if (case.saved or case.append_only) {
+            try expectValue(restarted, "key", "latest");
+        } else {
+            var value = try restarted._store.get("key", 0);
+            defer if (value) |*owned| owned.deinit();
+            try testing.expect(value == null);
+        }
+    }
+}
+
+test "zero grace fails a required final save without forking" {
+    const Fork = struct {
+        var called: bool = false;
+        fn run() anyerror!std.posix.pid_t {
+            called = true;
+            return error.UnexpectedFork;
+        }
+    };
+    Fork.called = false;
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    var config = scratch.config(false);
+    config.persistence_shutdown_grace_ms = 0;
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+    var needs_destroy = true;
+    defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
+    try setValue(server, "key", "previous");
+    try server._store.save();
+    try setValue(server, "key", "latest");
+    server._kgc._fork = Fork.run;
+    needs_destroy = false;
+    try testing.expectError(error.PersistenceShutdownTimeout, server.destroy(.clean_signal));
+    try testing.expect(!Fork.called);
+    try testing.expectEqual(1, logger.recordedEvents().len);
+    try testing.expectEqual(error.PersistenceShutdownTimeout, logger.recordedEvents()[0].source.?);
+
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    defer restarted.destroy(.cleanup) catch unreachable;
+    try expectValue(restarted, "key", "previous");
+}
+
+test "final snapshot publication failure preserves the previous file and reports its source" {
+    const Fail = struct {
+        fn rename(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
+            return error.CrossDevice;
+        }
+    };
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    const config = scratch.config(false);
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+    var needs_destroy = true;
+    defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
+    try setValue(server, "key", "previous");
+    try server._store.save();
+    try setValue(server, "key", "latest");
+    var io_vtable = testing.io.vtable.*;
+    io_vtable.dirRename = Fail.rename;
+    server._kgc._io = .{ .userdata = testing.io.userdata, .vtable = &io_vtable };
+    needs_destroy = false;
+    try testing.expectError(error.CrossDevice, server.destroy(.clean_signal));
+    var reports: usize = 0;
+    for (logger.recordedEvents()) |event| {
+        if (event.kind == .err) {
+            try testing.expectEqual(error.CrossDevice, event.source.?);
+            reports += 1;
+        }
+    }
+    try testing.expectEqual(1, reports);
+
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    defer restarted.destroy(.cleanup) catch unreachable;
+    try expectValue(restarted, "key", "previous");
+}
+
 const Scratch = struct {
     tmp: testing.TmpDir,
     data_dir: []u8,

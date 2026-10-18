@@ -6,6 +6,28 @@ const directive_definition = @import("definition.zig");
 const Cli = @import("../cli.zig");
 const Manifest = @import("../persistence/manifest.zig");
 
+test "shutdown-save defaults on and CLI overrides its file value" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "kgcache.conf" });
+    defer testing.allocator.free(path);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const defaults = try ConfigLoader.load(testing.io, &arena, null, &.{});
+    try testing.expect(defaults.shutdown_save);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "kgcache.conf", .data = "shutdown-save no\nsave 3600 1\n" });
+    const from_file = try ConfigLoader.load(testing.io, &arena, path, &.{});
+    try testing.expect(!from_file.shutdown_save);
+    const overrides = [_]directive_definition.PreparedDirective{
+        try registry.prepare(registry.find("shutdown-save").?, &.{"yes"}),
+    };
+    const overridden = try ConfigLoader.load(testing.io, &arena, path, &overrides);
+    try testing.expect(overridden.shutdown_save);
+    try testing.expectEqualDeep(from_file.save_rules, overridden.save_rules);
+}
+
 test "load applies ordered scalar overrides without a file" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

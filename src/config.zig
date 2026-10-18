@@ -24,6 +24,7 @@ active_expire_threshold_percent: i8 = 25,
 exclusive_bg_persistence: bool = true,
 // Empty rules disable automatic saving; CLI rules replace file rules.
 save_rules: []const SaveRule = &.{},
+shutdown_save: bool = true,
 append_only: bool = false,
 // Base name for AOF parts and their manifest.
 append_filename: []const u8 = "appendonly.aof",
