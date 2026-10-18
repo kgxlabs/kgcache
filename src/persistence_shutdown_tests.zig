@@ -289,12 +289,13 @@ const WaitObserver = struct {
 const DestroyTask = struct {
     server: *Server,
     io: std.Io,
+    reason: Server.StopReason = .cleanup,
     done: std.Io.Event = .unset,
     finished: std.atomic.Value(bool) = .init(false),
     err: ?anyerror = null,
 
     fn run(self: *DestroyTask) void {
-        self.server.destroy(.cleanup) catch |err| {
+        self.server.destroy(self.reason) catch |err| {
             self.err = err;
         };
         self.finished.store(true, .release);
@@ -327,8 +328,8 @@ fn expectShutdownWaiting(wait_event: *std.Io.Event, task: *DestroyTask) !void {
     try testing.expect(!task.finished.load(.acquire));
 }
 
-fn destroyAfterWait(server: *Server, wait_event: *std.Io.Event, gate: *ChildGate, server_destroyed: *bool) !?anyerror {
-    var task: DestroyTask = .{ .server = server, .io = testing.io };
+fn destroyAfterWait(server: *Server, wait_event: *std.Io.Event, gate: *ChildGate, server_destroyed: *bool, reason: Server.StopReason) !?anyerror {
+    var task: DestroyTask = .{ .server = server, .io = testing.io, .reason = reason };
     const thread = try std.Thread.spawn(.{}, DestroyTask.run, .{&task});
     var joined = false;
     defer if (!joined) {
@@ -444,37 +445,70 @@ const BgsaveClientIo = struct {
     fn netClose(_: ?*anyopaque, _: []const std.Io.net.Socket.Handle) void {}
 };
 
-test "shutdown waits for active BGSAVE and restart loads its snapshot" {
+const SnapshotFileObserver = struct {
+    var first_file: ?std.Io.File = null;
+    var open_error: ?anyerror = null;
+
+    fn rename(userdata: ?*anyopaque, from: std.Io.Dir, old: []const u8, to: std.Io.Dir, new: []const u8) std.Io.Dir.RenameError!void {
+        try testing.io.vtable.dirRename(userdata, from, old, to, new);
+        if (first_file != null) return;
+        // Keep the first published file open so its inode cannot be reused.
+        first_file = to.openFile(testing.io, new, .{}) catch |err| {
+            open_error = err;
+            return;
+        };
+    }
+};
+
+test "clean shutdown waits for BGSAVE and saves only changes made after capture" {
     lockGates();
     defer gate_mutex.unlock();
 
-    var scratch = try Scratch.init();
-    defer scratch.deinit();
-    var gate = try ChildGate.init(false);
-    defer gate.deinit();
-    kgc_gate = &gate;
-    defer kgc_gate = null;
+    for ([_]bool{ false, true }) |write_after_capture| {
+        var scratch = try Scratch.init();
+        defer scratch.deinit();
+        var gate = try ChildGate.init(false);
+        defer gate.deinit();
+        kgc_gate = &gate;
+        defer kgc_gate = null;
+        SnapshotFileObserver.first_file = null;
+        SnapshotFileObserver.open_error = null;
+        defer if (SnapshotFileObserver.first_file) |file| file.close(testing.io);
 
-    const config = scratch.config(false);
-    var observer: WaitObserver = .{ .io = testing.io };
-    const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
-    var server_destroyed = false;
-    defer if (!server_destroyed) {
-        gate.release();
-        server.destroy(.cleanup) catch {};
-    };
-    server._kgc._fork = forkKgc;
-    try setValue(server, "snapshot-key", "saved");
-    try testing.expectEqual(PersistenceState.BackgroundStartOutcome.started, try server._store.bgsave(.manual));
-    const pid = try gate.awaitReady();
+        const config = scratch.config(false);
+        var observer: WaitObserver = .{ .io = testing.io };
+        const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
+        var server_destroyed = false;
+        defer if (!server_destroyed) {
+            gate.release();
+            server.destroy(.cleanup) catch {};
+        };
+        var io_vtable = testing.io.vtable.*;
+        io_vtable.dirRename = SnapshotFileObserver.rename;
+        server._kgc._io = .{ .userdata = testing.io.userdata, .vtable = &io_vtable };
+        const real_fork = server._kgc._fork;
+        server._kgc._fork = forkKgc;
+        try setValue(server, "snapshot-key", "saved");
+        _ = try server._store.bgsave(.manual);
+        const pid = try gate.awaitReady();
+        server._kgc._fork = real_fork;
+        if (write_after_capture) try setValue(server, "snapshot-key", "latest");
 
-    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed);
-    try testing.expectEqual(null, result);
-    try expectReaped(pid);
+        const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .clean_signal);
+        try testing.expectEqual(null, result);
+        try expectReaped(pid);
+        if (SnapshotFileObserver.open_error) |err| return err;
+        const first_file = SnapshotFileObserver.first_file orelse return error.MissingSnapshot;
+        if (!write_after_capture) {
+            const first = try first_file.stat(testing.io);
+            const final = try scratch.tmp.dir.statFile(testing.io, config.dbfilename, .{});
+            try testing.expectEqual(first.inode, final.inode);
+        }
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
-    defer restarted.destroy(.cleanup) catch unreachable;
-    try expectValue(restarted, "snapshot-key", "saved");
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        defer restarted.destroy(.cleanup) catch unreachable;
+        try expectValue(restarted, "snapshot-key", if (write_after_capture) "latest" else "saved");
+    }
 }
 
 test "shutdown waits for active BGREWRITEAOF and restart replays later writes" {
@@ -502,7 +536,7 @@ test "shutdown waits for active BGREWRITEAOF and restart replays later writes" {
     const pid = try gate.awaitReady();
     try setValue(server, "later-key", "later-value");
 
-    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed);
+    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .cleanup);
     try testing.expectEqual(null, result);
     try expectReaped(pid);
 
@@ -544,7 +578,7 @@ test "failed BGSAVE during shutdown keeps the previous snapshot" {
     try testing.expectEqual(PersistenceState.BackgroundStartOutcome.started, try server._store.bgsave(.manual));
     const pid = try gate.awaitReady();
 
-    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed);
+    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .cleanup);
     try testing.expectEqual(error.BackgroundSaveFailed, result.?);
     const events = observer.errors.recordedEvents();
     try testing.expectEqual(1, events.len);
@@ -582,7 +616,7 @@ test "failed BGREWRITEAOF during shutdown keeps acknowledged writes" {
     const pid = try gate.awaitReady();
     try setValue(server, "after-key", "after-value");
 
-    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed);
+    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .cleanup);
     try testing.expectEqual(error.AofRewriteFailed, result.?);
     const events = observer.errors.recordedEvents();
     try testing.expectEqual(1, events.len);
@@ -633,8 +667,9 @@ test "shutdown waits for both BGSAVE and BGREWRITEAOF children" {
     const save_pid = try save_gate.awaitReady();
     try testing.expectEqual(PersistenceState.BackgroundStartOutcome.started, try server._store.bgrewriteaof(.manual));
     const rewrite_pid = try rewrite_gate.awaitReady();
+    try setValue(server, "both-key", "latest");
 
-    var task: DestroyTask = .{ .server = server, .io = testing.io };
+    var task: DestroyTask = .{ .server = server, .io = testing.io, .reason = .clean_signal };
     const thread = try std.Thread.spawn(.{}, DestroyTask.run, .{&task});
     var joined = false;
     defer if (!joined) {
@@ -657,7 +692,13 @@ test "shutdown waits for both BGSAVE and BGREWRITEAOF children" {
 
     const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
     defer restarted.destroy(.cleanup) catch unreachable;
-    try expectValue(restarted, "both-key", "both-value");
+    try expectValue(restarted, "both-key", "latest");
+
+    var snapshot_config = config;
+    snapshot_config.append_only = false;
+    const from_snapshot = try Server.create(testing.io, testing.allocator, snapshot_config, logging.NoopLogger.logger());
+    defer from_snapshot.destroy(.cleanup) catch unreachable;
+    try expectValue(from_snapshot, "both-key", "both-value");
 }
 
 fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {

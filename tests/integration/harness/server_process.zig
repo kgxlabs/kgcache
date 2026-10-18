@@ -194,8 +194,12 @@ pub const ServerProcess = struct {
     }
 
     pub fn stop(self: *ServerProcess) !void {
+        return self.stopWithSignal(.TERM);
+    }
+
+    pub fn stopWithSignal(self: *ServerProcess, signal: std.posix.SIG) !void {
         const pid = self.pid orelse return error.NotRunning;
-        std.posix.kill(pid, .TERM) catch |err| switch (err) {
+        std.posix.kill(pid, signal) catch |err| switch (err) {
             error.ProcessNotFound => {},
             else => {
                 self.failed = true;
