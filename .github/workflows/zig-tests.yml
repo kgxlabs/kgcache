@@ -43,6 +43,41 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  linux-release:
+    name: Native Linux amd64 release on Bookworm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check native defaults and foreign run guards
+        run: ZIG=$(bash tools/release/zig.sh --print-path) bash tests/build/run.sh
+
+      - name: Build the Linux release
+        run: bash tools/release/build.sh
+
+      - name: Check artifact integrity
+        run: bash tests/release/artifact.sh zig-out/release/linux-amd64
+
+      - name: Qualify the exact artifact on Bookworm
+        run: bash tests/release/run.sh
+
+      - name: Compile the arm64 candidate
+        run: bash tools/release/build.sh --platform linux/arm64
+
+      - name: Upload release validation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-release-evidence
+          path: test-artifacts/release
+          if-no-files-found: ignore
+          retention-days: 7
+
   client-tests:
     name: go-redis and node-redis tests
     needs: tests

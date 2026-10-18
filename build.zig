@@ -114,6 +114,15 @@ pub fn build(b: *std.Build) void {
     const integration_step = b.step("test-integration", "Run process integration tests");
     integration_step.dependOn(execution_guard orelse &run_integration.step);
 
+    // Export test tools only when requested. The ordinary install stays separate.
+    const integration_tools = b.step("integration-tools", "Install process test tools without running them");
+    for ([_]*std.Build.Step.Compile{ integration_runner, fake_server, controlled_server }) |tool| {
+        const install_tool = b.addInstallArtifact(tool, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/kgcache-tests" } },
+        });
+        integration_tools.dependOn(&install_tool.step);
+    }
+
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
     if (b.args) |args| {

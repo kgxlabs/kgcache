@@ -50,3 +50,47 @@ bash tools/release/inspect.sh zig-out/release/linux-amd64
 Set `READELF` to select a compatible reader. This check rejects runtime library
 search paths and glibc requirements newer than the selected baseline. Runtime
 library resolution must also be checked in the selected Debian filesystem.
+
+Run the Bookworm checks with Docker and GNU `timeout` available:
+
+```sh
+bash tests/release/run.sh
+```
+
+The Docker engine must run Linux amd64. The runner rejects other engine
+architectures by default. On an arm64 development machine with amd64 emulation
+enabled, use:
+
+```sh
+bash tests/release/run.sh --allow-emulation
+```
+
+Emulation provides a smoke check. Its result records `native_execution: false`
+and `initial_amd64_qualified: false`. Native amd64 qualification runs in the
+`Native Linux amd64 release on Bookworm` CI job. Arm64 remains a build candidate.
+
+The runner requires a clean checkout at the artifact's recorded commit. It builds
+the existing Zig process test tools for that target with the pinned compiler.
+The `integration-tools` build step exports those tools only when requested.
+It never adds them to an ordinary release install.
+
+The test-only Dockerfile has three stages. The runtime stage contains the pinned
+Bookworm filesystem and the exact release server. It has no compiler or test
+servers. Library resolution and a binary checksum check run in this stage. The inspection
+stage adds diagnostic packages for ELF checks. The tests stage adds process
+test tools without installing extra runtime libraries. These temporary images
+are removed after the run. This Dockerfile is a test fixture for release checks.
+
+The process tests cover raw RESP PING, binary SET/GET, ordered pipelines,
+SIGTERM, snapshot reload, AOF reload, and the existing persistence failure cases.
+They run the supplied release server. Only cases that need persistence controls
+use a separate controlled server. An invalid test-control setting also checks
+that the ordinary release server ignores those controls.
+
+Each run saves evidence in a new directory under
+`test-artifacts/release/linux-amd64/`. It includes the
+build record, ELF report, resolved libraries, process log, and result record.
+Failed process cases also save their harness evidence. Use `--prefix DIR` to
+select another artifact and `--artifacts DIR` to select an evidence directory.
+Compiler objects and verified downloads are cached; test persistence state is
+temporary. Each build, inspection, and process phase has a deadline.
