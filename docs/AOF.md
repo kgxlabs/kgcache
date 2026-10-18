@@ -103,6 +103,9 @@ rewrite path below. If a child cannot be reaped within the cleanup period,
 shutdown returns an error and retains persistence resources. The budget covers
 child polling, not filesystem operations or the kernel's termination latency.
 
+All child waits in one shutdown share this deadline. Finishing one
+operation does not start a new time budget.
+
 The server handles each result while the persistence backends and borrowed
 logger are still alive. A successful rewrite publishes its new base and the
 live incremental file in the manifest, then removes retired files. A failed

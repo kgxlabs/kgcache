@@ -8,14 +8,15 @@ kgcache can save data in two ways:
 | AOF | Each write command, in order | [Append-only file](AOF.md) |
 
 Snapshots are compact and easy to copy. They can miss writes made after the
-last snapshot.
+last snapshot after a crash. By default, a clean SIGINT or SIGTERM stop saves
+remaining dirty snapshot data when AOF is off. Use `shutdown-save no` to opt out.
 
 AOF keeps newer writes and can limit data loss after a crash. Its files grow
 until they are rewritten.
 
 Both methods can be enabled:
 
-- `SAVE`, `BGSAVE`, and automatic `save` rules write `.kgc` snapshots.
+- `SAVE`, `BGSAVE`, periodic rules, and clean shutdown saves write `.kgc` snapshots.
 - `appendonly yes` records writes in AOF files.
 - When AOF is on, startup loads AOF instead of the `.kgc` snapshot.
 

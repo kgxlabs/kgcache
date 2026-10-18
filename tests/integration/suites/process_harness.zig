@@ -212,7 +212,7 @@ fn checkHungProcess(io: std.Io, allocator: std.mem.Allocator, fake_executable_pa
         if (err != error.ProtocolReadTimeout) return err;
     }
 
-    if (hung.stop()) |_| return error.ExpectedShutdownTimeout else |err| {
+    if (hung.stopExpectingExit(.TERM, 1)) |_| return error.ExpectedShutdownTimeout else |err| {
         if (err != error.ShutdownTimeout) return err;
     }
     if (hung.pid != null) return error.UnreapedChild;

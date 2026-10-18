@@ -32,6 +32,7 @@ _persistence_state: *PersistenceState,
 _logger: logging.Logger = logging.NoopLogger.logger(),
 // making a field to make this testable without having to rely on OS to fail
 _fork: *const fn () anyerror!std.posix.pid_t = forkProcess,
+_background_path: ?[]u8 = null,
 
 pub fn init(io: std.Io, allocator: std.mem.Allocator, state: *PersistenceState, path: []const u8) InitError!KgcBackend {
     if (!std.mem.endsWith(u8, path, required_extension)) return InitError.InvalidExtension;
@@ -67,7 +68,7 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
         self._persistence_state.finishKgc();
     }
 
-    try self.dump(storages);
+    try self.dump(storages, null);
     var state_tx = try self._persistence_state.begin();
     defer state_tx.end();
 
@@ -82,17 +83,35 @@ pub fn save(ptr: *anyopaque, storages: []const Storage) anyerror!void {
 // It just means forking completed
 pub fn bgsave(ptr: *anyopaque, storages: []const Storage, origin: Store.TriggerOrigin) anyerror!PersistenceState.BackgroundStartOutcome {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
-    const started = try self.startBackgroundSave(storages, origin, false);
+    const started = try self.startBackgroundSave(storages, origin, false, null);
     return if (started) .started else .scheduled;
 }
 
 pub fn dispatchPendingSave(ptr: *anyopaque, storages: []const Storage) anyerror!bool {
     const self: *KgcBackend = @ptrCast(@alignCast(ptr));
 
-    return self.startBackgroundSave(storages, .manual, true);
+    return self.startBackgroundSave(storages, .manual, true, null);
 }
 
-fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Store.TriggerOrigin, pending: bool) anyerror!bool {
+pub fn saveOnShutdown(self: *KgcBackend, storages: []const Storage, deadline_ms: i64) !void {
+    if (std.Io.Clock.awake.now(self._io).toMilliseconds() >= deadline_ms) return error.PersistenceShutdownTimeout;
+    const sessions = try self._allocator.alloc(Storage.Tx, storages.len);
+    defer self._allocator.free(sessions);
+
+    var acquired: usize = 0;
+    defer while (acquired > 0) {
+        acquired -= 1;
+        sessions[acquired].end();
+    };
+
+    for (storages) |storage| {
+        sessions[acquired] = try storage.begin();
+        acquired += 1;
+    }
+    _ = try self.startBackgroundSave(storages, .shutdown, false, deadline_ms);
+}
+
+fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Store.TriggerOrigin, pending: bool, deadline_ms: ?i64) anyerror!bool {
     {
         var state_tx = try self._persistence_state.begin();
         defer state_tx.end();
@@ -121,18 +140,34 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
         } else self._persistence_state.finishKgc();
     }
 
+    var random_bytes: [12]u8 = undefined;
+    std.Io.random(self._io, &random_bytes);
+    const suffix = std.fmt.bytesToHex(random_bytes, .lower);
+    const output_path = try std.fmt.allocPrint(self._allocator, "{s}.{s}.tmp", .{ self._path, suffix });
+    errdefer self._allocator.free(output_path);
+    const cwd = std.Io.Dir.cwd();
+    const output = try cwd.createFile(self._io, output_path, .{ .exclusive = true });
+    defer output.close(self._io);
+    errdefer cwd.deleteFile(self._io, output_path) catch {};
+
+    if (deadline_ms) |deadline| {
+        if (std.Io.Clock.awake.now(self._io).toMilliseconds() >= deadline) return error.PersistenceShutdownTimeout;
+    }
+    self._background_path = output_path;
+    errdefer self._background_path = null;
     const pid = try self._fork();
 
     if (pid == 0) {
         // The child inherits stdin, stdout, and stderr from the parent.
         // It needs no stdin. Close stdout so tests waiting for output can finish.
-        // Leave stderr inherited; stream handling is tracked in issue #227.
+        // TODO: collect child output in the parent (#227).
         _ = std.c.close(std.posix.STDIN_FILENO);
         _ = std.c.close(std.posix.STDOUT_FILENO);
 
-        // The parent reports a generic failure until issue #118 adds source errors.
+        // TODO: send child source errors to the parent (#118).
+        // TODO: replace the child encoder and I/O with a fork-safe writer (#118).
         // Logging here could wait forever on a mutex copied during fork.
-        self.dump(storages) catch std.c._exit(1);
+        self.dump(storages, output) catch std.c._exit(1);
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
         // using _exit to sidestep clearing the buffered data (at the time of fork) completely
         std.c._exit(0);
@@ -147,6 +182,7 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
             .pid = pid,
             .captured_change_count = self._persistence_state.captureSnapshotChangeCount(),
             .origin = origin,
+            .completion = .{ .ptr = self, .finish = finishBackgroundSave },
         };
 
         if (pending) {
@@ -164,6 +200,20 @@ fn startBackgroundSave(self: *KgcBackend, storages: []const Storage, origin: Sto
     return true;
 }
 
+fn finishBackgroundSave(ptr: *anyopaque, succeeded: bool) anyerror!void {
+    const self: *KgcBackend = @ptrCast(@alignCast(ptr));
+    const path = self._background_path orelse return error.MissingSnapshotOutput;
+    self._background_path = null;
+    defer self._allocator.free(path);
+    const cwd = std.Io.Dir.cwd();
+    if (succeeded) {
+        errdefer cwd.deleteFile(self._io, path) catch {};
+        try cwd.rename(path, cwd, self._path, self._io);
+    } else {
+        try cwd.deleteFile(self._io, path);
+    }
+}
+
 fn forkProcess() anyerror!std.posix.pid_t {
     const rc = std.posix.system.fork();
     return switch (std.posix.errno(rc)) {
@@ -174,7 +224,7 @@ fn forkProcess() anyerror!std.posix.pid_t {
     };
 }
 
-fn dump(self: *KgcBackend, storages: []const Storage) anyerror!void {
+fn dump(self: *KgcBackend, storages: []const Storage, output: ?std.Io.File) anyerror!void {
     try self.beginDump();
     defer {
         if (self._encoder) |*encoder| encoder.deinit();
@@ -188,7 +238,7 @@ fn dump(self: *KgcBackend, storages: []const Storage) anyerror!void {
         try self.selectDb(@intCast(db_index));
         try storage.forEach(self, visitEntry);
     }
-    try self.endDump();
+    try self.endDump(output);
 }
 
 fn visitEntry(ctx: *anyopaque, key: []const u8, value: object.Object, exp: ?time.UnixMs) anyerror!void {
@@ -212,10 +262,16 @@ fn dumpEntry(self: *KgcBackend, key: []const u8, value: object.Object, exp: ?tim
     try self._encoder.?.writeEntry(key, value, exp);
 }
 
-fn endDump(self: *KgcBackend) !void {
+fn endDump(self: *KgcBackend, output: ?std.Io.File) !void {
     var encoder = &self._encoder.?;
 
     try encoder.writeFooter();
+
+    if (output) |file| {
+        try self.writeToDisk(file, encoder.bytes());
+        try file.sync(self._io);
+        return;
+    }
 
     const cwd = std.Io.Dir.cwd();
     // write and fsync to temporary dump file

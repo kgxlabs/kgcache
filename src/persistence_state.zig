@@ -37,6 +37,10 @@ pub const KgcBackgroundSave = struct {
     pid: std.posix.pid_t,
     captured_change_count: u64,
     origin: Store.TriggerOrigin,
+    completion: ?struct {
+        ptr: *anyopaque,
+        finish: *const fn (*anyopaque, bool) anyerror!void,
+    } = null,
 };
 
 pub const AofBackgroundRewrite = struct {
@@ -299,7 +303,14 @@ pub fn reapKgc(self: *PersistenceState, now_ms: time.UnixMs) KgcReapResult {
 }
 
 fn completeKgcReap(self: *PersistenceState, save: KgcBackgroundSave, child: ChildResult, now_ms: time.UnixMs) KgcReapResult {
-    const status = child.status;
+    var status = child.status;
+    var report_error = child.report_error;
+    if (save.completion) |completion| {
+        completion.finish(completion.ptr, status == .succeeded) catch |err| {
+            status = .failed;
+            if (report_error == null) report_error = err;
+        };
+    }
     // only start cooldown if failed and started by cron
     if (status == .failed and save.origin == .automatic) {
         self.startBgsaveCooldown(now_ms);
@@ -314,7 +325,7 @@ fn completeKgcReap(self: *PersistenceState, save: KgcBackgroundSave, child: Chil
         .status = status,
         .saved_change_count = saved_change_count,
         .origin = save.origin,
-        .report_error = child.report_error,
+        .report_error = report_error,
     };
 }
 

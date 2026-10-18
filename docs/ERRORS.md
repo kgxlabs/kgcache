@@ -59,6 +59,9 @@ reports carry no trace; abnormal exits and wait failures retain the errors
 the parent can identify. A failed rewrite is still reported when its rollback
 succeeds. A cached AOF failure is reported once across cron retries and shutdown.
 
+KGC output setup and publication run in the parent. Their source errors remain
+available. The parent publishes only after a successful child exit.
+
 This is a temporary mitigation for inherited logger locks. Background
 persistence remains experimental: other inherited runtime locks may still
 block child work. Shutdown bounds child polling, signals overdue children, and

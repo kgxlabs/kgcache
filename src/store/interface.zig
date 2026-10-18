@@ -10,6 +10,7 @@ const PersistenceState = @import("../persistence_state.zig");
 pub const TriggerOrigin = enum {
     manual,
     automatic,
+    shutdown,
 };
 
 const Store = @This();

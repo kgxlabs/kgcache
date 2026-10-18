@@ -99,6 +99,7 @@ test "file and CLI boolean and enum settings accept the same choices" {
     inline for (.{
         .{ .name = "reuse-address", .field = "reuse_address" },
         .{ .name = "exclusive-bg-persistence", .field = "exclusive_bg_persistence" },
+        .{ .name = "shutdown-save", .field = "shutdown_save" },
         .{ .name = "appendonly", .field = "append_only" },
         .{ .name = "aof-load-truncated", .field = "aof_load_truncated" },
     }) |case| {

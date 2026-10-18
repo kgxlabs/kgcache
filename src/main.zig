@@ -109,11 +109,15 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
         runtime_error = err;
         break :blk null;
     };
-    _ = received_signal;
+
+    const stop_reason: Server.StopReason = if (received_signal) |signal| switch (signal) {
+        .INT, .TERM => .clean_signal,
+        else => .cleanup,
+    } else .cleanup;
 
     var cleanup_error: ?anyerror = null;
     logger.info("app: cleaning up server");
-    server.destroy() catch |err| {
+    server.destroy(stop_reason) catch |err| {
         logger.err("app: server shutdown failed", err, @errorReturnTrace());
         cleanup_error = err;
     };
