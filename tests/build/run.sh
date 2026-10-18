@@ -39,7 +39,7 @@ for step in run test test-integration; do
         printf '%s unexpectedly accepted a foreign execution target.\n' "$step" >&2
         exit 1
     fi
-    if ! rg -q 'cannot run natively on build host' "$check_root/guard.log"; then
+    if [[ $(<"$check_root/guard.log") != *'cannot run natively on build host'* ]]; then
         cat "$check_root/guard.log" >&2
         exit 1
     fi

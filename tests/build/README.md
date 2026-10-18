@@ -1,7 +1,7 @@
 # Build checks
 
 Run these checks from a macOS or Linux development host with Bash, Zig 0.16.0,
-`file`, and ripgrep:
+and `file`:
 
 ```sh
 bash tests/build/run.sh
