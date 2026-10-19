@@ -8,10 +8,33 @@ artifact_logs=
 
 new_case() {
     local prefix=$1 name=$2 output="$artifact_workspace/$2"
-    mkdir -p "$output/bin"
-    cp "$prefix/bin/kgcache" "$output/bin/kgcache"
-    cp "$prefix/build-info.json" "$output/build-info.json"
+    mkdir -p "$output/bin" || release_fail "cannot create artifact case $name"
+    cp "$prefix/bin/kgcache" "$output/bin/kgcache" || release_fail "cannot copy artifact executable for $name"
+    cp "$prefix/build-info.json" "$output/build-info.json" || release_fail "cannot copy artifact record for $name"
     printf '%s\n' "$output"
+}
+
+check_fixture_failure() {
+    local prefix=$1 status output
+    mkdir "$artifact_workspace/broken-copy"
+    cat > "$artifact_workspace/broken-copy/cp" << 'SH'
+#!/usr/bin/env bash
+printf 'simulated artifact copy failure\n' >&2
+exit 74
+SH
+    chmod +x "$artifact_workspace/broken-copy/cp"
+    if env PATH="$artifact_workspace/broken-copy:$PATH" \
+        bash tests/release/artifact.sh "$prefix" > "$artifact_logs/fixture-failure.log" 2>&1; then
+        release_fail 'artifact checks ignored a fixture copy failure'
+    else
+        status=$?
+    fi
+    output=$(cat "$artifact_logs/fixture-failure.log")
+    if [[ "$status" != 1 || "$output" != *'cannot copy artifact executable for changed-binary'* ]]; then
+        cat "$artifact_logs/fixture-failure.log" >&2
+        release_fail 'artifact fixture failed for an unexpected reason'
+    fi
+    printf 'Passed: fixture setup stops on copy failure\n'
 }
 
 expect_rejection() {
@@ -119,6 +142,7 @@ main() {
     artifact_workspace=$(mktemp -d "$RELEASE_ROOT/.zig-cache/artifact-check.XXXXXX")
     artifact_logs=$(mktemp -d "$RELEASE_ROOT/test-artifacts/release/artifact/run.XXXXXX")
     check_rejections "$prefix"
+    check_fixture_failure "$prefix"
     check_failed_rebuild "$prefix"
     printf 'Artifact checks passed. Evidence: %s\n' "$artifact_logs"
 }
