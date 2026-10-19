@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Run expected failures in a separate process so EXIT cleanup is exercised.
 set -euo pipefail
+
 source "${BASH_SOURCE[0]%/*}/../../tools/release/common.sh"
 source "${BASH_SOURCE[0]%/*}/docker.sh"
 
 main() {
     cd "$RELEASE_ROOT"
+
     case "$1" in
         git-status)
             release_assert_source "$2"
@@ -19,6 +21,7 @@ main() {
         docker-timeout)
             probe_id=$2
             trap probe_cleanup EXIT
+
             probe_run runtime linux/amd64 "$RUNTIME_BASE" 2s "$3" \
                 sh -c 'trap "" TERM; while :; do sleep 1; done'
             ;;
