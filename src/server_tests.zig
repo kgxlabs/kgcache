@@ -261,6 +261,47 @@ test "create rejects a missing persistence directory without creating it" {
     }
 }
 
+test "startup requires new file access only for configured persistence writes" {
+    const testing = std.testing;
+    const Denied = struct {
+        fn create(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+            std.debug.assert(options.exclusive);
+            return error.AccessDenied;
+        }
+    };
+    var vtable = testing.io.vtable.*;
+    vtable.dirCreateFile = Denied.create;
+    const io: std.Io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    const configs = [_]Config{
+        .{ .append_only = true, .shutdown_save = false },
+        .{ .shutdown_save = true },
+        .{ .shutdown_save = false, .save_rules = &.{.{ .seconds = 60, .changes = 1 }} },
+    };
+    for (configs) |config| {
+        try testing.expectError(error.AccessDenied, Server.create(io, testing.allocator, config, logging.NoopLogger.logger()));
+    }
+    const server = try Server.create(io, testing.allocator, .{ .shutdown_save = false }, logging.NoopLogger.logger());
+    try server.destroy(.cleanup);
+}
+
+test "startup removes its exclusive directory probe without changing existing data" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer testing.allocator.free(path);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "existing", .data = "preserved" });
+    const server = try Server.create(testing.io, testing.allocator, .{ .dir = path }, logging.NoopLogger.logger());
+    try server.destroy(.cleanup);
+    var iterator = tmp.dir.iterate();
+    const entry = (try iterator.next(testing.io)).?;
+    try testing.expectEqualStrings("existing", entry.name);
+    try testing.expectEqual(@as(?std.Io.Dir.Entry, null), try iterator.next(testing.io));
+    const contents = try tmp.dir.readFileAlloc(testing.io, "existing", testing.allocator, .limited(100));
+    defer testing.allocator.free(contents);
+    try testing.expectEqualStrings("preserved", contents);
+}
+
 test "create validates persistence names supplied directly in Config" {
     const testing = std.testing;
     for ([_]Config{

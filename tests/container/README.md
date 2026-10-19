@@ -26,8 +26,22 @@ directory. Mount storage at `/data`. Its config enables AOF with
 The runner uses Docker-assigned loopback ports, a read-only root, and mounted
 storage. Binary RESP data stays in files and is compared with `cmp`.
 Resources carry a unique run label. Docker commands and network operations
-have deadlines. The runner collects bounded logs and state before removing
+have deadlines. A full run has a 15-minute deadline plus cleanup time.
+The runner collects bounded logs and state before removing
 its resources, including after interruption. `--artifacts` preserves evidence.
+
+The suite covers replacement, fresh volumes, bind ownership, read-only storage,
+invalid config, storage errors during stop, and abrupt recovery with AOF
+`always`, an established `everysec` durable prefix, and a saved snapshot.
+It repeats BGSAVE and AOF rewrite and checks that only PID 1 remains after
+completion. Active-child stop cases briefly pause a real child with SIGSTOP,
+send SIGTERM to PID 1, then resume the child. Idle and slow clients stay connected.
+
+The bounded workload uses 4,096 keys with 4 KiB values, one CPU, and a 256 MiB
+container limit. Results record image size, startup and replay wall time,
+mean time for 64 sequential PING round trips, and cgroup v2 memory peaks.
+Timing includes the Bash client startup. These are workload measurements.
+The container limit does not add application memory accounting or eviction.
 
 Build `--target diagnostic` to add ELF and process inspection tools. The final
 runtime has no compiler or test server. Normal startup does not use a shell.

@@ -5,9 +5,6 @@ FROM --platform=$BUILDPLATFORM ${RUNTIME_BASE} AS builder
 ARG BUILDARCH
 ARG TARGETOS
 ARG TARGETARCH
-ARG SOURCE_REVISION
-ARG SOURCE_DIRTY=true
-ARG VERSION
 ARG RUNTIME_BASE
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils file jq \
@@ -20,6 +17,9 @@ RUN --mount=type=cache,id=kgcache-zig-0.16.0-${BUILDARCH},target=/build/.zig-cac
     bash tools/release/zig.sh version
 COPY src/ src/
 COPY tests/integration/ tests/integration/
+ARG SOURCE_REVISION
+ARG SOURCE_DIRTY=true
+ARG VERSION
 RUN --mount=type=cache,id=kgcache-zig-0.16.0-${BUILDARCH},target=/build/.zig-cache/toolchains,sharing=locked \
     --mount=type=cache,id=kgcache-objects-0.16.0-${BUILDARCH}-${TARGETOS}-${TARGETARCH},target=/build/.zig-cache/objects,sharing=locked \
     --mount=type=cache,id=kgcache-global-0.16.0-${BUILDARCH}-${TARGETOS}-${TARGETARCH},target=/root/.cache/zig,sharing=locked \
