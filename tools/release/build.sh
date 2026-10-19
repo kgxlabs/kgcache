@@ -37,11 +37,10 @@ resolve_output() {
     local requested=${1%/} parent name
     name=${requested##*/}
     [[ -n "$name" && "$name" != . && "$name" != .. ]] || release_fail 'invalid release prefix'
-    parent=${requested%/*}
-    if [[ "$parent" == "$requested" ]]; then parent=.; fi
+    parent=$(dirname -- "$requested")
     mkdir -p "$parent"
     parent=$(cd "$parent" && pwd -P) || release_fail 'cannot resolve output directory'
-    build_output="$parent/$name"
+    build_output="${parent%/}/$name"
     case "$build_output" in
         "$RELEASE_ROOT" | "$RELEASE_ROOT/zig-out" | "$RELEASE_ROOT/zig-out/bin")
             release_fail 'release output must be separate from the normal install prefix'
@@ -53,7 +52,7 @@ resolve_output() {
         release_fail "release output is locked: $build_output.lock (check for another build before removing a stale lock)"
     fi
     build_lock="$build_output.lock"
-    build_workspace=$(mktemp -d "$parent/.$name.build.XXXXXX")
+    build_workspace=$(mktemp -d "${parent%/}/.$name.build.XXXXXX")
 }
 
 write_record() {
@@ -115,7 +114,7 @@ main() {
             *) release_fail "unknown argument: $1" ;;
         esac
     done
-    release_require_commands git jq file sed mktemp timeout
+    release_require_commands git jq file sed mktemp timeout dirname
     release_require_sha256
     release_target "$platform" > /dev/null
     cd "$RELEASE_ROOT"
