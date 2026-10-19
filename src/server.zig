@@ -60,8 +60,10 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
 
     const snapshot_path = try config.resolveSnapshotPath(allocator);
     errdefer allocator.free(snapshot_path);
-    const persistence_dir = try std.Io.Dir.cwd().openDir(io, config.dir, .{});
-    persistence_dir.close(io);
+    validatePersistenceDirectory(io, config) catch |err| {
+        logger.err("server: cannot prepare persistence directory", err, @errorReturnTrace());
+        return err;
+    };
 
     const num_databases = config.num_databases;
 
@@ -154,6 +156,22 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     }
 
     return self;
+}
+
+fn validatePersistenceDirectory(io: std.Io, config: Config) !void {
+    const dir = try std.Io.Dir.cwd().openDir(io, config.dir, .{});
+    defer dir.close(io);
+    if (!config.append_only and config.save_rules.len == 0 and !config.shutdown_save) return;
+
+    // Existing AOF files may be writable while their parent blocks new files.
+    // Probe a fresh name without touching persistence data or changing ownership.
+    var random: [12]u8 = undefined;
+    std.Io.random(io, &random);
+    var name_buffer: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buffer, ".kgcache-write-check-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const file = try dir.createFile(io, name, .{ .exclusive = true });
+    defer file.close(io);
+    try dir.deleteFile(io, name);
 }
 
 /// The listener is bound here rather than in `create` so `create` can be
