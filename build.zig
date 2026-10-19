@@ -2,7 +2,9 @@ const std = @import("std");
 
 // Learn more about this file here: https://ziglang.org/learn/build-system
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const execution_guard = executionGuard(b, target);
     const build_options = b.addOptions();
 
     build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
@@ -12,7 +14,7 @@ pub fn build(b: *std.Build) void {
         .name = "kgcache",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = b.graph.host,
+            .target = target,
             .optimize = optimize,
             .error_tracing = true,
             .link_libc = true,
@@ -34,12 +36,12 @@ pub fn build(b: *std.Build) void {
     // and can be selected like this: `zig build run`
     // This will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
+    run_step.dependOn(execution_guard orelse &run_cmd.step);
 
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
-            .target = b.graph.host,
+            .target = target,
             .optimize = optimize,
             .error_tracing = true,
             .link_libc = true,
@@ -50,13 +52,13 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(execution_guard orelse &run_unit_tests.step);
 
     const integration_runner = b.addExecutable(.{
         .name = "kgcache-integration",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/main.zig"),
-            .target = b.graph.host,
+            .target = target,
             .optimize = optimize,
             .link_libc = true,
         }),
@@ -71,7 +73,7 @@ pub fn build(b: *std.Build) void {
     });
     const server_process = b.createModule(.{
         .root_source_file = b.path("tests/integration/harness/server_process.zig"),
-        .target = b.graph.host,
+        .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
@@ -85,7 +87,7 @@ pub fn build(b: *std.Build) void {
         .name = "kgcache-controlled-server",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
-            .target = b.graph.host,
+            .target = target,
             .optimize = optimize,
             .error_tracing = true,
             .link_libc = true,
@@ -97,7 +99,7 @@ pub fn build(b: *std.Build) void {
         .name = "kgcache-fake-server",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/integration/harness/fake_server.zig"),
-            .target = b.graph.host,
+            .target = target,
             .optimize = optimize,
             .link_libc = true,
         }),
@@ -110,7 +112,16 @@ pub fn build(b: *std.Build) void {
     run_integration.has_side_effects = true;
 
     const integration_step = b.step("test-integration", "Run process integration tests");
-    integration_step.dependOn(&run_integration.step);
+    integration_step.dependOn(execution_guard orelse &run_integration.step);
+
+    // Export test tools only when requested. The ordinary install stays separate.
+    const integration_tools = b.step("integration-tools", "Install process test tools without running them");
+    for ([_]*std.Build.Step.Compile{ integration_runner, fake_server, controlled_server }) |tool| {
+        const install_tool = b.addInstallArtifact(tool, .{
+            .dest_dir = .{ .override = .{ .custom = "libexec/kgcache-tests" } },
+        });
+        integration_tools.dependOn(&install_tool.step);
+    }
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
@@ -118,4 +129,28 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
         run_integration.addArgs(args);
     }
+}
+
+fn executionGuard(b: *std.Build, target: std.Build.ResolvedTarget) ?*std.Build.Step {
+    const host = &b.graph.host.result;
+    const candidate = &target.result;
+    const executor = std.zig.system.getExternalExecutor(b.graph.io, host, candidate, .{
+        .allow_darling = false,
+        .allow_qemu = false,
+        .allow_rosetta = false,
+        .allow_wasmtime = false,
+        .allow_wine = false,
+        .link_libc = true,
+    });
+    const native = switch (executor) {
+        .native => true,
+        else => false,
+    };
+    if (native and host.cpu.features.isSuperSetOf(candidate.cpu.features)) return null;
+
+    const message = b.fmt(
+        "target {s} cannot run natively on build host {s}; use 'zig build' to compile it and run tests on the target platform",
+        .{ candidate.zigTriple(b.allocator) catch @panic("out of memory"), host.zigTriple(b.allocator) catch @panic("out of memory") },
+    );
+    return &b.addFail(message).step;
 }

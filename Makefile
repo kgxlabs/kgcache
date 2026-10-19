@@ -26,7 +26,13 @@ NODE_RUN = $(NODE) --experimental-strip-types "$(CLIENT_ROOT)/node/run.ts"
 
 .PHONY: build test test-zig test-unit test-integration test-go test-node test-clients \
 	deps-go deps-node deps-clients list-clients check-go check-node check-clients \
-	fmt-go fmt-node
+	fmt-go fmt-node check-shell fmt-shell
+
+check-shell:
+	bash tools/shell/check.sh
+
+fmt-shell:
+	bash tools/shell/check.sh --write
 
 build:
 	cd "$(REPO_ROOT)" && $(ZIG) build -Doptimize=Debug
