@@ -116,6 +116,33 @@ check_glibc_versions() {
         awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-private"
 }
 
+check_image_metadata() {
+    local revision version
+
+    revision=$(release_git_revision)
+    version=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p' build.zig.zon)
+
+    expect_failure image-clean-unknown-revision 1 'clean images require an explicit full Git revision' \
+        env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION=unknown \
+        SOURCE_DIRTY=false VERSION="$version" bash tools/container/build.sh
+    expect_failure image-clean-missing-version 1 'clean images require an explicit VERSION' \
+        env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION="$revision" \
+        SOURCE_DIRTY=false VERSION= bash tools/container/build.sh
+    expect_failure image-invalid-revision 1 'SOURCE_REVISION must be a full Git revision' \
+        env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION=invalid \
+        SOURCE_DIRTY=true bash tools/container/build.sh
+    expect_failure image-invalid-dirty 1 'SOURCE_DIRTY must be true or false' \
+        env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION=unknown \
+        SOURCE_DIRTY=invalid bash tools/container/build.sh
+    expect_failure image-version-mismatch 1 'VERSION must match build.zig.zon' \
+        env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION=unknown \
+        SOURCE_DIRTY=true VERSION=invalid bash tools/container/build.sh
+    expect_failure image-base-mismatch 1 'image base differs from the qualified release base' \
+        env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION=unknown \
+        SOURCE_DIRTY=true VERSION= IMAGE_RUNTIME_BASE=unapproved \
+        bash tools/container/build.sh
+}
+
 check_docker_timeout() {
     local remaining
 
@@ -161,6 +188,7 @@ main() {
     check_bootstrap_failure
     check_missing_dependency
     check_glibc_versions
+    check_image_metadata
     expect_failure missing-option-value 1 'missing value for --prefix' \
         bash tools/release/build.sh --prefix --allow-dirty
     if [[ ${1:-} == --docker ]]; then

@@ -1,20 +1,26 @@
 # Container image checks
 
 Requires Bash 3.2 or newer, Docker with BuildKit, GNU `timeout`, jq, and
-standard Unix file tools. Build from a clean checkout:
+standard Unix file tools. Build from the repository root:
 
 ```sh
-source tools/release/settings.sh
-docker build --platform linux/amd64 \
-  --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
-  --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
-  --build-arg SOURCE_DIRTY=false \
-  --build-arg VERSION=0.0.0 --tag kgcache:local .
+docker build --platform linux/amd64 --tag kgcache:local .
 bash tests/container/run.sh --image kgcache:local \
   --artifacts test-artifacts/container
 ```
 
-For uncommitted changes, keep the default `SOURCE_DIRTY=true`.
+The Dockerfile supplies the pinned base and checks it against the release
+settings. Local builds read the package version from `build.zig.zon`. They
+record `SOURCE_REVISION=unknown` and `SOURCE_DIRTY=true` by default. The image
+version label stays empty unless `VERSION` is supplied; the build record always
+contains the package version.
+
+Release CI verifies a clean checkout, then supplies `SOURCE_REVISION`,
+`SOURCE_DIRTY=false`, and `VERSION`. Clean builds require a full Git revision
+and a version that matches the package. Invalid metadata and a base that differs
+from the release settings fail the build. Development images cannot qualify
+as clean release candidates. CI checks both build paths.
+
 An arm64 Docker engine needs `--allow-emulation` on the runner. Emulated
 results do not qualify native amd64 execution. The runner records the resolved
 image ID and build record. It never publishes an image.

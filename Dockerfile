@@ -1,6 +1,8 @@
-# check=skip=InvalidDefaultArgInFrom
-# Supply the pinned base from tools/release/settings.sh.
-ARG RUNTIME_BASE
+# Keep this default aligned with tools/release/settings.sh. The builder checks it.
+ARG RUNTIME_BASE=docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+ARG SOURCE_REVISION=unknown
+ARG SOURCE_DIRTY=true
+ARG VERSION=""
 FROM --platform=$BUILDPLATFORM ${RUNTIME_BASE} AS builder
 ARG BUILDARCH
 ARG TARGETOS
@@ -22,7 +24,7 @@ RUN --mount=type=cache,id=kgcache-zig-0.16.0-${BUILDARCH},target=/build/.zig-cac
     bash tools/release/zig.sh version
 COPY src/ src/
 ARG SOURCE_REVISION
-ARG SOURCE_DIRTY=true
+ARG SOURCE_DIRTY
 ARG VERSION
 RUN --mount=type=cache,id=kgcache-zig-0.16.0-${BUILDARCH},target=/build/.zig-cache/toolchains,sharing=locked \
     --mount=type=cache,id=kgcache-objects-0.16.0-${BUILDARCH}-${TARGETOS}-${TARGETARCH},target=/build/.zig-cache/objects,sharing=locked \

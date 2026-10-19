@@ -274,7 +274,12 @@ check_layout() {
         .target == "x86_64-linux-gnu.2.36" and .cpu == "baseline" and
         .optimize == "ReleaseSafe" and
         .source.revision == $image[0][0].Config.Labels["org.opencontainers.image.revision"] and
-        .version == $image[0][0].Config.Labels["org.opencontainers.image.version"]' \
+        (.source.dirty | type == "boolean") and
+        ((.source.revision | test("^[0-9a-f]{40}$")) or
+          (.source.revision == "unknown" and .source.dirty)) and
+        (.version | type == "string" and length > 0) and
+        (.version == $image[0][0].Config.Labels["org.opencontainers.image.version"] or
+          (.source.dirty and $image[0][0].Config.Labels["org.opencontainers.image.version"] == ""))' \
         "$workspace/evidence/build-info.json" > /dev/null
 }
 

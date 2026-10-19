@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BuildKit supplies provenance because the build context excludes Git metadata.
+# Local builds may have unknown provenance. Clean builds require explicit metadata.
 set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/../release/common.sh"
 
@@ -8,12 +8,20 @@ main() {
 
     [[ "$platform" == linux/amd64 ]] ||
         release_fail "unsupported image platform: $platform (supported: linux/amd64)"
-    [[ ${SOURCE_REVISION:-} =~ ^[0-9a-f]{40}$ ]] ||
-        release_fail 'SOURCE_REVISION must be an explicit full Git revision'
     [[ ${SOURCE_DIRTY:-} == true || ${SOURCE_DIRTY:-} == false ]] ||
         release_fail 'SOURCE_DIRTY must be true or false'
+    [[ ${SOURCE_REVISION:-} == unknown || ${SOURCE_REVISION:-} =~ ^[0-9a-f]{40}$ ]] ||
+        release_fail 'SOURCE_REVISION must be a full Git revision or unknown for development'
+    if [[ "$SOURCE_DIRTY" == false ]]; then
+        [[ "$SOURCE_REVISION" != unknown ]] ||
+            release_fail 'clean images require an explicit full Git revision'
+        [[ -n ${VERSION:-} ]] || release_fail 'clean images require an explicit VERSION'
+    fi
+
     version=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p' build.zig.zon)
-    [[ -n ${VERSION:-} && "$VERSION" == "$version" ]] ||
+    [[ -n "$version" && "$version" != *$'\n'* ]] ||
+        release_fail 'cannot read a single package version'
+    [[ -z ${VERSION:-} || "$VERSION" == "$version" ]] ||
         release_fail 'VERSION must match build.zig.zon'
     [[ ${IMAGE_RUNTIME_BASE:-} == "$RUNTIME_BASE" ]] ||
         release_fail 'image base differs from the qualified release base'
