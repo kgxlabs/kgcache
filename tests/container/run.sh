@@ -44,7 +44,7 @@ collect_evidence() {
 # Cleanup handles command statuses explicitly and must try every owned resource.
 # shellcheck disable=SC2310
 cleanup() {
-    local status=$? failed=false index kind name found label
+    local status=$? failed=false index kind name found label fixture_uid fixture_gid
 
     trap - EXIT
     trap '' INT TERM
@@ -77,6 +77,14 @@ cleanup() {
             continue
         fi
         if [[ "$kind" == container ]]; then
+            if [[ "$name" == "$run_id-storage-helper" && -d "$workspace/bind" ]]; then
+                # Restore only this run's bind fixture for host-side removal.
+                fixture_uid=$(id -u) || failed=true
+                fixture_gid=$(id -g) || failed=true
+                docker_call exec "$name" chown -R "$fixture_uid:$fixture_gid" \
+                    /fixtures/bind || failed=true
+                docker_call exec "$name" chmod -R u+rwX /fixtures/bind || failed=true
+            fi
             docker_call container rm --force "$name" > /dev/null || failed=true
         else
             docker_call "$kind" rm "$name" > /dev/null || failed=true

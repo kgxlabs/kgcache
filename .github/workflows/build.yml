@@ -46,11 +46,15 @@ jobs:
           source tools/release/settings.sh
           revision=$(git rev-parse HEAD)
           version=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p' build.zig.zon)
-          docker build --platform linux/amd64 \
-            --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
-            --build-arg "SOURCE_REVISION=$revision" \
-            --build-arg SOURCE_DIRTY=false \
-            --build-arg "VERSION=$version" --tag kgcache:ci .
+          build_args=(
+            --platform linux/amd64
+            --build-arg "RUNTIME_BASE=$RUNTIME_BASE"
+            --build-arg "SOURCE_REVISION=$revision"
+            --build-arg SOURCE_DIRTY=false
+            --build-arg "VERSION=$version"
+          )
+          docker build --check "${build_args[@]}" .
+          docker build "${build_args[@]}" --tag kgcache:ci .
 
       - name: Qualify image storage and PID 1 lifecycle on native amd64
         run: bash tests/container/run.sh --image kgcache:ci --artifacts test-artifacts/container

@@ -7,7 +7,12 @@ ARG TARGETOS
 ARG TARGETARCH
 ARG RUNTIME_BASE
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils file jq \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        file \
+        jq \
+        xz-utils \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY build.zig build.zig.zon ./
@@ -16,7 +21,6 @@ COPY tools/container/build.sh tools/container/build.sh
 RUN --mount=type=cache,id=kgcache-zig-0.16.0-${BUILDARCH},target=/build/.zig-cache/toolchains,sharing=locked \
     bash tools/release/zig.sh version
 COPY src/ src/
-COPY tests/integration/ tests/integration/
 ARG SOURCE_REVISION
 ARG SOURCE_DIRTY=true
 ARG VERSION
@@ -27,7 +31,13 @@ RUN --mount=type=cache,id=kgcache-zig-0.16.0-${BUILDARCH},target=/build/.zig-cac
 
 FROM ${RUNTIME_BASE} AS service
 RUN groupadd --gid 10001 kgcache \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /data --shell /usr/sbin/nologin kgcache \
+    && useradd \
+        --uid 10001 \
+        --gid 10001 \
+        --no-create-home \
+        --no-log-init \
+        --home-dir /data \
+        --shell /usr/sbin/nologin kgcache \
     && install -d -o 10001 -g 10001 -m 0750 /data \
     && install -d -o 0 -g 0 -m 0755 /etc/kgcache /usr/share/kgcache
 COPY --from=builder --chown=0:0 --chmod=0755 /out/bin/kgcache /usr/local/bin/kgcache
@@ -50,7 +60,10 @@ CMD ["/etc/kgcache/kgcache.conf"]
 FROM service AS diagnostic
 USER 0:0
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends binutils file procps \
+    && apt-get install -y --no-install-recommends \
+        binutils \
+        file \
+        procps \
     && rm -rf /var/lib/apt/lists/*
 USER 10001:10001
 
