@@ -12,6 +12,7 @@ ENTRYPOINT ["bash", "/probe/tools/release/inspect.sh", "/release"]
 
 FROM runtime AS tests
 COPY test-tools /tests
+RUN mkdir -p /evidence/process
 WORKDIR /work
 ENV KGCACHE_TEST_ARTIFACT_DIR=/evidence/process
 # A normal server must ignore the test control setting. Controlled test servers

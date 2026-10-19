@@ -2,7 +2,8 @@
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-zig_command=${ZIG:-zig}
+zig_command=${ZIG-zig}
+[[ -n "$zig_command" ]] || { printf 'ZIG must name a compiler executable.\n' >&2; exit 1; }
 cd "$repo_root"
 mkdir -p .zig-cache
 check_root=$(mktemp -d "$repo_root/.zig-cache/build-check.XXXXXX")

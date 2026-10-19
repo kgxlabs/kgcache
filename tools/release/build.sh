@@ -21,8 +21,8 @@ mkdir -p "$prefix"
 prefix=$(cd "$prefix" && pwd -P)
 [[ "$prefix" != "$release_root/zig-out" && "$prefix" != "$release_root" && "$prefix" != / ]] ||
     release_fail 'release output must be separate from the normal install prefix'
-source_revision=$(git rev-parse HEAD)
-source_status=$(git status --porcelain --untracked-files=normal)
+source_revision=$(release_git_revision)
+source_status=$(release_git_status)
 source_dirty=false
 if [[ -n "$source_status" ]]; then
     source_dirty=true
@@ -33,7 +33,9 @@ source_version=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p' build.zig
 compiler=$(bash tools/release/zig.sh --print-path)
 compiler_archive_sha=$(cat "$(dirname "$compiler")/.verified-sha256")
 "$compiler" build "-Dtarget=$release_target" -Dcpu=baseline -Doptimize=ReleaseSafe --prefix "$prefix"
-[[ $(git rev-parse HEAD) == "$source_revision" && $(git status --porcelain --untracked-files=normal) == "$source_status" ]] ||
+current_revision=$(release_git_revision)
+current_status=$(release_git_status)
+[[ "$current_revision" == "$source_revision" && "$current_status" == "$source_status" ]] ||
     release_fail 'source tree changed during the release build'
 release_check_binary "$prefix/bin/kgcache"
 binary_sha=$(release_sha256 "$prefix/bin/kgcache")

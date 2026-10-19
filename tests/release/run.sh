@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/../../tools/release/common.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/docker.sh"
 
 prefix="$release_root/zig-out/release/linux-amd64"
 artifacts=
@@ -20,8 +21,8 @@ bash tools/release/verify.sh --prefix "$prefix"
 metadata="$prefix/build-info.json"
 platform=$(jq -r .platform "$metadata")
 release_platform "$platform"
-[[ $(git rev-parse HEAD) == $(jq -r .source.revision "$metadata") ]] || release_fail 'test tools and release must use the same source commit'
-[[ -z $(git status --porcelain --untracked-files=normal) ]] || release_fail 'runtime checks require a clean source tree'
+source_revision=$(jq -er .source.revision "$metadata")
+release_assert_source "$source_revision"
 
 # A different engine architecture means emulation, even if the client is native.
 engine_arch=$(docker info --format '{{.Architecture}}')
@@ -43,26 +44,16 @@ artifacts=$(mktemp -d "$artifacts/run.XXXXXX")
 printf 'Release check evidence: %s\n' "$artifacts"
 check_root=$(mktemp -d "$release_root/.zig-cache/release-check.XXXXXX")
 check_id="kgcache-release-$(basename "$check_root" | tr '[:upper:].' '[:lower:]-')"
-test_container=
-cleanup() {
-    local status=$?
-    trap - EXIT
-    if [[ -n "$test_container" ]]; then
-        docker cp "$test_container:/evidence/." "$artifacts/" >/dev/null 2>&1 || true
-        docker rm -f "$test_container" >/dev/null 2>&1 || true
-    fi
-    docker image rm "$check_id:tests" "$check_id:inspection" "$check_id:runtime" >/dev/null 2>&1 || true
-    rm -rf -- "$check_root"
-    exit "$status"
-}
-trap cleanup EXIT
+probe_id=$check_id
+probe_workspace=$check_root
+probe_evidence_dir=$artifacts
+trap probe_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 compiler=$(bash tools/release/zig.sh --print-path)
 "$compiler" build integration-tools "-Dtarget=$release_target" -Dcpu=baseline -Doptimize=ReleaseSafe --prefix "$check_root/helpers"
-[[ -z $(git status --porcelain --untracked-files=normal) && $(git rev-parse HEAD) == $(jq -r .source.revision "$metadata") ]] ||
-    release_fail 'source tree changed while building test tools'
+release_assert_source "$source_revision"
 mkdir -p "$check_root/context/artifact/bin" "$check_root/context/tools"
 cp "$prefix/bin/kgcache" "$check_root/context/artifact/bin/kgcache"
 cp "$metadata" "$check_root/context/artifact/build-info.json"
@@ -82,32 +73,22 @@ for stage in runtime inspection tests; do
 done
 
 # Resolve dependencies before diagnostic packages or test tools are added.
-timeout --signal=TERM --kill-after=5s 30s docker run --rm --platform "$platform" "$check_id:runtime" sh -ec '
+probe_run runtime "$platform" "$check_id:runtime" 30s "$artifacts/runtime-libraries.log" sh -ec '
     test ! -e /tests
     test ! -e /probe
     if command -v zig; then exit 1; fi
     ldd /usr/local/bin/kgcache
     sha256sum /usr/local/bin/kgcache
-' >"$artifacts/runtime-libraries.log" 2>&1 || {
-    cat "$artifacts/runtime-libraries.log" >&2
-    release_fail 'runtime library check failed'
-}
+'
 case $(cat "$artifacts/runtime-libraries.log") in
     *'not found'*) release_fail 'unresolved runtime dependency' ;;
 esac
 [[ $(cat "$artifacts/runtime-libraries.log") == *"$(jq -r .binary.sha256 "$metadata")  /usr/local/bin/kgcache"* ]] ||
     release_fail 'runtime executable checksum mismatch'
-timeout --signal=TERM --kill-after=5s 30s docker run --rm --platform "$platform" "$check_id:inspection" >"$artifacts/abi.json"
-
-test_container="$check_id-tests"
-docker create --name "$test_container" --platform "$platform" "$check_id:tests" >/dev/null
-timeout --signal=TERM --kill-after=10s 240s docker start --attach "$test_container" >"$artifacts/process.log" 2>&1 || {
-    cat "$artifacts/process.log" >&2
-    release_fail 'Bookworm process tests failed'
-}
-[[ $(docker inspect --format '{{.State.ExitCode}}' "$test_container") == 0 ]] || release_fail 'Bookworm process tests exited unsuccessfully'
-[[ -z $(git status --porcelain --untracked-files=normal) && $(git rev-parse HEAD) == $(jq -r .source.revision "$metadata") ]] ||
-    release_fail 'source tree changed during runtime checks'
+probe_run inspection "$platform" "$check_id:inspection" 30s "$artifacts/inspection.log"
+cp "$artifacts/inspection.log.stdout" "$artifacts/abi.json"
+probe_run tests "$platform" "$check_id:tests" 240s "$artifacts/process.log"
+release_assert_source "$source_revision"
 qualified=false
 if [[ "$native" == true && "$platform" == linux/amd64 ]]; then qualified=true; fi
 jq -n --slurpfile build "$metadata" --arg engine "$engine_platform" --argjson native "$native" --argjson qualified "$qualified" \

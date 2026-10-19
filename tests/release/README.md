@@ -94,3 +94,8 @@ Failed process cases also save their harness evidence. Use `--prefix DIR` to
 select another artifact and `--artifacts DIR` to select an evidence directory.
 Compiler objects and verified downloads are cached; test persistence state is
 temporary. Each build, inspection, and process phase has a deadline.
+
+Check error handling with `bash tests/release/failures.sh`. Add `--docker` to
+also check that a container which ignores TERM is removed after the Docker
+client times out. The checks require the intended error status and explanation,
+and keep separate logs under `test-artifacts/release/failures/`.

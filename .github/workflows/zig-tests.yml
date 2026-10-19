@@ -55,7 +55,12 @@ jobs:
           persist-credentials: false
 
       - name: Check native defaults and foreign run guards
-        run: ZIG=$(bash tools/release/zig.sh --print-path) bash tests/build/run.sh
+        run: |
+          compiler=$(bash tools/release/zig.sh --print-path)
+          ZIG="$compiler" bash tests/build/run.sh
+
+      - name: Check release failure handling
+        run: bash tests/release/failures.sh --docker
 
       - name: Build the Linux release
         run: bash tools/release/build.sh

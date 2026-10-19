@@ -10,6 +10,24 @@ release_fail() {
     exit 1
 }
 
+# Print source state only after Git has completed successfully.
+release_git_revision() {
+    git rev-parse HEAD || release_fail 'cannot read the source revision'
+}
+
+release_git_status() {
+    git status --porcelain --untracked-files=normal || release_fail 'cannot read Git status'
+}
+
+# Require the same clean source revision as the artifact being tested.
+release_assert_source() {
+    local revision status
+    revision=$(release_git_revision) || return 1
+    status=$(release_git_status) || return 1
+    [[ "$revision" == "$1" ]] || release_fail 'test tools and release must use the same source commit'
+    [[ -z "$status" ]] || release_fail 'runtime checks require a clean source tree'
+}
+
 release_sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | awk '{print $1}'
