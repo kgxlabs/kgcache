@@ -1,16 +1,52 @@
 #!/usr/bin/env bash
-
-release_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-release_zig_version=0.16.0
-release_glibc_version=2.36
-release_runtime='docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587'
+# Shared release helpers. Only immutable settings are exported through globals.
+# Functions print results to stdout and report failures to stderr.
 
 release_fail() {
     printf 'release: %s\n' "$*" >&2
     exit 1
 }
 
-# Print source state only after Git has completed successfully.
+RELEASE_ROOT=$(cd -- "${BASH_SOURCE[0]%/*}/../.." && pwd -P) || exit 1
+# Public constant used by the scripts that source this library.
+# shellcheck disable=SC2034
+readonly RELEASE_ROOT
+source "${BASH_SOURCE[0]%/*}/settings.sh"
+export LC_ALL=C
+
+# Check dependencies before creating output or starting downloads.
+release_require_commands() {
+    local command_name
+    for command_name in "$@"; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            release_fail "required command is missing: $command_name"
+        fi
+    done
+}
+
+release_require_sha256() {
+    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+        release_fail 'SHA-256 requires sha256sum or shasum'
+    fi
+}
+
+# Validate a long option's value without consuming the next option.
+release_require_value() {
+    if [[ -z "$2" || "$2" == --* ]]; then
+        release_fail "missing value for $1"
+    fi
+}
+
+release_sha256() {
+    local output
+    if command -v sha256sum >/dev/null 2>&1; then
+        output=$(sha256sum <"$1") || release_fail "cannot checksum $1"
+    else
+        output=$(shasum -a 256 <"$1") || release_fail "cannot checksum $1"
+    fi
+    printf '%s\n' "${output%% *}"
+}
+
 release_git_revision() {
     git rev-parse HEAD || release_fail 'cannot read the source revision'
 }
@@ -19,7 +55,7 @@ release_git_status() {
     git status --porcelain --untracked-files=normal || release_fail 'cannot read Git status'
 }
 
-# Require the same clean source revision as the artifact being tested.
+# Require the same clean revision as the artifact being tested.
 release_assert_source() {
     local revision status
     revision=$(release_git_revision) || return 1
@@ -28,37 +64,58 @@ release_assert_source() {
     [[ -z "$status" ]] || release_fail 'runtime checks require a clean source tree'
 }
 
-release_sha256() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        shasum -a 256 "$1" | awk '{print $1}'
-    fi
-}
-
-release_platform() {
+# Platform lookups return one value and never mutate the caller's variables.
+release_target() {
     case "$1" in
-        linux/amd64)
-            release_arch=x86_64
-            release_file_arch=x86-64
-            release_elf_machine='Advanced Micro Devices X86-64'
-            release_loader=/lib64/ld-linux-x86-64.so.2
-            ;;
-        linux/arm64)
-            release_arch=aarch64
-            release_file_arch=aarch64
-            release_elf_machine=AArch64
-            release_loader=/lib/ld-linux-aarch64.so.1
-            ;;
+        linux/amd64) printf 'x86_64-linux-gnu.%s\n' "$GLIBC_VERSION" ;;
+        linux/arm64) printf 'aarch64-linux-gnu.%s\n' "$GLIBC_VERSION" ;;
         *) release_fail "unsupported platform: $1" ;;
     esac
-    release_target="$release_arch-linux-gnu.$release_glibc_version"
+}
+
+release_loader() {
+    case "$1" in
+        linux/amd64) printf '/lib64/ld-linux-x86-64.so.2\n' ;;
+        linux/arm64) printf '/lib/ld-linux-aarch64.so.1\n' ;;
+        *) release_fail "unsupported platform: $1" ;;
+    esac
+}
+
+release_machine() {
+    case "$1" in
+        linux/amd64) printf 'Advanced Micro Devices X86-64\n' ;;
+        linux/arm64) printf 'AArch64\n' ;;
+        *) release_fail "unsupported platform: $1" ;;
+    esac
 }
 
 release_check_binary() {
-    local description
-    [[ -f "$1" && -x "$1" ]] || release_fail "missing executable: $1"
-    description=$(file -b "$1")
-    [[ "$description" == *'ELF 64-bit LSB'* && "$description" == *"$release_file_arch"* ]] ||
+    local binary=$1 platform=$2 description expected
+    case "$platform" in
+        linux/amd64) expected=x86-64 ;;
+        linux/arm64) expected=aarch64 ;;
+        *) release_fail "unsupported platform: $platform" ;;
+    esac
+    [[ -f "$binary" && -x "$binary" ]] || release_fail "missing executable: $binary"
+    description=$(file -b -- "$binary") || release_fail "cannot inspect $binary"
+    if [[ "$description" != *'ELF 64-bit LSB'* || "$description" != *"$expected"* ]]; then
         release_fail "wrong executable format or architecture: $description"
+    fi
+}
+
+# Read a scalar from a validated build record. Convert booleans to strings so
+# jq's exit status does not confuse a valid false value with a command failure.
+release_read_field() {
+    jq -er "$2 | if . == null then error(\"missing field\") else tostring end" "$1" ||
+        release_fail "cannot read build record field $2 from $1"
+}
+
+# Keep server and test-tool compilation on the same release contract.
+# Extra arguments select optional Zig build steps such as integration-tools.
+release_compile() {
+    local compiler=$1 output=$2 platform=$3 target
+    shift 3
+    target=$(release_target "$platform") || return 1
+    timeout --signal=TERM --kill-after=10s 600s "$compiler" build "$@" "-Dtarget=$target" "-Dcpu=$RELEASE_CPU" \
+        "-Doptimize=$RELEASE_OPTIMIZE" --prefix "$output"
 }

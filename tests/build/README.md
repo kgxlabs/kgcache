@@ -1,6 +1,6 @@
 # Build checks
 
-Run these checks from a macOS or Linux development host with Bash, Zig 0.16.0,
+Run these checks from a macOS or Linux development host with Bash 3.2 or later, Zig 0.16.0,
 and `file`:
 
 ```sh

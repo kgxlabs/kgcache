@@ -1,48 +1,70 @@
 #!/usr/bin/env bash
+# Check native defaults, foreign compilation, and rejection of foreign execution.
 set -euo pipefail
+source "${BASH_SOURCE[0]%/*}/../../tools/release/common.sh"
 
-repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-zig_command=${ZIG-zig}
-[[ -n "$zig_command" ]] || { printf 'ZIG must name a compiler executable.\n' >&2; exit 1; }
-cd "$repo_root"
-mkdir -p .zig-cache
-check_root=$(mktemp -d "$repo_root/.zig-cache/build-check.XXXXXX")
-trap 'rm -rf -- "$check_root"' EXIT
+check_root=
 
-"$zig_command" build --prefix "$check_root/native"
-native_description=$(file -b "$check_root/native/bin/kgcache")
-case $(uname -s) in
-    Darwin) expected_native='Mach-O' ;;
-    Linux) expected_native='ELF' ;;
-    *) printf 'Build checks require macOS or Linux.\n' >&2; exit 1 ;;
-esac
-if [[ "$native_description" != *"$expected_native"* ]]; then
-    printf 'Default build is not native: %s\n' "$native_description" >&2
-    exit 1
-fi
+check_native_build() {
+    local compiler=$1 system=$2 description expected
+    "$compiler" build --prefix "$check_root/native"
+    description=$(file -b "$check_root/native/bin/kgcache")
+    case "$system" in
+        Darwin) expected=Mach-O ;;
+        Linux) expected=ELF ;;
+        *) release_fail 'build checks require macOS or Linux' ;;
+    esac
+    [[ "$description" == *"$expected"* ]] || release_fail "default build is not native: $description"
+}
 
-foreign_arch=x86_64
-foreign_description=x86-64
-if [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]]; then
-    foreign_arch=aarch64
-    foreign_description=aarch64
-fi
-target="$foreign_arch-linux-gnu.2.36"
-"$zig_command" build "-Dtarget=$target" -Dcpu=baseline --prefix "$check_root/foreign"
-description=$(file -b "$check_root/foreign/bin/kgcache")
-if [[ "$description" != *'ELF 64-bit LSB'* || "$description" != *"$foreign_description"* ]]; then
-    printf 'Explicit target produced an unexpected executable: %s\n' "$description" >&2
-    exit 1
-fi
-
-for step in run test test-integration; do
-    if "$zig_command" build "$step" "-Dtarget=$target" >"$check_root/guard.log" 2>&1; then
-        printf '%s unexpectedly accepted a foreign execution target.\n' "$step" >&2
-        exit 1
+check_foreign_build() {
+    local compiler=$1 target=$2 expected=$3 description
+    "$compiler" build "-Dtarget=$target" -Dcpu=baseline --prefix "$check_root/foreign"
+    description=$(file -b "$check_root/foreign/bin/kgcache")
+    if [[ "$description" != *'ELF 64-bit LSB'* || "$description" != *"$expected"* ]]; then
+        release_fail "explicit target produced an unexpected executable: $description"
     fi
-    if [[ $(<"$check_root/guard.log") != *'cannot run natively on build host'* ]]; then
-        cat "$check_root/guard.log" >&2
-        exit 1
+}
+
+check_execution_guards() {
+    local compiler=$1 target=$2 step output
+    for step in run test test-integration; do
+        if "$compiler" build "$step" "-Dtarget=$target" >"$check_root/$step.log" 2>&1; then
+            release_fail "$step unexpectedly accepted a foreign execution target"
+        fi
+        output=$(cat "$check_root/$step.log")
+        if [[ "$output" != *'cannot run natively on build host'* ]]; then
+            cat "$check_root/$step.log" >&2
+            release_fail "$step failed for an unexpected reason"
+        fi
+    done
+}
+
+cleanup_build_checks() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "$check_root" ]]; then rm -rf -- "$check_root"; fi
+    exit "$status"
+}
+
+main() {
+    local compiler=${ZIG-zig} system arch target=x86_64-linux-gnu.2.36 expected=x86-64
+    [[ -n "$compiler" ]] || release_fail 'ZIG must name a compiler executable'
+    release_require_commands "$compiler" file uname mktemp
+    system=$(uname -s)
+    arch=$(uname -m)
+    if [[ "$system" == Linux && "$arch" == x86_64 ]]; then
+        target=aarch64-linux-gnu.2.36
+        expected=aarch64
     fi
-done
-printf 'Native output, explicit Linux output, and foreign run guards passed.\n'
+    cd "$RELEASE_ROOT"
+    mkdir -p .zig-cache
+    trap cleanup_build_checks EXIT
+    check_root=$(mktemp -d "$RELEASE_ROOT/.zig-cache/build-check.XXXXXX")
+    check_native_build "$compiler" "$system"
+    check_foreign_build "$compiler" "$target" "$expected"
+    check_execution_guards "$compiler" "$target"
+    printf 'Native output, explicit Linux output, and foreign run guards passed.\n'
+}
+
+main "$@"

@@ -1,6 +1,11 @@
-ARG RUNTIME_BASE=docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+# check=skip=InvalidDefaultArgInFrom
+# The runner supplies the pinned base from tools/release/settings.sh.
+ARG RUNTIME_BASE
 FROM ${RUNTIME_BASE} AS runtime
 COPY artifact/bin/kgcache /usr/local/bin/kgcache
+COPY runtime.sh /checks/runtime.sh
+ENTRYPOINT ["bash", "/checks/runtime.sh"]
+CMD []
 
 FROM runtime AS inspection
 RUN apt-get update \

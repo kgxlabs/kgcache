@@ -1,47 +1,44 @@
 #!/usr/bin/env bash
-# Exercise failures that must stop release checks and clean up owned resources.
+# Check specific failures and removal of containers whose clients time out.
 set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/../../tools/release/common.sh"
 
-cd "$release_root"
-[[ $# == 0 || ( $# == 1 && "$1" == --docker ) ]] || release_fail 'usage: bash tests/release/failures.sh [--docker]'
-mkdir -p .zig-cache test-artifacts/release/failures
-test_root=$(mktemp -d "$release_root/.zig-cache/release-failures.XXXXXX")
-logs=$(mktemp -d "$release_root/test-artifacts/release/failures/run.XXXXXX")
-test_probe_id=
-cleanup() {
+# The EXIT trap owns only the fixture workspace and an emergency container name.
+failure_workspace=
+failure_logs=
+failure_probe_id=
+
+cleanup_failures() {
     local status=$?
     trap - EXIT
-    if [[ -n "$test_probe_id" ]]; then
-        timeout --signal=TERM --kill-after=2s 5s docker rm --force "$test_probe_id-runtime" >/dev/null 2>&1 || true
+    if [[ -n "$failure_probe_id" ]]; then
+        timeout --signal=TERM --kill-after=2s 5s docker rm --force "$failure_probe_id-runtime" >/dev/null 2>&1 || true
     fi
-    rm -rf -- "$test_root"
+    if [[ -n "$failure_workspace" ]]; then rm -rf -- "$failure_workspace"; fi
     exit "$status"
 }
-trap cleanup EXIT
 
-# Require both the intended exit status and a specific explanation.
+# Each rejection must have the intended status and a specific explanation.
 expect_failure() {
     local name=$1 expected=$2 message=$3 actual output
     shift 3
-    if "$@" >"$logs/$name.log" 2>&1; then
-        release_fail "$name unexpectedly succeeded; log: $logs/$name.log"
+    if "$@" >"$failure_logs/$name.log" 2>&1; then
+        release_fail "$name unexpectedly succeeded; log: $failure_logs/$name.log"
     else
         actual=$?
     fi
-    output=$(cat "$logs/$name.log")
+    output=$(cat "$failure_logs/$name.log")
     if [[ "$actual" != "$expected" || "$output" != *"$message"* ]]; then
-        cat "$logs/$name.log" >&2
-        release_fail "$name failed for an unexpected reason (status $actual); log: $logs/$name.log"
+        cat "$failure_logs/$name.log" >&2
+        release_fail "$name failed for an unexpected reason (status $actual); log: $failure_logs/$name.log"
     fi
     printf 'Passed: %s\n' "$name"
 }
 
-expect_failure empty-compiler 1 'ZIG must name a compiler executable' \
-    env ZIG= bash tests/build/run.sh
-
-mkdir "$test_root/git-bin"
-cat >"$test_root/git-bin/git" <<'SH'
+check_git_failure() {
+    local real_git revision
+    mkdir "$failure_workspace/git-bin"
+    cat >"$failure_workspace/git-bin/git" <<'SH'
 #!/usr/bin/env bash
 if [[ "$1" == status ]]; then
     printf 'simulated Git status failure\n' >&2
@@ -49,42 +46,83 @@ if [[ "$1" == status ]]; then
 fi
 exec "$REAL_GIT" "$@"
 SH
-chmod +x "$test_root/git-bin/git"
-real_git=$(command -v git)
-revision=$(release_git_revision)
-expect_failure git-status 1 'cannot read Git status' \
-    env PATH="$test_root/git-bin:$PATH" REAL_GIT="$real_git" \
-    bash -c 'set -euo pipefail; source "$1/tools/release/common.sh"; release_assert_source "$2"' _ "$release_root" "$revision"
+    chmod +x "$failure_workspace/git-bin/git"
+    real_git=$(command -v git)
+    revision=$(release_git_revision)
+    expect_failure git-status 1 'cannot read Git status' \
+        env PATH="$failure_workspace/git-bin:$PATH" REAL_GIT="$real_git" \
+        bash tests/release/failure-child.sh git-status "$revision"
+}
 
-mkdir "$test_root/bootstrap-bin"
-cat >"$test_root/bootstrap-bin/uname" <<'SH'
+check_bootstrap_failure() {
+    mkdir "$failure_workspace/bootstrap-bin"
+    cat >"$failure_workspace/bootstrap-bin/uname" <<'SH'
 #!/usr/bin/env bash
 printf 'unsupported-review-host\n'
 SH
-chmod +x "$test_root/bootstrap-bin/uname"
-# Even the old combined CI command must fail instead of choosing a PATH compiler.
-expect_failure failed-bootstrap 1 'ZIG must name a compiler executable' \
-    env PATH="$test_root/bootstrap-bin:$PATH" \
-    bash -c 'ZIG=$(bash tools/release/zig.sh --print-path) bash tests/build/run.sh'
+    chmod +x "$failure_workspace/bootstrap-bin/uname"
+    expect_failure failed-bootstrap 1 'ZIG must name a compiler executable' \
+        env PATH="$failure_workspace/bootstrap-bin:$PATH" \
+        bash tests/release/failure-child.sh bootstrap
+}
 
-if [[ ${1:-} == --docker ]]; then
-    command -v timeout >/dev/null || release_fail 'GNU timeout is required'
-    docker version --format '{{.Server.Version}}' >/dev/null
-    timeout --signal=TERM --kill-after=5s 120s docker pull --platform linux/amd64 "$release_runtime" >"$logs/pull.log" 2>&1
-    test_probe_id="kgcache-failure-probe-$$"
+check_missing_dependency() {
+    local bash_command
+    bash_command=$(command -v bash)
+    mkdir "$failure_workspace/dependency-bin"
+    printf '#!/bin/sh\nexit 99\n' >"$failure_workspace/dependency-bin/jq"
+    chmod +x "$failure_workspace/dependency-bin/jq"
+    expect_failure missing-dependency 1 'required command is missing: file' \
+        env PATH="$failure_workspace/dependency-bin" "$bash_command" tools/release/verify.sh
+}
+
+check_glibc_versions() {
+    local parser="$RELEASE_ROOT/tools/release/glibc-versions.awk" output
+    printf 'Name: GLIBC_2.2.5\nName: GLIBC_2.36\n' >"$failure_workspace/glibc-valid"
+    output=$(awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-valid")
+    [[ "$output" == *GLIBC_2.2.5* && "$output" == *GLIBC_2.36* ]] || release_fail 'valid glibc requirements were lost'
+    printf 'Name: GLIBC_2.37\n' >"$failure_workspace/glibc-new"
+    expect_failure glibc-too-new 1 'exceeds glibc baseline 2.36' \
+        awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-new"
+    printf 'Name: GLIBC_2.36.1\n' >"$failure_workspace/glibc-patch"
+    expect_failure glibc-new-patch 1 'exceeds glibc baseline 2.36' \
+        awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-patch"
+    printf 'Name: GLIBC_PRIVATE\n' >"$failure_workspace/glibc-private"
+    expect_failure glibc-private 1 'unsupported glibc symbol version' \
+        awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-private"
+}
+
+check_docker_timeout() {
+    local remaining
+    release_require_commands timeout docker
+    timeout --signal=TERM --kill-after=5s 15s docker version --format '{{.Server.Version}}' >/dev/null
+    timeout --signal=TERM --kill-after=5s 120s docker pull --platform linux/amd64 "$RUNTIME_BASE" >"$failure_logs/pull.log" 2>&1
+    failure_probe_id="kgcache-failure-probe-$$"
     expect_failure docker-timeout 1 'runtime probe failed or timed out' \
-        bash -c '
-            set -euo pipefail
-            source "$1/tools/release/common.sh"
-            source "$1/tests/release/docker.sh"
-            probe_id=$2
-            trap probe_cleanup EXIT
-            probe_run runtime linux/amd64 "$release_runtime" 2s "$3" \
-                sh -c '\''trap "" TERM; while :; do sleep 1; done'\''
-        ' _ "$release_root" "$test_probe_id" "$logs/timeout-container.log"
-    remaining=$(timeout --signal=TERM --kill-after=2s 5s docker container ls --all --quiet --filter "name=^/$test_probe_id-runtime$")
+        bash tests/release/failure-child.sh docker-timeout "$failure_probe_id" "$failure_logs/timeout-container.log"
+    remaining=$(timeout --signal=TERM --kill-after=2s 5s docker container ls --all --quiet --filter "name=^/$failure_probe_id-runtime$")
     [[ -z "$remaining" ]] || release_fail 'timed-out probe container was not removed'
-    test_probe_id=
+    failure_probe_id=
     printf 'Passed: timed-out container removed\n'
-fi
-printf 'Failure handling checks passed. Evidence: %s\n' "$logs"
+}
+
+main() {
+    [[ $# == 0 || ( $# == 1 && "$1" == --docker ) ]] || release_fail 'usage: bash tests/release/failures.sh [--docker]'
+    release_require_commands git jq bash mktemp awk
+    cd "$RELEASE_ROOT"
+    mkdir -p .zig-cache test-artifacts/release/failures
+    trap cleanup_failures EXIT
+    failure_workspace=$(mktemp -d "$RELEASE_ROOT/.zig-cache/release-failures.XXXXXX")
+    failure_logs=$(mktemp -d "$RELEASE_ROOT/test-artifacts/release/failures/run.XXXXXX")
+    expect_failure empty-compiler 1 'ZIG must name a compiler executable' env ZIG= bash tests/build/run.sh
+    check_git_failure
+    check_bootstrap_failure
+    check_missing_dependency
+    check_glibc_versions
+    expect_failure missing-option-value 1 'missing value for --prefix' \
+        bash tools/release/build.sh --prefix --allow-dirty
+    if [[ ${1:-} == --docker ]]; then check_docker_timeout; fi
+    printf 'Failure handling checks passed. Evidence: %s\n' "$failure_logs"
+}
+
+main "$@"
