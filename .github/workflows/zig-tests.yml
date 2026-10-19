@@ -10,8 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  shell-checks:
+    name: Shell lint and formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check shell scripts
+        run: make check-shell
+
   tests:
     name: Unit and process integration tests
+    needs: shell-checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -45,6 +60,7 @@ jobs:
 
   linux-release:
     name: Native Linux amd64 release on Bookworm
+    needs: shell-checks
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 

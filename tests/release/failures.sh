@@ -12,7 +12,7 @@ cleanup_failures() {
     local status=$?
     trap - EXIT
     if [[ -n "$failure_probe_id" ]]; then
-        timeout --signal=TERM --kill-after=2s 5s docker rm --force "$failure_probe_id-runtime" >/dev/null 2>&1 || true
+        timeout --signal=TERM --kill-after=2s 5s docker rm --force "$failure_probe_id-runtime" > /dev/null 2>&1 || true
     fi
     if [[ -n "$failure_workspace" ]]; then rm -rf -- "$failure_workspace"; fi
     exit "$status"
@@ -22,7 +22,7 @@ cleanup_failures() {
 expect_failure() {
     local name=$1 expected=$2 message=$3 actual output
     shift 3
-    if "$@" >"$failure_logs/$name.log" 2>&1; then
+    if "$@" > "$failure_logs/$name.log" 2>&1; then
         release_fail "$name unexpectedly succeeded; log: $failure_logs/$name.log"
     else
         actual=$?
@@ -38,7 +38,7 @@ expect_failure() {
 check_git_failure() {
     local real_git revision
     mkdir "$failure_workspace/git-bin"
-    cat >"$failure_workspace/git-bin/git" <<'SH'
+    cat > "$failure_workspace/git-bin/git" << 'SH'
 #!/usr/bin/env bash
 if [[ "$1" == status ]]; then
     printf 'simulated Git status failure\n' >&2
@@ -56,7 +56,7 @@ SH
 
 check_bootstrap_failure() {
     mkdir "$failure_workspace/bootstrap-bin"
-    cat >"$failure_workspace/bootstrap-bin/uname" <<'SH'
+    cat > "$failure_workspace/bootstrap-bin/uname" << 'SH'
 #!/usr/bin/env bash
 printf 'unsupported-review-host\n'
 SH
@@ -70,7 +70,7 @@ check_missing_dependency() {
     local bash_command
     bash_command=$(command -v bash)
     mkdir "$failure_workspace/dependency-bin"
-    printf '#!/bin/sh\nexit 99\n' >"$failure_workspace/dependency-bin/jq"
+    printf '#!/bin/sh\nexit 99\n' > "$failure_workspace/dependency-bin/jq"
     chmod +x "$failure_workspace/dependency-bin/jq"
     expect_failure missing-dependency 1 'required command is missing: file' \
         env PATH="$failure_workspace/dependency-bin" "$bash_command" tools/release/verify.sh
@@ -78,16 +78,16 @@ check_missing_dependency() {
 
 check_glibc_versions() {
     local parser="$RELEASE_ROOT/tools/release/glibc-versions.awk" output
-    printf 'Name: GLIBC_2.2.5\nName: GLIBC_2.36\n' >"$failure_workspace/glibc-valid"
+    printf 'Name: GLIBC_2.2.5\nName: GLIBC_2.36\n' > "$failure_workspace/glibc-valid"
     output=$(awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-valid")
     [[ "$output" == *GLIBC_2.2.5* && "$output" == *GLIBC_2.36* ]] || release_fail 'valid glibc requirements were lost'
-    printf 'Name: GLIBC_2.37\n' >"$failure_workspace/glibc-new"
+    printf 'Name: GLIBC_2.37\n' > "$failure_workspace/glibc-new"
     expect_failure glibc-too-new 1 'exceeds glibc baseline 2.36' \
         awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-new"
-    printf 'Name: GLIBC_2.36.1\n' >"$failure_workspace/glibc-patch"
+    printf 'Name: GLIBC_2.36.1\n' > "$failure_workspace/glibc-patch"
     expect_failure glibc-new-patch 1 'exceeds glibc baseline 2.36' \
         awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-patch"
-    printf 'Name: GLIBC_PRIVATE\n' >"$failure_workspace/glibc-private"
+    printf 'Name: GLIBC_PRIVATE\n' > "$failure_workspace/glibc-private"
     expect_failure glibc-private 1 'unsupported glibc symbol version' \
         awk -v baseline=2.36 -f "$parser" "$failure_workspace/glibc-private"
 }
@@ -95,8 +95,8 @@ check_glibc_versions() {
 check_docker_timeout() {
     local remaining
     release_require_commands timeout docker
-    timeout --signal=TERM --kill-after=5s 15s docker version --format '{{.Server.Version}}' >/dev/null
-    timeout --signal=TERM --kill-after=5s 120s docker pull --platform linux/amd64 "$RUNTIME_BASE" >"$failure_logs/pull.log" 2>&1
+    timeout --signal=TERM --kill-after=5s 15s docker version --format '{{.Server.Version}}' > /dev/null
+    timeout --signal=TERM --kill-after=5s 120s docker pull --platform linux/amd64 "$RUNTIME_BASE" > "$failure_logs/pull.log" 2>&1
     failure_probe_id="kgcache-failure-probe-$$"
     expect_failure docker-timeout 1 'runtime probe failed or timed out' \
         bash tests/release/failure-child.sh docker-timeout "$failure_probe_id" "$failure_logs/timeout-container.log"
@@ -107,7 +107,7 @@ check_docker_timeout() {
 }
 
 main() {
-    [[ $# == 0 || ( $# == 1 && "$1" == --docker ) ]] || release_fail 'usage: bash tests/release/failures.sh [--docker]'
+    [[ $# == 0 || ($# == 1 && "$1" == --docker) ]] || release_fail 'usage: bash tests/release/failures.sh [--docker]'
     release_require_commands git jq bash mktemp awk
     cd "$RELEASE_ROOT"
     mkdir -p .zig-cache test-artifacts/release/failures

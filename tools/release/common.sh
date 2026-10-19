@@ -18,14 +18,14 @@ export LC_ALL=C
 release_require_commands() {
     local command_name
     for command_name in "$@"; do
-        if ! command -v "$command_name" >/dev/null 2>&1; then
+        if ! command -v "$command_name" > /dev/null 2>&1; then
             release_fail "required command is missing: $command_name"
         fi
     done
 }
 
 release_require_sha256() {
-    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    if ! command -v sha256sum > /dev/null 2>&1 && ! command -v shasum > /dev/null 2>&1; then
         release_fail 'SHA-256 requires sha256sum or shasum'
     fi
 }
@@ -39,10 +39,10 @@ release_require_value() {
 
 release_sha256() {
     local output
-    if command -v sha256sum >/dev/null 2>&1; then
-        output=$(sha256sum <"$1") || release_fail "cannot checksum $1"
+    if command -v sha256sum > /dev/null 2>&1; then
+        output=$(sha256sum < "$1") || release_fail "cannot checksum $1"
     else
-        output=$(shasum -a 256 <"$1") || release_fail "cannot checksum $1"
+        output=$(shasum -a 256 < "$1") || release_fail "cannot checksum $1"
     fi
     printf '%s\n' "${output%% *}"
 }

@@ -13,8 +13,8 @@ docker_platform() {
     engine_arch=$(timeout --signal=TERM --kill-after=5s 15s docker info --format '{{.Architecture}}') ||
         release_fail 'cannot identify the Docker engine architecture'
     case "$engine_arch" in
-        x86_64|amd64) printf 'linux/amd64\n' ;;
-        aarch64|arm64) printf 'linux/arm64\n' ;;
+        x86_64 | amd64) printf 'linux/amd64\n' ;;
+        aarch64 | arm64) printf 'linux/arm64\n' ;;
         *) release_fail "unknown Docker engine architecture: $engine_arch" ;;
     esac
 }
@@ -61,7 +61,7 @@ build_probe_images() {
         log="$probe_evidence_dir/build-$stage.log"
         if ! timeout --signal=TERM --kill-after=10s 600s docker build \
             --platform "$platform" --build-arg "RUNTIME_BASE=$RUNTIME_BASE" \
-            --target "$stage" --tag "$probe_id:$stage" "$probe_workspace/context" >"$log" 2>&1; then
+            --target "$stage" --tag "$probe_id:$stage" "$probe_workspace/context" > "$log" 2>&1; then
             cat "$log" >&2
             release_fail "cannot build the $stage probe; log: $log"
         fi
@@ -81,7 +81,7 @@ inspect_binary() {
     local platform=$1
     probe_run inspection "$platform" "$probe_id:inspection" 30s "$probe_evidence_dir/inspection.log"
     cp "$probe_evidence_dir/inspection.log.stdout" "$probe_evidence_dir/abi.json"
-    jq --exit-status . "$probe_evidence_dir/abi.json" >/dev/null
+    jq --exit-status . "$probe_evidence_dir/abi.json" > /dev/null
 }
 
 write_result() {
@@ -93,7 +93,7 @@ write_result() {
         --argjson native "$native" --argjson qualified "$qualified" \
         '{schema_version: 1, build: $build[0], engine_platform: $engine, native_execution: $native,
           initial_amd64_qualified: $qualified, runtime_libraries: "passed",
-          elf_inspection: "passed", process_tests: "passed"}' >"$probe_evidence_dir/result.json"
+          elf_inspection: "passed", process_tests: "passed"}' > "$probe_evidence_dir/result.json"
     printf 'Bookworm checks passed: platform=%s native=%s initial_amd64_qualified=%s\n' "$platform" "$native" "$qualified"
 }
 

@@ -1,0 +1,3 @@
+external-sources=true
+source-path=SCRIPTDIR
+enable=check-extra-masked-returns,check-set-e-suppressed

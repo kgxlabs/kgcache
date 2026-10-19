@@ -122,3 +122,7 @@ client times out. The checks require the intended error status and explanation,
 and keep separate logs under `test-artifacts/release/failures/`.
 Artifact checks also simulate a metadata writer failure after compilation and
 confirm that the previous executable and build record are unchanged.
+
+Run `make check-shell` before submitting script changes. Use `make fmt-shell`
+to apply the shared formatting rules. See `tools/shell/README.md` for the pinned
+tools and supported hosts.

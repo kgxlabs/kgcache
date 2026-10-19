@@ -16,17 +16,17 @@ probe_run() {
     shift 5
     container="$probe_id-$stage"
     if ! timeout --signal=TERM --kill-after=5s 30s docker create \
-        --name "$container" --platform "$platform" "$image" "$@" >/dev/null 2>"$log"; then
+        --name "$container" --platform "$platform" "$image" "$@" > /dev/null 2> "$log"; then
         cat "$log" >&2
         release_fail "cannot create the $stage probe"
     fi
     status=0
-    if timeout --signal=TERM --kill-after=5s "$deadline" docker start --attach "$container" >"$log.stdout" 2>>"$log"; then
+    if timeout --signal=TERM --kill-after=5s "$deadline" docker start --attach "$container" > "$log.stdout" 2>> "$log"; then
         :
     else
         status=$?
     fi
-    cat "$log.stdout" >>"$log"
+    cat "$log.stdout" >> "$log"
     if [[ "$status" != 0 ]]; then
         cat "$log" >&2
         release_fail "$stage probe failed or timed out (status $status); log: $log"
@@ -51,7 +51,7 @@ probe_cleanup() {
                             failed=true
                         fi
                     fi
-                    if ! timeout --signal=TERM --kill-after=2s 5s docker rm --force "$container_id" >/dev/null; then
+                    if ! timeout --signal=TERM --kill-after=2s 5s docker rm --force "$container_id" > /dev/null; then
                         printf 'release: cannot remove probe container %s\n' "$container_id" >&2
                         failed=true
                     fi
@@ -62,7 +62,7 @@ probe_cleanup() {
             fi
             if image_id=$(timeout --signal=TERM --kill-after=2s 5s docker image ls --quiet "$probe_id:$stage"); then
                 if [[ -n "$image_id" ]]; then
-                    if ! timeout --signal=TERM --kill-after=2s 5s docker image rm "$probe_id:$stage" >/dev/null; then
+                    if ! timeout --signal=TERM --kill-after=2s 5s docker image rm "$probe_id:$stage" > /dev/null; then
                         printf 'release: cannot remove probe image %s:%s\n' "$probe_id" "$stage" >&2
                         failed=true
                     fi

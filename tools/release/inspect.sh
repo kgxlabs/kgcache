@@ -30,16 +30,16 @@ read_dependencies() {
     if [[ "$dynamic" == *'(RPATH)'* || "$dynamic" == *'(RUNPATH)'* ]]; then
         release_fail 'release binary contains a runtime library search path'
     fi
-    printf '%s\n' "$dynamic" | sed -nE 's/.*\(NEEDED\).*\[([^]]+)\].*/\1/p' | sort -u >"$output"
+    printf '%s\n' "$dynamic" | sed -nE 's/.*\(NEEDED\).*\[([^]]+)\].*/\1/p' | sort -u > "$output"
     [[ -s "$output" ]] || release_fail 'missing dynamic dependency information'
 }
 
 read_glibc_versions() {
     local reader=$1 binary=$2 workspace=$3
-    "$reader" --version-info "$binary" >"$workspace/version-info"
+    "$reader" --version-info "$binary" > "$workspace/version-info"
     awk -v "baseline=$GLIBC_VERSION" -f "$RELEASE_ROOT/tools/release/glibc-versions.awk" \
-        "$workspace/version-info" >"$workspace/versions-unsorted"
-    sort -u "$workspace/versions-unsorted" >"$workspace/versions"
+        "$workspace/version-info" > "$workspace/versions-unsorted"
+    sort -u "$workspace/versions-unsorted" > "$workspace/versions"
 }
 
 write_report() {

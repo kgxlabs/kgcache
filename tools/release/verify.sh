@@ -16,7 +16,7 @@ validate_record() {
         --arg compiler "$ZIG_VERSION" \
         --arg runtime "$RUNTIME_BASE" \
         --from-file "$RELEASE_ROOT/tools/release/validate-build-info.jq" \
-        "$metadata" >/dev/null; then
+        "$metadata" > /dev/null; then
         release_fail "invalid release build record: $metadata"
     fi
 }

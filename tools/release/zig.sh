@@ -18,7 +18,7 @@ host_platform() {
     arch=$(uname -m) || release_fail 'cannot identify the compiler host architecture'
     case "$system/$arch" in
         Linux/x86_64) printf 'x86_64-linux\n' ;;
-        Linux/aarch64|Linux/arm64) printf 'aarch64-linux\n' ;;
+        Linux/aarch64 | Linux/arm64) printf 'aarch64-linux\n' ;;
         Darwin/arm64) printf 'aarch64-macos\n' ;;
         Darwin/x86_64) printf 'x86_64-macos\n' ;;
         *) release_fail 'the pinned compiler supports Linux and macOS on amd64 or arm64' ;;
@@ -64,7 +64,7 @@ download_compiler() {
     tar -xJf "$archive" -C "$download_workspace/unpacked" --strip-components=1
     version=$("$download_workspace/unpacked/zig" version)
     [[ "$version" == "$ZIG_VERSION" ]] || release_fail 'compiler version mismatch'
-    printf '%s\n' "$expected_sha" >"$download_workspace/unpacked/.verified-sha256"
+    printf '%s\n' "$expected_sha" > "$download_workspace/unpacked/.verified-sha256"
     [[ ! -e "$directory" ]] || release_fail "compiler cache appeared during download; retry: $directory"
     mv "$download_workspace/unpacked" "$directory"
     rm -rf -- "$download_workspace"

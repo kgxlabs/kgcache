@@ -29,7 +29,7 @@ check_foreign_build() {
 check_execution_guards() {
     local compiler=$1 target=$2 step output
     for step in run test test-integration; do
-        if "$compiler" build "$step" "-Dtarget=$target" >"$check_root/$step.log" 2>&1; then
+        if "$compiler" build "$step" "-Dtarget=$target" > "$check_root/$step.log" 2>&1; then
             release_fail "$step unexpectedly accepted a foreign execution target"
         fi
         output=$(cat "$check_root/$step.log")

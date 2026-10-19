@@ -8,7 +8,7 @@ main() {
         printf 'Runtime contains diagnostic or process test tools.\n' >&2
         exit 1
     }
-    if command -v zig >/dev/null 2>&1; then
+    if command -v zig > /dev/null 2>&1; then
         printf 'Runtime contains a compiler.\n' >&2
         exit 1
     fi

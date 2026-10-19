@@ -43,7 +43,7 @@ resolve_output() {
     parent=$(cd "$parent" && pwd -P) || release_fail 'cannot resolve output directory'
     build_output="$parent/$name"
     case "$build_output" in
-        "$RELEASE_ROOT"|"$RELEASE_ROOT/zig-out"|"$RELEASE_ROOT/zig-out/bin")
+        "$RELEASE_ROOT" | "$RELEASE_ROOT/zig-out" | "$RELEASE_ROOT/zig-out/bin")
             release_fail 'release output must be separate from the normal install prefix'
             ;;
     esac
@@ -76,7 +76,7 @@ write_record() {
         --arg runtime "$RUNTIME_BASE" \
         --arg sha "$binary_sha" \
         --from-file "$RELEASE_ROOT/tools/release/create-build-info.jq" \
-        >"$output/build-info.json"; then
+        > "$output/build-info.json"; then
         release_fail 'cannot write release build record'
     fi
 }
@@ -117,7 +117,7 @@ main() {
     done
     release_require_commands git jq file sed mktemp timeout
     release_require_sha256
-    release_target "$platform" >/dev/null
+    release_target "$platform" > /dev/null
     cd "$RELEASE_ROOT"
     revision=$(release_git_revision)
     source_status=$(release_git_status)
