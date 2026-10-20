@@ -64,6 +64,15 @@ with a different selected port, and both servers must answer PING. These
 cases cover config paths before, between, and after overrides, startup
 without a config file, and `./-cache.conf`.
 
+Health command cases check file and CLI endpoint settings, repeated overrides,
+wildcard mapping, invalid endpoints, and inaccessible persistence paths.
+Healthy probes must exit 0 silently. Controlled peers verify the exact PING
+request, fragmented PONG, early EOF, malformed and other RESP values, silence,
+and a reply delivered too slowly for the shared network deadline. Each command
+has a four-second outer deadline and bounded output. Failures must exit 1 with
+one short stderr line. An inherited readiness descriptor receives no bytes,
+and a controlled test build must probe without initializing persistence controls.
+
 Startup rejection cases cover unknown and removed file and CLI names,
 invalid overrides, missing values, duplicate paths, invalid readiness
 arguments, and bare `--`. Invalid file values must still fail when the CLI

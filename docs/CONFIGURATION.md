@@ -64,6 +64,42 @@ directive is part of its value.
 
 For every directive except `save`, the last occurrence supplies the value. Every occurrence must have a valid value. Repeated `save` directives collect rules in file order, with `save ""` clearing earlier rules.
 
+## Health command
+
+Put `healthcheck` first to probe an existing server through RESP2 PING:
+
+```sh
+./zig-out/bin/kgcache healthcheck
+./zig-out/bin/kgcache healthcheck path/to/kgcache.conf
+./zig-out/bin/kgcache healthcheck path/to/kgcache.conf --port 7000
+./zig-out/bin/kgcache healthcheck --port 7000 path/to/kgcache.conf
+```
+
+Health mode uses the same defaults, file loading, directive grammar, and CLI
+precedence as server mode. The last valid CLI value wins, and all occurrences
+are validated. It rejects `--ready-fd` before using the descriptor. To start a
+server with a config file named `healthcheck`, use `./healthcheck`.
+
+Only the exact simple-string frame `+PONG\r\n` succeeds. Success exits 0 with
+empty stdout and stderr. Invalid arguments, config, endpoints, connection
+failures, timeouts, and unexpected replies exit 1 with one short stderr line.
+Connect, send, and read share one 1000 ms monotonic network deadline. The
+command returns after the frame, without waiting for the server to close.
+
+The probe accepts the server's numeric IPv4 addresses. `0.0.0.0` maps to
+`127.0.0.1`; other addresses are used directly. `port 0` fails because another
+process cannot discover the OS-selected port from the config. Native server
+mode still supports `port 0`.
+
+The command loads config but never creates a server, opens persistence files,
+or checks access to the data directory. PONG checks basic service response.
+It does not verify fsync, disk durability, cache capacity, or data integrity.
+The network deadline does not bound config filesystem access or process startup.
+
+Each process loads its own settings. If the server uses endpoint overrides,
+supply the same config path, bind, and port to the health command. Container
+examples and timing are in the [container guide](../tests/container/README.md#health-check).
+
 ## Quotes and empty values
 
 A double quote at the start of a value groups that value. For `save`, quote

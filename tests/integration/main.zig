@@ -10,6 +10,7 @@ const command_errors = @import("suites/command_errors.zig");
 const select_isolation = @import("suites/select_isolation.zig");
 const invalid_config = @import("suites/invalid_config.zig");
 const configuration = @import("suites/configuration.zig");
+const healthcheck = @import("suites/healthcheck.zig");
 const idle_clients_shutdown = @import("suites/idle_clients_shutdown.zig");
 const transport_shutdown = @import("suites/transport_shutdown.zig");
 const restart_same_port = @import("suites/restart_same_port.zig");
@@ -52,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     try select_isolation.run(init.io, init.gpa, executable_path, artifact_dir);
     try invalid_config.run(init.io, init.gpa, executable_path, artifact_dir);
     try configuration.run(init.io, init.gpa, executable_path, artifact_dir);
+    try healthcheck.run(init.io, init.gpa, executable_path, controlled_absolute_path, artifact_dir);
     try aof_recovery.run(init.io, init.gpa, executable_path, artifact_dir);
     try aof_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try snapshot_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);

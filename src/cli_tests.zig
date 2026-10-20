@@ -4,6 +4,42 @@ const Config = @import("config.zig");
 const ConfigLoader = @import("config/loader.zig");
 const registry = @import("config/registry.zig");
 
+test "health mode shares config paths, overrides, and validation" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const invocations = [_][]const [*:0]const u8{
+        &.{ "kgcache", "healthcheck" },
+        &.{ "kgcache", "healthcheck", "cache.conf" },
+        &.{ "kgcache", "healthcheck", "cache.conf", "--port", "7000" },
+        &.{ "kgcache", "healthcheck", "--port", "7000", "cache.conf" },
+    };
+    for (invocations) |argv| {
+        var cli = try Cli.parse(&arena, .{ .vector = argv });
+        defer cli.deinit();
+        try testing.expectEqual(Cli.Mode.healthcheck, cli.mode);
+        try testing.expect(cli.ready_fd == null);
+        try testing.expectEqual(argv.len > 2, cli.config_path != null);
+    }
+    const cases = .{
+        .{ error.ReadyFdInHealthMode, &.{ "kgcache", "healthcheck", "--ready-fd" } },
+        .{ error.ReadyFdInHealthMode, &.{ "kgcache", "healthcheck", "--ready-fd", "3" } },
+        .{ error.DuplicateConfigPath, &.{ "kgcache", "healthcheck", "a", "b" } },
+        .{ error.UnknownFlag, &.{ "kgcache", "healthcheck", "--unknown" } },
+        .{ error.InvalidValue, &.{ "kgcache", "healthcheck", "--port", "invalid", "--port", "7000" } },
+        .{ error.MissingValue, &.{ "kgcache", "healthcheck", "--port" } },
+        .{ error.MisplacedHealthcheck, &.{ "kgcache", "--port", "7000", "healthcheck" } },
+    };
+    inline for (cases) |case| try testing.expectError(case[0], Cli.parse(&arena, .{ .vector = case[1] }));
+    var named_file = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "./healthcheck" } });
+    defer named_file.deinit();
+    try testing.expectEqual(Cli.Mode.server, named_file.mode);
+    var value = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "healthcheck", "--dir", "healthcheck" } });
+    defer value.deinit();
+    const config = try ConfigLoader.load(testing.io, &arena, null, value.overrides.items);
+    try testing.expectEqualStrings("healthcheck", config.dir);
+}
+
 test "CLI consumes required values by position without changing option parsing" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -11,6 +47,7 @@ test "CLI consumes required values by position without changing option parsing" 
     for ([_][*:0]const u8{ "-data", "--", "--ready-fd", "healthcheck", "--dir=value" }) |value| {
         var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--dir", value, "--port", "7000" } });
         defer cli.deinit();
+        try testing.expectEqual(Cli.Mode.server, cli.mode);
         try testing.expect(cli.config_path == null);
         try testing.expect(cli.ready_fd == null);
         const config = try ConfigLoader.load(testing.io, &arena, null, cli.overrides.items);

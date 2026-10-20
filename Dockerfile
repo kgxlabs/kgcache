@@ -55,6 +55,7 @@ WORKDIR /data
 USER 10001:10001
 EXPOSE 6379/tcp
 STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=2s --start-period=60s --retries=3 CMD ["/usr/local/bin/kgcache", "healthcheck", "/etc/kgcache/kgcache.conf"]
 ENTRYPOINT ["/usr/local/bin/kgcache"]
 CMD ["/etc/kgcache/kgcache.conf"]
 

@@ -1,0 +1,29 @@
+# Test fixture for paired command and health overrides.
+services:
+  kgcache:
+    image: ${HEALTH_IMAGE:?}
+    platform: linux/amd64
+    container_name: ${HEALTH_CONTAINER:?}
+    labels:
+      io.kgcache.container-test: ${HEALTH_RUN_ID:?}
+    read_only: true
+    command: ["/etc/kgcache/kgcache.conf", "--port", "7000"]
+    volumes:
+      - health-data:/data
+    networks:
+      - health-network
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/kgcache", "healthcheck", "/etc/kgcache/kgcache.conf", "--port", "${HEALTH_PROBE_PORT:-7000}"]
+      interval: 1s
+      timeout: 2s
+      start_period: 1s
+      retries: 2
+    stop_grace_period: 30s
+volumes:
+  health-data:
+    external: true
+    name: ${HEALTH_VOLUME:?}
+networks:
+  health-network:
+    external: true
+    name: ${HEALTH_NETWORK:?}
