@@ -55,6 +55,9 @@ config file, CLI overrides, or both:
 
 See [Configuration](docs/CONFIGURATION.md) for all settings.
 
+For a local Docker service with persistent storage, see
+[Docker Compose](docs/CONTAINERS.md).
+
 To run `kgcache` from any directory, add a shell alias to `~/.zshrc` (or
 `~/.bashrc` for Bash), adjusting the path to your checkout:
 
@@ -79,6 +82,7 @@ kgcache /absolute/path/to/kgcache.conf
 | --- | --- |
 | [Commands](docs/COMMAND.md) | Supported commands, `SET` options, and compatibility notes |
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
+| [Docker Compose](docs/CONTAINERS.md) | Local service setup, storage, health, config changes, and container replacement |
 | [Architecture](docs/ARCHITECTURE.md) | Role within kgx, request flow, design trade-offs, repository layout |
 | [Test organization](docs/TESTING.md) | Where Zig tests and fixtures belong, test discovery, and checks for test moves |
 | [Errors and logging](docs/ERRORS.md) | Error propagation, terminal reports, and trace availability |

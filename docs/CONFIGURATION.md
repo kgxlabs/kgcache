@@ -1,5 +1,8 @@
 # Configuration
 
+For image defaults and shared config mounts, see
+[Docker Compose](CONTAINERS.md).
+
 kgcache starts with built-in defaults. To use a config file, pass its path as a positional argument:
 
 ```bash

@@ -1,5 +1,8 @@
 # Persistence
 
+For container storage, ownership, and replacement, see
+[Docker Compose](CONTAINERS.md).
+
 kgcache can save data in two ways:
 
 | Method | What it saves | Guide |

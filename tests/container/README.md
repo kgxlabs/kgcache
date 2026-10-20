@@ -1,15 +1,31 @@
 # Container image checks
 
-Requires Bash 3.2 or newer, Docker with BuildKit and Compose, GNU `timeout`, jq, and
-standard Unix file tools. Build from the repository root:
+Requires Bash 3.2 or newer, Docker with Linux containers, GNU `timeout`, jq,
+and standard Unix tools. Compose must support `config --format json`,
+`up --wait --wait-timeout`, and `port`. Source builds also need BuildKit.
+The runner checks these prerequisites before creating resources.
+
+For operator instructions, see [Docker Compose](../../docs/CONTAINERS.md).
+Build and qualify from the repository root:
 
 ```sh
-docker build --platform linux/amd64 --tag kgcache:local .
-bash tests/container/run.sh --image kgcache:local \
+bash tests/container/run.sh --build --artifacts test-artifacts/container
+```
+
+The source path derives a deployment from `docker-compose.yml`, builds under
+a unique tag, and resolves its image ID once. Builds have a separate
+10-minute deadline. To qualify an already loaded image without rebuilding
+or pulling it implicitly:
+
+```sh
+bash tests/container/run.sh --image IMAGE \
   --artifacts test-artifacts/container
 ```
 
-The Dockerfile supplies the pinned base and checks it against the release
+Replace `IMAGE` with a local tag, image ID, or already pulled digest reference.
+Every Compose service must use the resolved image ID. Registry manifest
+digests and local image IDs are recorded separately. The Dockerfile supplies
+the pinned base and checks it against the release
 settings. Local builds read the package version from `build.zig.zon`. They
 record `SOURCE_REVISION=unknown` and `SOURCE_DIRTY=true` by default. The image
 version label stays empty unless `VERSION` is supplied; the build record always
@@ -86,7 +102,7 @@ identify the intended server if another service responds on that endpoint.
 The runner uses Docker-assigned loopback ports, a read-only root, and mounted
 storage. Binary RESP data stays in files and is compared with `cmp`.
 Resources carry a unique run label. Docker commands and network operations
-have deadlines. A full run has a 15-minute deadline plus cleanup time.
+have deadlines. A full run has a 30-minute deadline plus cleanup time.
 The runner collects bounded logs and state before removing
 its resources, including after interruption. `--artifacts` preserves evidence.
 
@@ -114,6 +130,37 @@ The container limit does not add application memory accounting or eviction.
 
 Build `--target diagnostic` to add ELF and process inspection tools. The final
 runtime has no compiler or test server. Normal startup does not use a shell.
+
+## Compose coverage
+
+The same command runs the existing image/health suite and Compose checks
+against one image. Compose variants come from the checked-in model. Tests
+cover service-name DNS from a peer, inherited security and resource settings,
+host access, config mounts, paired port overrides,
+stop/start, replacement, snapshot-only and disposable modes, missing/invalid
+config, parallel projects, and occupied host ports.
+
+Cleanup checks resource ownership and removes only this run's resources,
+including its test volumes. User volumes remain untouched. Failure artifacts
+include resolved deployments, image/platform and Docker versions,
+health history, exit/OOM state, and relevant persistence evidence.
+
+## Exact guide check and CI handoff
+
+In an isolated environment, also exercise the literal `docker-compose.yml`
+and guide commands with fixed host port 6379:
+
+```sh
+bash tests/container/run.sh --build --guide --artifacts test-artifacts/container
+```
+
+This mode requires host `redis-cli` and refuses an existing `kgcache:local`
+tag. It builds that tag through the checked-in file. A unique project name
+keeps containers, networks, and volumes scoped to the check. Ordinary local
+qualification uses unique tags and engine-assigned loopback host ports.
+
+Use `--image` after importing a candidate or pulling a registry digest.
+The qualification command never publishes an image.
 
 Follow the [shell style](../../tools/shell/README.md). Run `make fmt-shell`
 and `make check-shell` after editing scripts.
