@@ -5,6 +5,7 @@ const Server = @import("server.zig");
 const ReadyPipe = @import("readiness.zig");
 const logging = @import("logger.zig");
 const test_control = @import("persistence/test_control.zig");
+const healthcheck = @import("healthcheck.zig");
 
 var shutdown_event: std.Io.Event = .unset;
 var shutdown_signal_number: std.atomic.Value(u32) = .init(0);
@@ -55,8 +56,6 @@ const RunOutcome = union(enum) {
 };
 
 pub fn main(init: std.process.Init) u8 {
-    test_control.init(init.minimal.environ) catch return 1;
-    defer test_control.deinit();
     // Server borrows this logger. Keep its storage alive for the full Server lifetime.
     var default_logger = logging.DefaultLogger.init(init.io);
     const logger = default_logger.logger();
@@ -68,14 +67,16 @@ pub fn main(init: std.process.Init) u8 {
 }
 
 fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
+    const mode = Cli.modeFromArgs(init.minimal.args);
     var cli = Cli.parse(init.arena, init.minimal.args) catch |err| {
-        logger.err("app: invalid command line", err, @errorReturnTrace());
+        if (mode == .healthcheck) {
+            logger.err("healthcheck: invalid command line", err, null);
+        } else {
+            logger.err("app: invalid command line", err, @errorReturnTrace());
+        }
         return err;
     };
     defer cli.deinit();
-
-    var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
-    defer ready_pipe.close();
 
     // CLI and file loading share this borrowed arena.
     // Zig releases it after the application returns.
@@ -85,9 +86,26 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
         cli.config_path,
         cli.overrides.items,
     ) catch |err| {
-        logger.err("app: failed to load configuration", err, @errorReturnTrace());
+        if (mode == .healthcheck) {
+            logger.err("healthcheck: invalid configuration", err, null);
+        } else {
+            logger.err("app: failed to load configuration", err, @errorReturnTrace());
+        }
         return err;
     };
+
+    if (cli.mode == .healthcheck) {
+        healthcheck.probe(init.io, config) catch |err| {
+            logger.err(healthcheck.diagnostic(err), err, null);
+            return err;
+        };
+        return;
+    }
+
+    try test_control.init(init.minimal.environ);
+    defer test_control.deinit();
+    var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
+    defer ready_pipe.close();
 
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();

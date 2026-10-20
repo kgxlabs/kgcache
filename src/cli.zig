@@ -12,14 +12,25 @@ pub const Error = std.mem.Allocator.Error || directive_definition.ParseError || 
     MissingReadyFd,
     InvalidReadyFd,
     UnknownFlag,
-    HealthcheckNotImplemented,
+    ReadyFdInHealthMode,
+    MisplacedHealthcheck,
     DuplicateConfigPath,
 };
 
 allocator: std.mem.Allocator,
+mode: Mode = .server,
 config_path: ?[]const u8 = null,
 ready_fd: ?std.posix.fd_t = null,
 overrides: std.ArrayList(PreparedDirective) = .empty,
+
+pub const Mode = enum { server, healthcheck };
+
+pub fn modeFromArgs(process_args: std.process.Args) Mode {
+    var args = process_args.iterate();
+    _ = args.skip();
+    const first = args.next() orelse return .server;
+    return if (std.mem.eql(u8, first, "healthcheck")) .healthcheck else .server;
+}
 
 pub fn parse(arena: *std.heap.ArenaAllocator, process_args: std.process.Args) Error!Cli {
     const allocator = arena.allocator();
@@ -30,14 +41,15 @@ pub fn parse(arena: *std.heap.ArenaAllocator, process_args: std.process.Args) Er
     defer values.deinit(allocator);
     while (args.next()) |arg| try values.append(allocator, arg);
 
-    var cli: Cli = .{ .allocator = allocator };
+    var cli: Cli = .{ .allocator = allocator, .mode = modeFromArgs(process_args) };
     errdefer cli.deinit();
-    var index: usize = 0;
+    var index: usize = if (cli.mode == .healthcheck) 1 else 0;
     while (index < values.items.len) {
         const arg = values.items[index];
         index += 1;
 
         if (std.mem.eql(u8, arg, "--ready-fd")) {
+            if (cli.mode == .healthcheck) return error.ReadyFdInHealthMode;
             if (cli.ready_fd != null) return error.DuplicateReadyFd;
             if (index == values.items.len) return error.MissingReadyFd;
 
@@ -67,7 +79,7 @@ pub fn parse(arena: *std.heap.ArenaAllocator, process_args: std.process.Args) Er
         }
 
         if (std.mem.startsWith(u8, arg, "-")) return error.UnknownFlag;
-        if (std.mem.eql(u8, arg, "healthcheck")) return error.HealthcheckNotImplemented;
+        if (std.mem.eql(u8, arg, "healthcheck")) return error.MisplacedHealthcheck;
 
         if (cli.config_path != null) return error.DuplicateConfigPath;
 
@@ -155,7 +167,7 @@ test "CLI rejects invalid argument shapes" {
         .{ error.DuplicateReadyFd, &.{ "kgcache", "--ready-fd", "3", "--ready-fd", "4" } },
         .{ error.DuplicateConfigPath, &.{ "kgcache", "--ready-fd", "3", "one.conf", "two.conf" } },
         .{ error.DuplicateReadyFd, &.{ "kgcache", "one.conf", "--ready-fd", "3", "--ready-fd", "4" } },
-        .{ error.HealthcheckNotImplemented, &.{ "kgcache", "healthcheck" } },
+        .{ error.MisplacedHealthcheck, &.{ "kgcache", "cache.conf", "healthcheck" } },
         .{ error.MissingValue, &.{ "kgcache", "--port" } },
         .{ error.InvalidValue, &.{ "kgcache", "--port", "--ready-fd", "3" } },
         .{ error.MissingValue, &.{ "kgcache", "--save" } },
