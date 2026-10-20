@@ -77,13 +77,13 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: run.go list|validate|deps|check|fmt|test [--profile ID | --library NAME] [-- test arguments]")
+		return errors.New("usage: run.go list|validate|deps|check|fmt|test|smoke [--profile ID | --library NAME] [-- test arguments]")
 	}
 
 	action := args[0]
 
 	switch action {
-	case "list", "validate", "deps", "check", "fmt", "test":
+	case "list", "validate", "deps", "check", "fmt", "test", "smoke":
 	default:
 		return fmt.Errorf("unknown action %q", action)
 	}
@@ -160,12 +160,12 @@ func run(ctx context.Context, args []string) error {
 	}
 
 	for _, row := range selected {
-		if action == "test" && row.suite.Status != "ready" {
+		if (action == "test" || action == "smoke") && row.suite.Status != "ready" {
 			return fmt.Errorf("%s: client suite is still planned", row.ID)
 		}
 
 		err := withProfileWorkspace(ctx, root, row, func(workspace string, active selection) error {
-			if action == "deps" || action == "test" {
+			if action == "deps" || action == "test" || action == "smoke" {
 				if err := goRun(ctx, active.dir, "mod", "download", "all"); err != nil {
 					return fmt.Errorf("download dependencies: %w", err)
 				}
@@ -175,6 +175,10 @@ func run(ctx context.Context, args []string) error {
 			}
 			if err := validateResolvedVersions(ctx, workspace, active); err != nil {
 				return err
+			}
+			if action == "smoke" {
+				return goRun(ctx, active.dir, "run", "-mod=readonly", "./cmd/smoke",
+					os.Getenv("KGCACHE_SMOKE_HOST"), os.Getenv("KGCACHE_SMOKE_PORT"))
 			}
 
 			if action == "test" {

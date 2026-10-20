@@ -85,9 +85,14 @@ success, failure, or cancellation. Artifacts stay outside that workspace.
 Baseline manifests and locks remain unchanged. Use selectors with individual
 language commands; aggregate commands cover both required language sets.
 
-Each native launcher accepts `list`, `validate`, `deps`, or `test`, followed by
-`--profile ID` or `--library NAME`. Go's launcher uses only Go's standard library,
+Each native launcher accepts `list`, `validate`, `deps`, `test`, or `smoke`,
+followed by `--profile ID` or `--library NAME`. Go's launcher uses only Go's standard library,
 and Node's launcher uses only Node's standard library.
+
+The `smoke` action checks a caller-owned endpoint instead of starting a server.
+Set `KGCACHE_SMOKE_HOST` and `KGCACHE_SMOKE_PORT`, then use `make smoke-go` or
+`make smoke-node` with a registered `CLIENT_PROFILE`. See
+[container checks](../../container/README.md#compose-and-client-coverage).
 
 The Makefile supplies an absolute `KGCACHE_BIN` for the built server. Set
 `KGCACHE_TEST_ARTIFACT_DIR=test-artifacts` to retain diagnostics;

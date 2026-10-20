@@ -1,0 +1,22 @@
+services:
+  kgcache:
+    image: kgcache:local
+    build:
+      context: .
+    pull_policy: never
+    platform: linux/amd64
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - kgcache-data:/data
+    stop_grace_period: 30s
+    mem_limit: 512m
+    cpus: 1.0
+
+volumes:
+  kgcache-data:

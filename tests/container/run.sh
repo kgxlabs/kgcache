@@ -11,8 +11,10 @@ evidence_dir=
 resource_kinds=()
 resource_names=()
 peer_pids=()
+guide_project=
 
 source "$RELEASE_ROOT/tests/container/health.sh"
+source "$RELEASE_ROOT/tests/container/compose.sh"
 
 docker_call() {
     timeout --signal=TERM --kill-after=3s 30s docker "$@"
@@ -41,6 +43,11 @@ collect_evidence() {
             tail -c 32768 "$workspace/stderr" > "$prefix.stderr.log" || return 1
         fi
     done
+    for name in "$workspace/evidence/"*.log; do
+        [[ -f "$name" ]] || continue
+        tail -c 32768 "$name" > "$workspace/bounded.log" || return 1
+        mv "$workspace/bounded.log" "$name" || return 1
+    done
 }
 
 # Cleanup handles command statuses explicitly and must try every owned resource.
@@ -62,14 +69,19 @@ cleanup() {
         kind=${resource_kinds[index]}
         name=${resource_names[index]}
         if ! found=$(docker_call "$kind" inspect "$name" 2>&1); then
-            if [[ "$found" != *'No such'* && "$found" != *'no such'* ]]; then
+            if [[ "$found" != *'No such'* && "$found" != *'no such'* &&
+                "$found" != *"network $name not found"* ]]; then
                 printf 'container: cannot inspect %s: %s\n' "$name" "$found" >&2
                 failed=true
             fi
             continue
         fi
         if ! label=$(printf '%s\n' "$found" | jq -er \
-            '.[0] | (.Config.Labels // .Labels) | .["io.kgcache.container-test"]'); then
+            --arg guide "$guide_project" --arg run "$run_id" \
+            '.[0] | (.Config.Labels // .Labels) |
+            .["io.kgcache.container-test"] //
+            (if $guide != "" and .["com.docker.compose.project"] == $guide
+                then $run else null end)'); then
             failed=true
             continue
         fi
@@ -293,9 +305,28 @@ check_layout() {
         "$workspace/evidence/build-info.json" > /dev/null
 }
 
+raw_peer() {
+    local image=$1 network=$2 name=$3 host=$4 input=$5 expected=$6
+
+    register container "$name"
+    # Expand the endpoint and reply size in the peer container.
+    # shellcheck disable=SC2016
+    docker_call create --name "$name" --platform linux/amd64 --read-only \
+        --label "io.kgcache.container-test=$run_id" --network "$network" \
+        --mount "type=bind,src=$input,dst=/checks/request,readonly" \
+        --mount "type=bind,src=$expected,dst=/checks/expected,readonly" \
+        --entrypoint bash "$image" -ec \
+        'exec 3<> "/dev/tcp/$1/6379"
+        cat /checks/request >&3
+        size=$(wc -c < /checks/expected)
+        head -c "$size" <&3 | cmp - /checks/expected' bash "$host" > /dev/null
+    docker_call start --attach "$name"
+    docker_call container inspect "$name" | jq -e \
+        '.[0].State.ExitCode == 0' > /dev/null
+}
+
 smoke() {
     local image=$1 network=$2 name="$run_id-smoke" volume="$run_id-smoke" port
-    local peer="$run_id-peer"
 
     create_volume "$volume"
     create_server "$image" "$network" "$name" "type=volume,src=$volume,dst=/data"
@@ -310,21 +341,8 @@ smoke() {
     printf '+OK\r\n$15\r\nbinary\000\377\r\nvalue\r\n' > "$workspace/binary.expected"
     request 127.0.0.1 "$port" "$workspace/binary.request" \
         "$workspace/binary.expected" "$workspace/binary.actual"
-    register container "$peer"
-    # Expand the endpoint and reply size in the peer container.
-    # shellcheck disable=SC2016
-    docker_call create --name "$peer" --platform linux/amd64 --read-only \
-        --label "io.kgcache.container-test=$run_id" --network "$network" \
-        --mount "type=bind,src=$workspace/binary.request,dst=/checks/request,readonly" \
-        --mount "type=bind,src=$workspace/binary.expected,dst=/checks/expected,readonly" \
-        --entrypoint bash "$image" -ec \
-        'exec 3<> "/dev/tcp/$1/6379"
-        cat /checks/request >&3
-        size=$(wc -c < /checks/expected)
-        head -c "$size" <&3 | cmp - /checks/expected' bash "$name" > /dev/null
-    docker_call start --attach "$peer"
-    docker_call container inspect "$peer" | jq -e \
-        '.[0].State.ExitCode == 0' > /dev/null
+    raw_peer "$image" "$network" "$run_id-peer" "$name" \
+        "$workspace/binary.request" "$workspace/binary.expected"
     stop_server "$name"
     remove_server "$name"
     name="$run_id-replacement"
@@ -645,6 +663,10 @@ process_lifecycle() {
 
 main() {
     local image='' artifacts='' allow_emulation=false network native engine_arch
+    local build=false guide=false
+
+    export PATH="$RELEASE_ROOT/.client-tools/go/bin:$RELEASE_ROOT/.client-tools/node/bin:$PATH"
+    export GOTOOLCHAIN=local GOWORK=off
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -660,16 +682,49 @@ main() {
                 allow_emulation=true
                 shift
                 ;;
+            --build)
+                build=true
+                shift
+                ;;
+            --guide)
+                guide=true
+                shift
+                ;;
             --help)
-                printf 'Usage: bash tests/container/run.sh --image IMAGE [--artifacts DIR] [--allow-emulation]\n'
+                printf 'Usage: bash tests/container/run.sh (--image IMAGE | --build) [--guide] [--artifacts DIR] [--allow-emulation]\n'
                 return
                 ;;
             *) release_fail "unknown argument: $1" ;;
         esac
     done
 
-    [[ -n "$image" ]] || release_fail '--image is required'
+    if [[ "$build" == true ]]; then
+        [[ -z "$image" ]] || release_fail '--build and --image cannot be combined'
+    else
+        [[ -n "$image" ]] || release_fail '--image or --build is required'
+        [[ "$guide" == false ]] || release_fail '--guide requires --build in an isolated environment'
+    fi
     release_require_commands docker timeout jq mktemp head tail cmp wc tr
+    compose_preflight
+    engine_arch=$(docker_call info --format '{{.Architecture}}')
+    native=false
+    if [[ "$engine_arch" == x86_64 || "$engine_arch" == amd64 ]]; then
+        native=true
+    else
+        [[ "$allow_emulation" == true ]] ||
+            release_fail 'native amd64 engine required; use --allow-emulation for development'
+    fi
+    if [[ "$build" == true ]]; then
+        docker_call buildx version > /dev/null
+    fi
+    if [[ "$guide" == true ]]; then
+        release_require_commands redis-cli
+        # docker_call returns the status of its one bounded command.
+        # shellcheck disable=SC2310
+        if docker_call image inspect kgcache:local > /dev/null 2>&1; then
+            release_fail '--guide requires an isolated image store without kgcache:local'
+        fi
+    fi
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -687,6 +742,14 @@ main() {
     printf '+PONG\r\n' > "$workspace/ping.expected"
 
     docker_call compose version > "$workspace/evidence/compose-version.log"
+    docker_call version > "$workspace/evidence/docker-version.log"
+    if [[ "$guide" == true ]]; then
+        guide_project="$run_id-guide"
+    fi
+    if [[ "$build" == true ]]; then
+        compose_build "$guide"
+        image=$(cat "$workspace/built-image-id")
+    fi
     docker_call image inspect "$image" > "$workspace/evidence/image.json"
     jq -e '.[0] | .Os == "linux" and .Architecture == "amd64" and
       (.Config | .User == "10001:10001" and .WorkingDir == "/data" and
@@ -698,14 +761,6 @@ main() {
         .Cmd == ["/etc/kgcache/kgcache.conf"] and
         (.ExposedPorts | has("6379/tcp")) and (.Volumes | not))' \
         "$workspace/evidence/image.json" > /dev/null
-    engine_arch=$(docker_call info --format '{{.Architecture}}')
-    native=false
-    if [[ "$engine_arch" == x86_64 || "$engine_arch" == amd64 ]]; then
-        native=true
-    else
-        [[ "$allow_emulation" == true ]] ||
-            release_fail 'native amd64 engine required; use --allow-emulation for development'
-    fi
     image=$(jq -er '.[0].Id' "$workspace/evidence/image.json")
     network="$run_id-network"
     register network "$network"
@@ -720,10 +775,15 @@ main() {
     recovery "$image" "$network" always
     recovery "$image" "$network" snapshot
     process_lifecycle "$image" "$network"
+    compose_cases "$image"
+    if [[ "$guide" == true ]]; then
+        compose_guide "$image"
+    fi
     jq --null-input \
         --slurpfile image "$workspace/evidence/image.json" \
         --slurpfile build "$workspace/evidence/build-info.json" \
         --argjson native "$native" \
+        --argjson guide "$guide" \
         --rawfile cold "$workspace/evidence/cold-start.seconds" \
         --rawfile replay "$workspace/evidence/replay.seconds" \
         --rawfile ping "$workspace/evidence/ping-roundtrips.seconds" \
@@ -732,6 +792,8 @@ main() {
         '{passed: true, image_id: $image[0][0].Id, image_size_bytes: $image[0][0].Size,
           build: $build[0], native_execution: $native,
           qualified_amd64: ($native and ($build[0].source.dirty | not)),
+          compose: {passed: true, guide_checked: $guide,
+            clients: ["go-redis-v9.22.0", "node-redis-6.2.1"]},
           workload: {keys: 4096, value_bytes: 4096, memory_limit_bytes: 268435456, cpus: 1},
           measurements: {cold_start_seconds: ($cold | tonumber), replay_seconds: ($replay | tonumber),
             ping_mean_ms: (($ping | tonumber) * 1000 / 64),
@@ -758,7 +820,7 @@ case "${1:-}" in
         main "$@"
         ;;
     *)
-        exec timeout --signal=TERM --kill-after=60s 900s \
+        exec timeout --signal=TERM --kill-after=60s 1800s \
             bash "$RELEASE_ROOT/tests/container/run.sh" --run "$@"
         ;;
 esac

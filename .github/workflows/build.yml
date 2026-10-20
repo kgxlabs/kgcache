@@ -13,13 +13,32 @@ jobs:
   linux-release:
     name: Native Linux amd64 release on Bookworm
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install pinned Go for endpoint checks
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/integration/clients/go/go-redis/v9/.go-version
+          cache-dependency-path: tests/integration/clients/go/go-redis/v9/go.sum
+
+      - name: Install pinned Node and bundled npm for endpoint checks
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: tests/integration/clients/node/node-redis/v6/.node-version
+          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: tests/integration/clients/node/node-redis/v6/package-lock.json
+
+      - name: Install the host CLI for the guide check
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y redis-tools
 
       - name: Check native defaults and foreign run guards
         run: |
@@ -41,15 +60,14 @@ jobs:
       - name: Compile the arm64 candidate
         run: bash tools/release/build.sh --platform linux/arm64
 
-      - name: Build and check the development image with defaults
-        run: |
-          docker build --check --platform linux/amd64 .
-          docker build --platform linux/amd64 --tag kgcache:development .
+      - name: Check Dockerfile build settings
+        run: docker build --check --platform linux/amd64 .
 
-      - name: Check development image behavior and metadata
+      - name: Build and qualify the documented development service
         run: |
-          bash tests/container/run.sh --image kgcache:development --artifacts test-artifacts/container-development
-          jq -e '.qualified_amd64 == false and .build.source.revision == "unknown" and
+          bash tests/container/run.sh --build --guide --artifacts test-artifacts/container-development
+          jq -e '.compose.passed == true and .compose.guide_checked == true and
+            .qualified_amd64 == false and .build.source.revision == "unknown" and
             .build.source.dirty == true' test-artifacts/container-development/run.*/result.json
 
       - name: Build the service image with verified source metadata
@@ -74,7 +92,8 @@ jobs:
         run: |
           bash tests/container/run.sh --image kgcache:ci --artifacts test-artifacts/container
           revision=$(git rev-parse HEAD)
-          jq -e --arg revision "$revision" '.qualified_amd64 == true and
+          jq -e --arg revision "$revision" '.compose.passed == true and
+            .compose.guide_checked == false and .qualified_amd64 == true and
             .build.source.revision == $revision' test-artifacts/container/run.*/result.json
 
       - name: Upload container validation evidence

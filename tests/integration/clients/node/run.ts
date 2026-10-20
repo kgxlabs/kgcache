@@ -33,7 +33,7 @@ interface Registry {
 }
 
 interface Options {
-  action: 'list' | 'validate' | 'deps' | 'test';
+  action: 'list' | 'validate' | 'deps' | 'test' | 'smoke';
   profile: string;
   library: string;
   testArgs: string[];
@@ -145,7 +145,7 @@ async function run(args: string[], signal: AbortSignal): Promise<void> {
       await command('npm', ['ci', '--no-audit', '--no-fund'], dir, signal);
       validateInstalled(dir, { [suite.package]: version, ...suiteToolingPins });
     }
-  } else {
+  } else if (options.action === 'test') {
     resolveTestPaths();
     await command(
       process.execPath,
@@ -156,7 +156,7 @@ async function run(args: string[], signal: AbortSignal): Promise<void> {
   }
 
   for (const row of rows) {
-    if (options.action === 'test' && row.suite.status !== 'ready') {
+    if ((options.action === 'test' || options.action === 'smoke') && row.suite.status !== 'ready') {
       throw new Error(`${row.id}: client suite is still planned`);
     }
 
@@ -171,6 +171,18 @@ async function run(args: string[], signal: AbortSignal): Promise<void> {
         await runTests(
           active,
           [...splitArguments(process.env.NODE_TEST_ARGS ?? ''), ...options.testArgs],
+          signal,
+        );
+      } else if (options.action === 'smoke') {
+        await command(
+          process.execPath,
+          [
+            '--experimental-strip-types',
+            'smoke.ts',
+            process.env.KGCACHE_SMOKE_HOST ?? '',
+            process.env.KGCACHE_SMOKE_PORT ?? '',
+          ],
+          active.dir,
           signal,
         );
       } else {
@@ -432,9 +444,15 @@ function splitArguments(input: string): string[] {
 function parseArgs(args: string[]): Options {
   const [action, ...rest] = args;
 
-  if (action !== 'list' && action !== 'validate' && action !== 'deps' && action !== 'test') {
+  if (
+    action !== 'list'
+    && action !== 'validate'
+    && action !== 'deps'
+    && action !== 'test'
+    && action !== 'smoke'
+  ) {
     throw new Error(
-      'usage: run.ts list|validate|deps|test [--profile ID | --library NAME] [-- test arguments]',
+      'usage: run.ts list|validate|deps|test|smoke [--profile ID | --library NAME] [-- test arguments]',
     );
   }
 
