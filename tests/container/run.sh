@@ -12,6 +12,8 @@ resource_kinds=()
 resource_names=()
 peer_pids=()
 
+source "$RELEASE_ROOT/tests/container/health.sh"
+
 docker_call() {
     timeout --signal=TERM --kill-after=3s 30s docker "$@"
 }
@@ -165,8 +167,16 @@ create_volume() {
 
 create_server() {
     local image=$1 network=$2 name=$3 mount=$4
+    local options=()
 
     shift 4
+    while [[ $# -gt 0 && "$1" != -- ]]; do
+        options+=("$1")
+        shift
+    done
+    if [[ ${1:-} == -- ]]; then
+        shift
+    fi
     register container "$name"
     docker_call create \
         --name "$name" \
@@ -180,7 +190,7 @@ create_server() {
         --log-driver local \
         --log-opt max-size=1m \
         --log-opt max-file=2 \
-        "$@" "$image" > /dev/null
+        ${options[@]+"${options[@]}"} "$image" "$@" > /dev/null
 }
 
 start_server() {
@@ -261,7 +271,7 @@ check_layout() {
     # The tool variable is expanded inside the container.
     # shellcheck disable=SC2016
     docker_call exec "$name" bash -c \
-        'for tool in zig python3 cc kgcache-controlled-server kgcache-fake-server readelf; do
+        'for tool in zig python3 cc kgcache-controlled-server kgcache-fake-server readelf redis-cli curl nc netcat; do
             if command -v "$tool"; then exit 1; fi
         done'
 
@@ -612,6 +622,7 @@ process_lifecycle() {
         docker_call kill --signal TERM "$name" > /dev/null
         state=$(docker_call inspect --format '{{.State.Running}}' "$name")
         [[ "$state" == true ]] || release_fail 'PID 1 exited before settling its child'
+        expect_probe_failure "$name" /etc/kgcache/kgcache.conf
         # The child PID is a positional argument to the container shell.
         # shellcheck disable=SC2016
         docker_call exec "$name" bash -c 'kill -CONT "$1"' bash "$child"
@@ -675,10 +686,14 @@ main() {
     printf '*1\r\n$4\r\nPING\r\n' > "$workspace/ping.request"
     printf '+PONG\r\n' > "$workspace/ping.expected"
 
+    docker_call compose version > "$workspace/evidence/compose-version.log"
     docker_call image inspect "$image" > "$workspace/evidence/image.json"
     jq -e '.[0] | .Os == "linux" and .Architecture == "amd64" and
       (.Config | .User == "10001:10001" and .WorkingDir == "/data" and
         .StopSignal == "SIGTERM" and
+        (.Healthcheck | .Test == ["CMD", "/usr/local/bin/kgcache", "healthcheck", "/etc/kgcache/kgcache.conf"] and
+          .Interval == 30000000000 and .Timeout == 2000000000 and
+          .StartPeriod == 60000000000 and .Retries == 3) and
         .Entrypoint == ["/usr/local/bin/kgcache"] and
         .Cmd == ["/etc/kgcache/kgcache.conf"] and
         (.ExposedPorts | has("6379/tcp")) and (.Volumes | not))' \
@@ -698,6 +713,8 @@ main() {
         "$network" > /dev/null
 
     smoke "$image" "$network"
+    health_cases "$image" "$network"
+    compose_health "$image" "$network"
     storage_cases "$image" "$network"
     recovery "$image" "$network" everysec
     recovery "$image" "$network" always
