@@ -26,7 +26,7 @@ NODE_RUN = $(NODE) --experimental-strip-types "$(CLIENT_ROOT)/node/run.ts"
 
 .PHONY: build test test-zig test-unit test-integration test-go test-node test-clients \
 	deps-go deps-node deps-clients list-clients check-go check-node check-clients \
-	fmt-go fmt-node check-shell fmt-shell
+	fmt-go fmt-node check-shell fmt-shell smoke-go smoke-node
 
 check-shell:
 	bash tools/shell/check.sh
@@ -82,6 +82,12 @@ test-node: build deps-node
 	$(NODE_RUN) test $(CLIENT_SELECTOR)
 
 test-clients: test-go test-node
+
+smoke-go:
+	$(GO_RUN) smoke $(CLIENT_SELECTOR)
+
+smoke-node:
+	$(NODE_RUN) smoke $(CLIENT_SELECTOR)
 
 test:
 	$(MAKE) -C "$(REPO_ROOT)" -k test-zig test-go test-node
