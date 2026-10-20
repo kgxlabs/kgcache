@@ -91,7 +91,8 @@ and Node's launcher uses only Node's standard library.
 
 The `smoke` action checks a caller-owned endpoint instead of starting a server.
 Set `KGCACHE_SMOKE_HOST` and `KGCACHE_SMOKE_PORT`, then use `make smoke-go` or
-`make smoke-node` with a registered `CLIENT_PROFILE`.
+`make smoke-node` with a registered `CLIENT_PROFILE`. See
+[container checks](../../container/README.md#compose-and-client-coverage).
 
 The Makefile supplies an absolute `KGCACHE_BIN` for the built server. Set
 `KGCACHE_TEST_ARTIFACT_DIR=test-artifacts` to retain diagnostics;

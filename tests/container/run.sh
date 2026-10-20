@@ -665,6 +665,9 @@ main() {
     local image='' artifacts='' allow_emulation=false network native engine_arch
     local build=false guide=false
 
+    export PATH="$RELEASE_ROOT/.client-tools/go/bin:$RELEASE_ROOT/.client-tools/node/bin:$PATH"
+    export GOTOOLCHAIN=local GOWORK=off
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --image | --artifacts)
@@ -789,7 +792,8 @@ main() {
         '{passed: true, image_id: $image[0][0].Id, image_size_bytes: $image[0][0].Size,
           build: $build[0], native_execution: $native,
           qualified_amd64: ($native and ($build[0].source.dirty | not)),
-          compose: {passed: true, guide_checked: $guide},
+          compose: {passed: true, guide_checked: $guide,
+            clients: ["go-redis-v9.22.0", "node-redis-6.2.1"]},
           workload: {keys: 4096, value_bytes: 4096, memory_limit_bytes: 268435456, cpus: 1},
           measurements: {cold_start_seconds: ($cold | tonumber), replay_seconds: ($replay | tonumber),
             ping_mean_ms: (($ping | tonumber) * 1000 / 64),

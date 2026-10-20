@@ -255,4 +255,4 @@ Start with logs, config and health arguments, data permissions, and inner
 versus outer timeout settings. Preserve the volume while investigating.
 
 See [container checks](../tests/container/README.md) for the qualification
-command, failure artifacts, and CI usage.
+command, pinned client prerequisites, failure artifacts, and CI usage.

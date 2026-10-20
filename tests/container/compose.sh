@@ -12,7 +12,8 @@ compose_call() {
 }
 
 compose_preflight() {
-    local help
+    local help registry="$RELEASE_ROOT/tests/integration/clients/matrix.json"
+    local actual expected
 
     docker_call version > /dev/null
     help=$(docker_call compose up --help)
@@ -20,6 +21,21 @@ compose_preflight() {
         release_fail 'Compose must support up --wait --wait-timeout and --no-build'
     docker_call compose port --help > /dev/null
     docker_call compose --file "$RELEASE_ROOT/docker-compose.yml" config --format json > /dev/null
+    release_require_commands make "${GO:-go}" "${NODE:-node}" npm
+    timeout --signal=TERM --kill-after=3s 30s \
+        make -C "$RELEASE_ROOT" list-clients > /dev/null
+    expected=$(jq -er '.profiles[] | select(.id == "go-redis-v9.22.0") | .runtimeVersion' "$registry")
+    actual=$("${GO:-go}" version)
+    [[ "$actual" == *"go$expected "* ]] ||
+        release_fail 'install the registered Go runtime before container qualification'
+    expected=$(jq -er '.profiles[] | select(.id == "node-redis-6.2.1") | .runtimeVersion' "$registry")
+    actual=$("${NODE:-node}" --version)
+    [[ "$actual" == "v$expected" ]] ||
+        release_fail 'install the registered Node runtime before container qualification'
+    expected=$(jq -er '.profiles[] | select(.id == "node-redis-6.2.1") | .packageManagerVersion' "$registry")
+    actual=$(npm --version)
+    [[ "$actual" == "$expected" ]] ||
+        release_fail 'install the registered npm version before container qualification'
 }
 
 compose_build() {
@@ -103,6 +119,25 @@ compose_stop() {
         "$workspace/compose-inspect.json" > /dev/null
 }
 
+compose_clients() {
+    local port=$1
+    local KGCACHE_SMOKE_HOST=127.0.0.1 KGCACHE_SMOKE_PORT=$port
+
+    export KGCACHE_SMOKE_HOST KGCACHE_SMOKE_PORT
+    if ! timeout --signal=TERM --kill-after=5s 180s \
+        make -C "$RELEASE_ROOT" smoke-go CLIENT_PROFILE=go-redis-v9.22.0 \
+        > "$workspace/evidence/go-smoke.log" 2>&1; then
+        tail -c 8192 "$workspace/evidence/go-smoke.log" >&2
+        return 1
+    fi
+    if ! timeout --signal=TERM --kill-after=5s 180s \
+        make -C "$RELEASE_ROOT" smoke-node CLIENT_PROFILE=node-redis-6.2.1 \
+        > "$workspace/evidence/node-smoke.log" 2>&1; then
+        tail -c 8192 "$workspace/evidence/node-smoke.log" >&2
+        return 1
+    fi
+}
+
 compose_guide() {
     local image=$1 file="$RELEASE_ROOT/docker-compose.yml" project=$guide_project port
     local name="$guide_project-kgcache-1" result
@@ -176,6 +211,7 @@ compose_cases() {
     compose_up "$file" "$project" "$image"
     port=$(compose_port "$file" "$project")
     command_reply "$port" '+OK\r\n' SET compose-state retained
+    compose_clients "$port"
     raw_peer "$image" "${project}_default" "$project-peer" kgcache \
         "$workspace/ping.request" "$workspace/ping.expected"
     compose_isolation "$image" "$port"
