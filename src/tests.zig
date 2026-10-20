@@ -53,6 +53,7 @@ test {
     _ = @import("config/loader_tests.zig");
     _ = @import("config/input_tests.zig");
     _ = @import("cli.zig");
+    _ = @import("healthcheck.zig");
     _ = @import("cli_tests.zig");
     _ = @import("readiness.zig");
     _ = @import("config_parser_tests.zig");
