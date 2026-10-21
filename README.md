@@ -93,6 +93,8 @@ kgcache /absolute/path/to/kgcache.conf
 
 ## Development
 
+See [Contributing](CONTRIBUTING.md) for PR titles, checks, squash merges, and backports.
+
 Run the unit test suite:
 
 ```bash
