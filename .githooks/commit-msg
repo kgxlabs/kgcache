@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+# A merge used to update a working branch keeps its generated message.
+if git rev-parse --verify --quiet MERGE_HEAD > /dev/null; then
+    exit 0
+fi
+
+if ! command -v node > /dev/null 2>&1; then
+    printf 'Commit lint needs Node.js 22.12.0 or newer on PATH.\n' >&2
+    exit 1
+fi
+
+if [ ! -f tools/commitlint/node_modules/@commitlint/cli/cli.js ]; then
+    printf 'Install commit lint tools: npm ci --prefix tools/commitlint --include=dev --ignore-scripts\n' >&2
+    exit 1
+fi
+
+exec node tools/commitlint/node_modules/@commitlint/cli/cli.js \
+    --config tools/commitlint/commitlint.config.js --strict --edit "$1"

@@ -1,0 +1,40 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    name: Commit messages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out the PR head and full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pinned Node and bundled npm
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: tools/commitlint/package-lock.json
+
+      - name: Install pinned commit lint tools
+        run: npm ci --prefix tools/commitlint --include=dev --ignore-scripts --no-audit --no-fund
+
+      - name: Lint commits introduced by the PR
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bash tools/commitlint/check.sh "$PR_BASE_SHA" "$PR_HEAD_SHA"
