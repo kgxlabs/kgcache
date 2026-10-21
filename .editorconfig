@@ -6,3 +6,10 @@ indent_size = 4
 switch_case_indent = true
 space_redirects = true
 insert_final_newline = true
+
+[.githooks/*]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+space_redirects = true
+insert_final_newline = true

@@ -39,10 +39,10 @@ described in [client test setup](tests/integration/clients/README.md).
 Explain non-obvious decisions in comments. Make sure you understand and can
 explain the code you submit.
 
-## Write a clear PR title
+## Write clear commit messages and PR titles
 
 Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
-for PR titles. The title becomes the subject of the squash commit.
+for commits and PR titles. The PR title becomes the subject of the squash commit.
 
 ```text
 <type>[optional scope][!]: <description>
@@ -80,12 +80,38 @@ feat(config)!: change a configuration default
 docs: clarify the Compose setup
 ```
 
-Working commits inside a PR do not need this format. Before merging,
-maintainers check that the final title and commit body describe the complete
-change. The **PR title** CI check uses
+Individual commits in a PR must follow this format too. The **Commit messages**
+CI check uses [commitlint](https://commitlint.js.org/) to check commits introduced
+by the PR. Older commits already on the target branch and merge commits used
+to update a working branch are excluded. Before merging, maintainers check that
+the final title and commit body describe the complete change. The **PR title**
+CI check uses
 [action-semantic-pull-request](https://github.com/amannn/action-semantic-pull-request)
 to validate the Conventional Commit header. It reruns when the title changes.
 Reviewers still check that the type and compatibility notes describe the change.
+
+## Enable local commit checks
+
+The optional Git `commit-msg` hook checks messages before creating a commit.
+Use Node.js 22.12.0 or newer. CI uses Node.js 22.14.0, the same version as the
+client tests. From the repository root, run:
+
+```sh
+npm ci --prefix tools/commitlint --include=dev --ignore-scripts
+git config --local core.hooksPath .githooks
+```
+
+This Git setting applies to this repository. If you already use a hook manager,
+call [.githooks/commit-msg](.githooks/commit-msg) from its `commit-msg` hook instead.
+The hook does not download dependencies when committing. CI checks messages
+even when the local hook is not enabled or is bypassed.
+
+To check a branch before pushing:
+
+```sh
+git fetch origin
+bash tools/commitlint/check.sh origin/main HEAD
+```
 
 ## Describe compatibility and release impact
 
@@ -151,9 +177,9 @@ Explain technical disagreements with a concrete example or test.
 CI runs source tests, the client matrix, shell checks, and build/container
 validation on PRs. If a check fails, read its logs and investigate the cause.
 Before merging, obtain at least one approving review from another maintainer
-with write access and pass all required checks, including **PR title**. New code
-changes after approval need another review. Resolve review conversations before
-merging.
+with write access and pass all required checks, including **PR title** and
+**Commit messages**. New code changes after approval need another review.
+Resolve review conversations before merging.
 
 ## Merge with squash
 

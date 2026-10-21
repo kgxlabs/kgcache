@@ -103,7 +103,8 @@ main() {
     shell_file_list=$(mktemp "$repo_root/.zig-cache/shell-files.XXXXXX")
     shell_run_id=${shell_file_list##*/}
 
-    git ls-files --cached --others --exclude-standard -z -- '*.sh' \
+    git ls-files --cached --others --exclude-standard -z -- \
+        '*.sh' '.githooks/*' \
         > "$shell_file_list"
     while IFS= read -r -d '' script; do
         scripts+=("$script")
