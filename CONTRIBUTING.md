@@ -41,15 +41,20 @@ explain the code you submit.
 
 ## Write a clear PR title
 
-Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
 for PR titles. The title becomes the subject of the squash commit.
 
 ```text
-type(scope): describe the change
+<type>[optional scope][!]: <description>
 ```
 
-The scope is optional. Use a short area name such as `resp`, `config`,
-`persistence`, or `container`.
+Include a type, a colon and space, and a short description. A scope in parentheses
+can name the area, such as `fix(resp): reject an invalid length`. An optional `!`
+before the colon marks a breaking change. Prefer lowercase for consistency;
+the check accepts other casing too.
+
+Use `fix` for bug fixes and `feat` for new features. Other types are allowed.
+These are common choices:
 
 | Type | Use for |
 | --- | --- |
@@ -58,6 +63,7 @@ The scope is optional. Use a short area name such as `resp`, `config`,
 | `docs` | Documentation |
 | `test` | Tests and fixtures |
 | `refactor` | Code changes that preserve behavior |
+| `style` | Formatting changes that preserve behavior |
 | `perf` | Performance improvements |
 | `build` | Build tools or dependencies |
 | `ci` | CI workflows |
@@ -67,14 +73,19 @@ The scope is optional. Use a short area name such as `resp`, `config`,
 Examples:
 
 ```text
+chore: add contribution guide and pr template
 fix(resp): reject an invalid bulk string length
 feat(config): add a configuration option
+feat(config)!: change a configuration default
 docs: clarify the Compose setup
 ```
 
 Working commits inside a PR do not need this format. Before merging,
 maintainers check that the final title and commit body describe the complete
-change. PR titles and compatibility are part of maintainer review.
+change. The **PR title** CI check uses
+[action-semantic-pull-request](https://github.com/amannn/action-semantic-pull-request)
+to validate the Conventional Commit header. It reruns when the title changes.
+Reviewers still check that the type and compatibility notes describe the change.
 
 ## Describe compatibility and release impact
 
@@ -86,10 +97,10 @@ Consider Redis client behavior, protocol replies and errors, commands,
 configuration defaults, CLI options, persistence formats, and deployment
 requirements. A change can break users even when it fixes a bug.
 
-For a breaking change, add `!` before the title's colon, such as
-`feat(config)!: change a configuration default`. Explain the impact and migration
-steps in the PR. Put a `BREAKING CHANGE: ...` footer at the end of the final
-squash commit body. Describe the actual change in place of `...`.
+For a breaking change, explain the impact and migration steps in the PR. Mark it
+with `!` before the title's colon, such as
+`feat(config)!: change a configuration default`, or include a `BREAKING CHANGE:`
+footer in the final squash commit body. Both markers can be used together.
 
 Commit types describe intent. Reviewers still judge compatibility and release
 eligibility. A `fix:` title alone does not prove that a change is safe for a
@@ -139,7 +150,10 @@ Explain technical disagreements with a concrete example or test.
 
 CI runs source tests, the client matrix, shell checks, and build/container
 validation on PRs. If a check fails, read its logs and investigate the cause.
-Wait for applicable checks to pass and maintainer review before merging.
+Before merging, obtain at least one approving review from another maintainer
+with write access and pass all required checks, including **PR title**. New code
+changes after approval need another review. Resolve review conversations before
+merging.
 
 ## Merge with squash
 
