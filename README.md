@@ -2,7 +2,7 @@
 
 > An in-memory cache server built in Zig, evolving toward a drop-in Redis replacement.
 
-`kgcache` is the cache component of the infrastructure stack being developed at [kgxlabs](https://github.com/kgxlabs). Its design goals are standalone operation with existing Redis clients and native integration into the future kgx application deployment platform.
+`kgcache` is the cache component of the infrastructure stack being developed at [kgxlabs](https://github.com/kgxlabs). Its design goals are standalone operation with existing Redis clients and native integration into the future kgx application deployment platform. 
 
 Today, kgcache supports a subset of Redis functionality over RESP2, including string storage, expiration, snapshots, and append-only persistence. It is under active development and is not yet a drop-in Redis replacement. See [Current status and compatibility](#current-status-and-compatibility) for known limitations.
 
