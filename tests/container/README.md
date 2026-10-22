@@ -32,14 +32,20 @@ digests and local image IDs are recorded separately. The Dockerfile supplies
 the pinned base and checks it against the release
 settings. Local builds read the package version from `build.zig.zon`. They
 record `SOURCE_REVISION=unknown` and `SOURCE_DIRTY=true` by default. The image
-version label stays empty unless `VERSION` is supplied; the build record always
-contains the package version.
+version label stays empty unless `VERSION` is supplied. An explicit `VERSION`
+overrides the binary and build record too. The record keeps the package default
+as `development_version`. See the shared [build-version contract](../../docs/BUILDING.md)
+for the accepted SemVer format and local build examples.
 
 Release CI verifies a clean checkout, then supplies `SOURCE_REVISION`,
 `SOURCE_DIRTY=false`, and `VERSION`. Clean builds require a full Git revision
-and a version that matches the package. Invalid metadata and a base that differs
+and an explicit valid SemVer version. Invalid metadata and a base that differs
 from the release settings fail the build. Development images cannot qualify
 as clean release candidates. CI checks both build paths.
+
+The layout check runs `kgcache --version` and compares it with the build record
+and OCI label. It saves the output as `version.log`. A development image may
+have an empty label only when its executable and record use the package default.
 
 An arm64 Docker engine needs `--allow-emulation` on the runner. Emulated
 results do not qualify native amd64 execution. The runner records the resolved

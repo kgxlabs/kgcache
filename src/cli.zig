@@ -15,6 +15,7 @@ pub const Error = std.mem.Allocator.Error || directive_definition.ParseError || 
     ReadyFdInHealthMode,
     MisplacedHealthcheck,
     DuplicateConfigPath,
+    UnexpectedVersionArgument,
 };
 
 allocator: std.mem.Allocator,
@@ -23,12 +24,13 @@ config_path: ?[]const u8 = null,
 ready_fd: ?std.posix.fd_t = null,
 overrides: std.ArrayList(PreparedDirective) = .empty,
 
-pub const Mode = enum { server, healthcheck };
+pub const Mode = enum { server, healthcheck, version };
 
 pub fn modeFromArgs(process_args: std.process.Args) Mode {
     var args = process_args.iterate();
     _ = args.skip();
     const first = args.next() orelse return .server;
+    if (std.mem.eql(u8, first, "--version")) return .version;
     return if (std.mem.eql(u8, first, "healthcheck")) .healthcheck else .server;
 }
 
@@ -43,6 +45,10 @@ pub fn parse(arena: *std.heap.ArenaAllocator, process_args: std.process.Args) Er
 
     var cli: Cli = .{ .allocator = allocator, .mode = modeFromArgs(process_args) };
     errdefer cli.deinit();
+    if (cli.mode == .version) {
+        if (values.items.len != 1) return error.UnexpectedVersionArgument;
+        return cli;
+    }
     var index: usize = if (cli.mode == .healthcheck) 1 else 0;
     while (index < values.items.len) {
         const arg = values.items[index];

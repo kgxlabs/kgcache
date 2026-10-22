@@ -78,6 +78,11 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     };
     defer cli.deinit();
 
+    if (cli.mode == .version) {
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), init.io, "kgcache " ++ @import("build_options").version ++ "\n");
+        return;
+    }
+
     // CLI and file loading share this borrowed arena.
     // Zig releases it after the application returns.
     const config = ConfigLoader.load(

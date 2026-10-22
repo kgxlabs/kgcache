@@ -128,12 +128,30 @@ release_read_field() {
         release_fail "cannot read build record field $2 from $1"
 }
 
+release_validate_version() {
+    local value=$1 name=${2:-version}
+
+    if ! jq --exit-status --null-input -L "$RELEASE_ROOT/tools/release" \
+        --arg version "$value" 'include "semver"; $version | semver' > /dev/null; then
+        release_fail "$name must be SemVer 2.0.0"
+    fi
+}
+
+release_development_version() {
+    local version
+
+    version=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p' \
+        "$RELEASE_ROOT/build.zig.zon") || release_fail 'cannot read package version'
+    release_validate_version "$version" 'development version'
+    printf '%s\n' "$version"
+}
+
 # Keep server and test-tool compilation on the same release contract.
 # Extra arguments select optional Zig build steps such as integration-tools.
 release_compile() {
-    local compiler=$1 output=$2 platform=$3 target
+    local compiler=$1 output=$2 platform=$3 version=$4 target
 
-    shift 3
+    shift 4
     target=$(release_target "$platform") || return 1
 
     timeout --signal=TERM --kill-after=10s 600s \
@@ -141,5 +159,6 @@ release_compile() {
         "-Dtarget=$target" \
         "-Dcpu=$RELEASE_CPU" \
         "-Doptimize=$RELEASE_OPTIMIZE" \
+        "-Dversion=$version" \
         --prefix "$output"
 }

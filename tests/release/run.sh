@@ -83,7 +83,7 @@ build_probe_images() {
 }
 
 check_runtime_libraries() {
-    local platform=$1 output expected_sha
+    local platform=$1 output expected_sha version
 
     probe_run runtime "$platform" "$probe_id:runtime" 30s \
         "$probe_evidence_dir/runtime-libraries.log"
@@ -96,6 +96,9 @@ check_runtime_libraries() {
         .binary.sha256)
     [[ "$output" == *"$expected_sha  /usr/local/bin/kgcache"* ]] ||
         release_fail 'runtime executable checksum mismatch'
+    version=$(release_read_field "$probe_evidence_dir/build-info.json" .version)
+    [[ "$output" == *$'\n'"kgcache $version" ]] ||
+        release_fail 'runtime executable version differs from the build record'
 }
 
 inspect_binary() {
@@ -132,7 +135,7 @@ write_result() {
 main() {
     local prefix="$RELEASE_ROOT/zig-out/release/linux-amd64" \
         artifacts='' allow_emulation=false
-    local platform revision native compiler engine_platform
+    local platform revision native compiler engine_platform version
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -166,6 +169,7 @@ main() {
     bash tools/release/verify.sh --prefix "$prefix"
     platform=$(release_read_field "$prefix/build-info.json" .platform)
     revision=$(release_read_field "$prefix/build-info.json" .source.revision)
+    version=$(release_read_field "$prefix/build-info.json" .version)
     release_assert_source "$revision"
 
     engine_platform=$(docker_platform)
@@ -179,7 +183,7 @@ main() {
         "${artifacts:-$RELEASE_ROOT/test-artifacts/release/${platform//\//-}}"
 
     printf 'Building process test tools...\n'
-    release_compile "$compiler" "$probe_workspace/helpers" "$platform" \
+    release_compile "$compiler" "$probe_workspace/helpers" "$platform" "$version" \
         integration-tools
     release_assert_source "$revision"
 

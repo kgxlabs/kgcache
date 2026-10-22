@@ -4,6 +4,23 @@ const Config = @import("config.zig");
 const ConfigLoader = @import("config/loader.zig");
 const registry = @import("config/registry.zig");
 
+test "version mode accepts only a standalone flag" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var cli = try Cli.parse(&arena, .{ .vector = &.{ "kgcache", "--version" } });
+    defer cli.deinit();
+    try testing.expectEqual(Cli.Mode.version, cli.mode);
+    const cases = .{
+        .{ error.UnexpectedVersionArgument, &.{ "kgcache", "--version", "missing.conf" } },
+        .{ error.UnexpectedVersionArgument, &.{ "kgcache", "--version", "--port", "7000" } },
+        .{ error.UnknownFlag, &.{ "kgcache", "healthcheck", "--version" } },
+        .{ error.UnknownFlag, &.{ "kgcache", "missing.conf", "--version" } },
+    };
+    inline for (cases) |case| try testing.expectError(case[0], Cli.parse(&arena, .{ .vector = case[1] }));
+}
+
 test "health mode shares config paths, overrides, and validation" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

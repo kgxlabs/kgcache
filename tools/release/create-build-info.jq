@@ -1,6 +1,7 @@
 {
-  schema_version: 1,
+  schema_version: 2,
   version: $version,
+  development_version: $development_version,
   source: {revision: $revision, dirty: $dirty},
   platform: $platform,
   target: $target,

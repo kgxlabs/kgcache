@@ -51,7 +51,8 @@ SH
 expect_rejection() {
     local name=$1 message=$2 prefix=$3 status output
 
-    if bash "$RELEASE_ROOT/tools/release/verify.sh" --prefix "$prefix" \
+    shift 3
+    if bash "$RELEASE_ROOT/tools/release/verify.sh" --prefix "$prefix" "$@" \
         > "$artifact_logs/$name.log" 2>&1; then
         release_fail "$name was accepted; log: $artifact_logs/$name.log"
     else
@@ -73,6 +74,19 @@ check_rejections() {
     candidate=$(new_case "$prefix" changed-binary)
     printf 'changed' >> "$candidate/bin/kgcache"
     expect_rejection changed-binary 'binary checksum mismatch' "$candidate"
+
+    candidate=$(new_case "$prefix" invalid-version)
+    jq '.version = "0.2.0-01"' "$prefix/build-info.json" > "$candidate/build-info.json"
+    expect_rejection invalid-version 'version must be SemVer 2.0.0' "$candidate"
+
+    candidate=$(new_case "$prefix" missing-development-version)
+    jq 'del(.development_version)' "$prefix/build-info.json" > "$candidate/build-info.json"
+    expect_rejection missing-development-version 'development_version must be SemVer 2.0.0' "$candidate"
+
+    candidate=$(new_case "$prefix" unexpected-version)
+    jq '.version = "0.2.0"' "$prefix/build-info.json" > "$candidate/build-info.json"
+    expect_rejection unexpected-version 'build record version differs from the requested version' \
+        "$candidate" --version 0.2.1
 
     candidate=$(new_case "$prefix" wrong-target)
     jq '.target = "wrong-target"' "$prefix/build-info.json" \
@@ -118,6 +132,65 @@ check_rejections() {
     candidate=$(new_case "$prefix" missing-executable)
     rm "$candidate/bin/kgcache"
     expect_rejection missing-executable 'missing executable' "$candidate"
+}
+
+# Exercise image identity rules with local records. Actual image execution is
+# covered by tests/container/run.sh, which uses this same validator.
+check_image_versions() {
+    local prefix=$1 candidate sha version mutation expected status platform
+
+    platform=$(release_read_field "$prefix/build-info.json" .platform)
+    if [[ "$platform" != linux/amd64 ]]; then
+        return
+    fi
+    candidate=$(new_case "$prefix" image-versions)
+    sha=$(release_read_field "$prefix/build-info.json" .binary.sha256)
+    version=$(release_read_field "$prefix/build-info.json" .version)
+    jq '[{Config: {Labels: {
+        "org.opencontainers.image.version": .version,
+        "org.opencontainers.image.revision": .source.revision
+    }}}]' "$prefix/build-info.json" > "$candidate/image.json"
+
+    for mutation in matching binary record label empty-label dirty-override default-label; do
+        cp "$prefix/build-info.json" "$candidate/build-info.json"
+        cp "$candidate/image.json" "$candidate/inspect.json"
+        expected=1
+        case "$mutation" in
+            matching) expected=0 ;;
+            binary) version=0.0.0-binary-mismatch ;;
+            record)
+                jq '.version = "0.0.0-record-mismatch"' "$prefix/build-info.json" \
+                    > "$candidate/build-info.json"
+                ;;
+            label)
+                jq '.[0].Config.Labels["org.opencontainers.image.version"] = "0.0.0-label-mismatch"' \
+                    "$candidate/image.json" > "$candidate/inspect.json"
+                ;;
+            empty-label | dirty-override | default-label)
+                jq '.[0].Config.Labels["org.opencontainers.image.version"] = ""' \
+                    "$candidate/image.json" > "$candidate/inspect.json"
+                if [[ "$mutation" == default-label ]]; then
+                    jq '.source.dirty = true | .version = .development_version' \
+                        "$prefix/build-info.json" > "$candidate/build-info.json"
+                    version=$(release_read_field "$candidate/build-info.json" .version)
+                    expected=0
+                elif [[ "$mutation" == dirty-override ]]; then
+                    jq '.source.dirty = true | .version = "0.0.0-override"' \
+                        "$prefix/build-info.json" > "$candidate/build-info.json"
+                    version=0.0.0-override
+                fi
+                ;;
+        esac
+        status=0
+        jq -e -L "$RELEASE_ROOT/tools/release" --arg sha "$sha" \
+            --arg version "kgcache $version" --slurpfile image "$candidate/inspect.json" \
+            --from-file "$RELEASE_ROOT/tools/container/validate-image.jq" \
+            "$candidate/build-info.json" > "$artifact_logs/image-$mutation.log" 2>&1 || status=$?
+        [[ "$status" == "$expected" ]] ||
+            release_fail "unexpected image version validation result: $mutation (status $status)"
+        version=$(release_read_field "$prefix/build-info.json" .version)
+    done
+    printf 'Passed: image binary, record, and label version identities\n'
 }
 
 check_failed_rebuild() {
@@ -189,6 +262,7 @@ main() {
     artifact_logs=$(mktemp -d "$RELEASE_ROOT/test-artifacts/release/artifact/run.XXXXXX")
 
     check_rejections "$prefix"
+    check_image_versions "$prefix"
     check_fixture_failure "$prefix"
     check_failed_rebuild "$prefix"
 

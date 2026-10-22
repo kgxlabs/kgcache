@@ -77,17 +77,14 @@ resolve_output() {
 
 write_record() {
     local output=$1 platform=$2 revision=$3 dirty=$4 archive_sha=$5
-    local version target binary_sha
+    local version=$6 development_version=$7 target binary_sha
 
-    version=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p' \
-        "$RELEASE_ROOT/build.zig.zon")
-    [[ -n "$version" && "$version" != *$'\n'* ]] ||
-        release_fail 'cannot read a single package version'
     target=$(release_target "$platform")
     binary_sha=$(release_sha256 "$output/bin/kgcache")
 
     if ! jq --null-input \
         --arg version "$version" \
+        --arg development_version "$development_version" \
         --arg revision "$revision" \
         --argjson dirty "$dirty" \
         --arg platform "$platform" \
@@ -113,13 +110,18 @@ publish_artifact() {
 }
 
 main() {
-    local platform=linux/amd64 prefix='' allow_dirty=false
+    local platform=linux/amd64 prefix='' allow_dirty=false version='' development_version
     local revision source_status current_revision current_status dirty=false \
         compiler archive_sha
     local verify_args=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --version)
+                release_require_value "$1" "${2:-}"
+                version=$2
+                shift 2
+                ;;
             --platform)
                 release_require_value "$1" "${2:-}"
                 platform=$2
@@ -135,7 +137,7 @@ main() {
                 shift
                 ;;
             --help)
-                printf 'Usage: bash tools/release/build.sh [--platform linux/amd64|linux/arm64] [--prefix DIR] [--allow-dirty]\n'
+                printf 'Usage: bash tools/release/build.sh [--version SEMVER] [--platform linux/amd64|linux/arm64] [--prefix DIR] [--allow-dirty]\n'
                 return
                 ;;
             *) release_fail "unknown argument: $1" ;;
@@ -145,6 +147,9 @@ main() {
     release_require_commands git jq file sed mktemp timeout dirname
     release_require_sha256
     release_target "$platform" > /dev/null
+    development_version=$(release_development_version)
+    version=${version:-$development_version}
+    release_validate_version "$version"
 
     cd "$RELEASE_ROOT"
     revision=$(release_git_revision)
@@ -164,7 +169,7 @@ main() {
     trap 'exit 143' TERM
     resolve_output "${prefix:-$RELEASE_ROOT/zig-out/release/${platform//\//-}}"
 
-    release_compile "$compiler" "$build_workspace/artifact" "$platform"
+    release_compile "$compiler" "$build_workspace/artifact" "$platform" "$version"
 
     current_revision=$(release_git_revision)
     current_status=$(release_git_status)
@@ -176,9 +181,9 @@ main() {
 
     release_check_binary "$build_workspace/artifact/bin/kgcache" "$platform"
     write_record "$build_workspace/artifact" "$platform" \
-        "$revision" "$dirty" "$archive_sha"
+        "$revision" "$dirty" "$archive_sha" "$version" "$development_version"
 
-    verify_args=(--prefix "$build_workspace/artifact")
+    verify_args=(--prefix "$build_workspace/artifact" --version "$version")
     if [[ "$allow_dirty" == true ]]; then
         verify_args+=(--allow-dirty)
     fi
