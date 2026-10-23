@@ -31,10 +31,23 @@ refresh_checksums() {
 
 create_fixture() {
     local bundle="$candidate_test_workspace/good" raw="$candidate_test_workspace/raw"
+    local repo="$candidate_test_workspace/repository" revision
     local path checksum bytes config_sha layer_sha evidence_file tooling_revision tooling_sha
 
     mkdir -p "$bundle/evidence/logs" "$bundle/evidence/reports" "$raw/layer"
-    bash tools/release/propose.sh --source HEAD --version 0.2.0-rc.1+fixture.001 > "$bundle/proposal.json"
+    # The caller may have a shallow, detached PR checkout with no origin/main.
+    # Keep proposal history and refs inside the fixture, like the saved image.
+    git init --quiet --initial-branch=main "$repo"
+    cp "$RELEASE_ROOT/.gitignore" "$repo/.gitignore"
+    printf '.{\n    .version = "0.0.0",\n}\n' > "$repo/build.zig.zon"
+    git -C "$repo" add .gitignore build.zig.zon
+    git -C "$repo" -c core.hooksPath=/dev/null \
+        -c user.name='Candidate fixture' -c user.email=fixture@example.invalid \
+        -c commit.gpgsign=false commit --quiet -m 'chore: create candidate fixture'
+    revision=$(git -C "$repo" rev-parse HEAD)
+    git -C "$repo" update-ref refs/remotes/origin/main "$revision"
+    bash tools/release/propose.sh --repo "$repo" --repository fixture/kgcache \
+        --source "$revision" --version 0.2.0-rc.1+fixture.001 > "$bundle/proposal.json"
     printf 'synthetic candidate fixture\n' > "$raw/layer/fixture.txt"
     tar -cf "$raw/layer.tar" -C "$raw/layer" fixture.txt
     layer_sha=$(release_sha256 "$raw/layer.tar")
@@ -316,7 +329,7 @@ SH
 }
 
 main() {
-    local tooling_revision candidate='' allow_emulation=false
+    local fixture_revision candidate='' allow_emulation=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -346,12 +359,13 @@ main() {
     create_fixture
     mkdir -p "$candidate_test_workspace/cache/.client-tools/go" "$candidate_test_workspace/cache/.client-tools/node" \
         "$candidate_test_workspace/cache/.zig-cache/toolchains"
-    tooling_revision=$(git rev-parse HEAD)
-    candidate_checkout_source "$RELEASE_ROOT" "$tooling_revision" "$candidate_test_workspace/source" "$candidate_test_workspace/cache"
+    fixture_revision=$(git -C "$candidate_test_workspace/repository" rev-parse HEAD)
+    candidate_checkout_source "$candidate_test_workspace/repository" "$fixture_revision" \
+        "$candidate_test_workspace/source" "$candidate_test_workspace/cache"
     [[ -d "$candidate_test_workspace/source/.client-tools" && ! -L "$candidate_test_workspace/source/.client-tools" ]] ||
         release_fail 'source runtime cache root must be a real ignored directory'
     [[ -L "$candidate_test_workspace/source/.client-tools/go" ]] || release_fail 'source runtime cache child is missing'
-    candidate_assert_checkout "$candidate_test_workspace/source" "$tooling_revision"
+    candidate_assert_checkout "$candidate_test_workspace/source" "$fixture_revision"
     printf 'Passed: isolated checkout remains clean with cached runtime links\n'
     bash tests/release/candidate-child.sh bundle "$candidate_test_workspace/good" "$candidate_test_workspace/valid"
     printf 'Passed: complete synthetic bundle and layer integrity\n'
