@@ -84,6 +84,7 @@ kgcache /absolute/path/to/kgcache.conf
 | [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
 | [Docker Compose](docs/CONTAINERS.md) | Local service setup, storage, health, config changes, and container replacement |
 | [Build versions](docs/BUILDING.md) | Default and explicit SemVer builds, build records, and version inspection |
+| [Release proposals](docs/RELEASE_PROPOSALS.md) | Read-only source/policy checks, patch and candidate proposals, and retry identity |
 | [Architecture](docs/ARCHITECTURE.md) | Role within kgx, request flow, design trade-offs, repository layout |
 | [Test organization](docs/TESTING.md) | Where Zig tests and fixtures belong, test discovery, and checks for test moves |
 | [Errors and logging](docs/ERRORS.md) | Error propagation, terminal reports, and trace availability |

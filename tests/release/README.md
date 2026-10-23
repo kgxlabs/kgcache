@@ -1,5 +1,10 @@
 # Linux release checks
 
+For read-only version and source proposals, see
+[release proposals](../../docs/RELEASE_PROPOSALS.md). Run their isolated Git
+fixtures with `bash tests/release/proposals.sh`. Those checks need no compiler,
+Docker, credentials, or published versions.
+
 Use Bash 3.2 or later on macOS or Linux. Install Git, curl, tar with xz support,
 jq, `file`, GNU `timeout`, and a SHA-256 tool (`sha256sum` or `shasum`). Scripts
 check their dependencies before building or creating release output.
