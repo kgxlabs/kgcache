@@ -1,5 +1,10 @@
 # Linux release checks
 
+The [release workflow](../../docs/RELEASE_WORKFLOW.md) runs read-only branch
+qualification and manual previews in CI. Test its GitHub evidence collector
+locally with `bash tests/release/github.sh`. The fixtures use a GET-only API
+stub and temporary Git history. They need no GitHub token or network access.
+
 For a complete source/image qualification and saved-image handoff, see
 [release candidates](../../docs/RELEASE_CANDIDATES.md). The runner uses the
 checks below and the existing prepared-image service checks. It never publishes.

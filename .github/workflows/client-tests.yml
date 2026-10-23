@@ -2,37 +2,86 @@ name: go-redis and node-redis tests
 
 on:
   workflow_call:
+    inputs:
+      source_sha:
+        description: 'Optional exact source commit; omit for the caller checkout'
+        required: false
+        default: ''
+        type: string
+      version:
+        description: 'Optional effective SemVer for client-test builds'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 jobs:
+  profiles:
+    name: Select client profiles from the tested source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ steps.profiles.outputs.source_sha }}
+      go: ${{ steps.profiles.outputs.go }}
+      node: ${{ steps.profiles.outputs.node }}
+    steps:
+      - name: Check out selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Resolve required profiles and dependency locks
+        id: profiles
+        env:
+          SELECTED_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          source_sha=$(git rev-parse HEAD)
+          [[ -z "$SELECTED_SHA" || "$SELECTED_SHA" == "$source_sha" ]]
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            jq -en -L tools/release --arg version "$RELEASE_VERSION" \
+              'include "semver"; $version | semver'
+          fi
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          for language in go node; do
+            matrix=$(jq -ce --arg language "$language" '
+              . as $matrix | {include: [.profiles[] | select(.ci == "required") |
+                . as $profile | $matrix.suites[] |
+                select(.id == $profile.suiteId and .language == $language) |
+                {profile: $profile.id, version: $profile.clientVersion,
+                  go: $profile.runtimeVersion, node: $profile.runtimeVersion,
+                  npm: $profile.packageManagerVersion,
+                  lock: ("tests/integration/clients/" + $profile.dependencyDir +
+                    (if $language == "go" then "/go.sum" else "/package-lock.json" end))}]} |
+              if (.include | length) > 0 then . else error("missing required profiles") end' \
+              tests/integration/clients/matrix.json)
+            printf '%s=%s\n' "$language" "$matrix" >> "$GITHUB_OUTPUT"
+          done
+
   go-redis:
+    needs: profiles
     name: go-redis ${{ matrix.version }} tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - profile: go-redis-v9.22.0
-            version: v9.22.0
-            go: '1.26.9'
-            lock: tests/integration/clients/go/go-redis/v9/go.sum
-          - profile: go-redis-v9.23.0
-            version: v9.23.0
-            go: '1.26.9'
-            lock: tests/integration/clients/go/go-redis/v9/profiles/go-redis-v9.23.0/go.sum
+      matrix: ${{ fromJSON(needs.profiles.outputs.go) }}
     env:
       CLIENT_PROFILE: ${{ matrix.profile }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      KGCACHE_BIN: ${{ github.workspace }}/zig-out/bin/kgcache
       GOTOOLCHAIN: local
       GOWORK: 'off'
       KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/${{ matrix.profile }}
 
     steps:
-      - name: Check out repository
+      - name: Check out the resolved source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.profiles.outputs.source_sha }}
           persist-credentials: false
 
       - name: Install pinned Go
@@ -57,7 +106,13 @@ jobs:
         run: make check-go
 
       - name: Run go-redis compatibility cases against this checkout
-        run: make test-go CLIENT_PROFILE="$CLIENT_PROFILE"
+        run: |
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            zig build -Doptimize=ReleaseSafe "-Dversion=$RELEASE_VERSION"
+            go run tests/integration/clients/go/run.go test --profile "$CLIENT_PROFILE"
+          else
+            make test-go CLIENT_PROFILE="$CLIENT_PROFILE"
+          fi
 
       - name: Upload go-redis failure evidence
         if: failure()
@@ -69,32 +124,25 @@ jobs:
           retention-days: 7
 
   node-redis:
+    needs: profiles
     name: node-redis ${{ matrix.version }} tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - profile: node-redis-6.2.1
-            version: 6.2.1
-            node: '22.14.0'
-            npm: '10.9.2'
-            lock: tests/integration/clients/node/node-redis/v6/package-lock.json
-          - profile: node-redis-6.2.0
-            version: 6.2.0
-            node: '22.14.0'
-            npm: '10.9.2'
-            lock: tests/integration/clients/node/node-redis/v6/profiles/node-redis-6.2.0/package-lock.json
+      matrix: ${{ fromJSON(needs.profiles.outputs.node) }}
     env:
       CLIENT_PROFILE: ${{ matrix.profile }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      KGCACHE_BIN: ${{ github.workspace }}/zig-out/bin/kgcache
       NPM_VERSION: ${{ matrix.npm }}
       KGCACHE_TEST_ARTIFACT_DIR: test-artifacts/${{ matrix.profile }}
 
     steps:
-      - name: Check out repository
+      - name: Check out the resolved source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.profiles.outputs.source_sha }}
           persist-credentials: false
 
       - name: Install pinned Node and bundled npm
@@ -125,7 +173,14 @@ jobs:
         run: make check-node
 
       - name: Run node-redis compatibility cases against this checkout
-        run: make test-node CLIENT_PROFILE="$CLIENT_PROFILE"
+        run: |
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            zig build -Doptimize=ReleaseSafe "-Dversion=$RELEASE_VERSION"
+            node --experimental-strip-types tests/integration/clients/node/run.ts \
+              test --profile "$CLIENT_PROFILE"
+          else
+            make test-node CLIENT_PROFILE="$CLIENT_PROFILE"
+          fi
 
       - name: Upload node-redis failure evidence
         if: failure()

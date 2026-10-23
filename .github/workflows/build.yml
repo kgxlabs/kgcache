@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'release/**'
   pull_request:
 
 permissions:
@@ -47,6 +48,12 @@ jobs:
 
       - name: Check release failure handling
         run: bash tests/release/failures.sh --docker
+
+      - name: Check release proposal, candidate, and GitHub contracts
+        run: |
+          bash tests/release/proposals.sh
+          bash tests/release/candidates.sh
+          bash tests/release/github.sh
 
       - name: Build the Linux release
         run: bash tools/release/build.sh

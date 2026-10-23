@@ -4,6 +4,9 @@ The candidate tools build and test one exact source/version pair, save its
 image, and verify a later load. They keep all output local. They create no Git
 version tags, registry uploads, or GitHub releases.
 
+The [release workflow](RELEASE_WORKFLOW.md) runs these commands in CI and
+verifies artifact transfer in a separate job.
+
 Use the prerequisites in [release checks](../tests/release/README.md),
 [container checks](../tests/container/README.md), and
 [client setup](../tests/integration/clients/README.md). Prepare the pinned Go,
@@ -47,6 +50,11 @@ the tooling files used for qualification.
 Branch proposals must run from their clean selected tooling commit and must
 still match pinned main policy. A request with an existing reserved tag must
 recover its retained candidate instead of rebuilding that version.
+
+CI passes `--request-evidence FILE` from the request collector. Its source,
+policy, mode, repository, and proposal checksum must agree. The candidate
+retains this record as checksummed `evidence/request.json`. Import validates
+the same binding when the record is present.
 
 ## What runs
 

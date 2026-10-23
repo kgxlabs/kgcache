@@ -43,6 +43,11 @@ The tool never uses the selected release branch's private policy copy.
 The checked-in registry starts empty. Review registration changes on main
 before creating a release branch.
 
+The [GitHub workflow collector](RELEASE_WORKFLOW.md#prepare-a-release-branch)
+requires `decision_ref` to be the full URL of the approved main registration
+PR. The local proposer also supports other reference formats supplied by a
+trusted caller.
+
 This is the shape of one registered line. Replace the SHA placeholder with
 the approved full main commit SHA:
 

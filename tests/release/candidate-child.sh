@@ -11,5 +11,6 @@ case "$1" in
         candidate_check_archive "$3/bundle" "$3/archive"
         ;;
     archive) candidate_check_archive "$2" "$3" ;;
+    request) candidate_validate_request "$2" "$3" ;;
     *) release_fail 'unknown candidate fixture mode' ;;
 esac

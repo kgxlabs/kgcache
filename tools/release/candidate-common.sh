@@ -68,6 +68,22 @@ candidate_tooling_inventory() {
     done
 }
 
+candidate_validate_request() {
+    local proposal=$1 evidence=$2 bytes sha
+
+    [[ -f "$evidence" && ! -L "$evidence" ]] ||
+        release_fail 'request evidence must be a regular JSON file'
+    bytes=$(candidate_file_size "$evidence") || return 1
+    [[ "$bytes" -le 1048576 ]] || release_fail 'request evidence exceeds 1 MiB'
+    sha=$(release_sha256 "$proposal") || return 1
+    jq -e --arg sha "$sha" --slurpfile proposal "$proposal" \
+        '.schema_version == 1 and .publishable == false and
+          .mode == $proposal[0].mode and .repository == $proposal[0].repository and
+          .source_sha == $proposal[0].source_sha and .policy_sha == $proposal[0].policy_sha and
+          .proposal_sha256 == $sha' "$evidence" > /dev/null ||
+        release_fail 'request evidence differs from the selected proposal'
+}
+
 candidate_identity_key() {
     local kind=$1 proposal=$2 encoded
 
@@ -169,6 +185,9 @@ candidate_snapshot_bundle() {
          .proposal == $proposal[0] and .build == $build[0]' "$output/candidate.json" > /dev/null ||
         release_fail 'candidate metadata files disagree with the manifest'
     candidate_validate_proposal "$output/proposal.json"
+    if [[ -f "$output/evidence/request.json" ]]; then
+        candidate_validate_request "$output/proposal.json" "$output/evidence/request.json"
+    fi
     target=$(release_target linux/amd64)
     jq -e -L "$RELEASE_ROOT/tools/release" \
         --arg target "$target" \

@@ -96,7 +96,7 @@ candidate_collect_evidence() {
 }
 
 main() {
-    local proposal='' repo="$RELEASE_ROOT" artifacts="$RELEASE_ROOT/test-artifacts/release/candidates"
+    local proposal='' request_evidence='' repo="$RELEASE_ROOT" artifacts="$RELEASE_ROOT/test-artifacts/release/candidates"
     local allow_emulation=false source source_sha version development mode host engine arch os
     local compiler image runtime_result service_result tooling_revision tooling_dirty=false tooling_sha
     local archive_sha archive_bytes path sha bytes total=0 count=0 attempt=${GITHUB_RUN_ATTEMPT:-1}
@@ -105,10 +105,11 @@ main() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --proposal | --repo | --artifacts)
+            --proposal | --request-evidence | --repo | --artifacts)
                 release_require_value "$1" "${2:-}"
                 case "$1" in
                     --proposal) proposal=$2 ;;
+                    --request-evidence) request_evidence=$2 ;;
                     --repo) repo=$2 ;;
                     --artifacts) artifacts=$2 ;;
                 esac
@@ -119,7 +120,7 @@ main() {
                 shift
                 ;;
             --help)
-                printf 'Usage: bash tools/release/qualify.sh --proposal FILE [--repo DIR] [--artifacts DIR] [--allow-emulation]\n'
+                printf 'Usage: bash tools/release/qualify.sh --proposal FILE [--request-evidence FILE] [--repo DIR] [--artifacts DIR] [--allow-emulation]\n'
                 return
                 ;;
             *) release_fail "unknown argument: $1" ;;
@@ -179,6 +180,11 @@ main() {
     jq -s . "$candidate_workspace/tooling.jsonl" > "$candidate_output/evidence/tooling.json"
     printf 'Candidate evidence: %s\n' "$candidate_output"
     cp "$proposal" "$candidate_output/proposal.json"
+    if [[ -n "$request_evidence" ]]; then
+        candidate_validate_request "$candidate_output/proposal.json" "$request_evidence"
+        cp "$request_evidence" "$candidate_output/evidence/request.json"
+        candidate_validate_request "$candidate_output/proposal.json" "$candidate_output/evidence/request.json"
+    fi
     proposal="$candidate_output/proposal.json"
     source="$candidate_workspace/source"
     candidate_checkout_source "$repo" "$source_sha" "$source" "$RELEASE_ROOT"
@@ -195,6 +201,9 @@ main() {
     candidate_run_phase source-proposals 300s bash tests/release/proposals.sh
     if [[ -f tests/release/candidates.sh ]]; then
         candidate_run_phase candidate-contracts 300s bash tests/release/candidates.sh
+    fi
+    if [[ -f tests/release/github.sh ]]; then
+        candidate_run_phase github-contracts 300s bash tests/release/github.sh
     fi
     candidate_run_phase source-failures 180s bash tests/release/failures.sh --docker
     candidate_run_phase source-shell 300s make check-shell

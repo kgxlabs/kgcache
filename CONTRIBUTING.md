@@ -213,6 +213,12 @@ where the change came from. Open a PR against `release/0.2` and include the
 original PR, full source SHA, and any conflict resolutions or extra changes.
 Run the relevant checks on the target code.
 
+The **Maintenance compatibility** check validates the PR title, body, introduced
+commit messages, and main source references. It rejects declared features and
+breaking changes. Reviewers still judge compatibility. After merging, the
+[release workflow](docs/RELEASE_WORKFLOW.md) checks the actual squash commit,
+maintainer approval, and main-first history before qualification.
+
 Keep the original commit reference in the final squash commit body. GitHub does
 not automatically preserve a picked commit's body when it uses the PR description
 as the squash message. Copy the `(cherry picked from commit ...)` line into that
