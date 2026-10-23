@@ -267,11 +267,32 @@ check_github_pagination() {
     printf 'Passed: activity pagination preserves proof and rejects another service\n'
 }
 
-check_review_states() {
-    jq -en -L "$RELEASE_ROOT/tools/release" 'include "github";
+check_shared_policy() {
+    local references
+
+    jq -en -L "$RELEASE_ROOT/tools/release" 'include "policy";
         fix_request("chore: correction"; "fix: correct behavior") and
         fix_request("fix: correction"; "chore: compatible maintenance") and
+        fix_request(""; "fix: correct behavior") and
+        fix_request("fix: correction"; "") and
+        (fix_request(""; "") | not) and
         (fix_request("ci: check code"; "chore: maintain checks") | not)' > /dev/null
+    printf '%s\n' \
+        'Review notes' \
+        "(cherry picked from commit $fixture_fix)" \
+        ' (cherry picked from commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)' \
+        '(cherry picked from commit abc123)' \
+        '(cherry picked from commit AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA)' \
+        '(cherry picked from commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) extra' \
+        > "$github_test_workspace/references.txt"
+    printf '(cherry picked from commit %s)\r\n' "$fixture_fix" \
+        >> "$github_test_workspace/references.txt"
+    references=$(release_backport_commits < "$github_test_workspace/references.txt")
+    [[ "$references" == "$fixture_fix" ]] || release_fail 'backport reference grammar changed'
+    printf 'Passed: shared fix classification and full main reference grammar\n'
+}
+
+check_review_states() {
     mutate_api reviews-3.json '. += [.[0] | .id = 2 | .state = "COMMENTED" | .submitted_at = "2026-10-20T00:00:03Z"]'
     select_fixture commented "$github_test_workspace/update.json" "$fixture_backport"
     restore_api reviews-3.json
@@ -290,6 +311,8 @@ check_review_states() {
 }
 
 check_maintenance_prs() {
+    local feature_sha
+
     bash "$RELEASE_ROOT/tools/release/check-maintenance.sh" \
         --repo "$fixture_repo" --event "$github_test_workspace/pr.json"
     jq '.pull_request.title = "fix!: incompatible correction"' \
@@ -297,6 +320,19 @@ check_maintenance_prs() {
     expect_github_failure breaking-pr 'must not declare features' \
         bash "$RELEASE_ROOT/tools/release/check-maintenance.sh" \
         --repo "$fixture_repo" --event "$github_test_workspace/breaking-pr.json"
+    expect_github_failure mixed-maintenance-mode 'cannot be combined' \
+        bash "$RELEASE_ROOT/tools/release/check-maintenance.sh" \
+        --event "$github_test_workspace/pr.json" --message - < /dev/null
+    git -C "$fixture_repo" switch --quiet main
+    printf 'new behavior\n' > "$fixture_repo/feature.txt"
+    feature_sha=$(fixture_commit 'feat: introduce behavior on main')
+    git -C "$fixture_repo" update-ref refs/remotes/origin/main "$feature_sha"
+    jq --arg source "$feature_sha" \
+        '.pull_request.body = "(cherry picked from commit " + $source + ")"' \
+        "$github_test_workspace/pr.json" > "$github_test_workspace/feature-main-pr.json"
+    expect_github_failure feature-main-source 'must not declare features' \
+        bash "$RELEASE_ROOT/tools/release/check-maintenance.sh" \
+        --repo "$fixture_repo" --event "$github_test_workspace/feature-main-pr.json"
 }
 
 main() {
@@ -309,6 +345,7 @@ main() {
     github_test_logs=$(mktemp -d "$RELEASE_ROOT/test-artifacts/release/github/run.XXXXXX")
     printf 'GitHub contract evidence: %s\n' "$github_test_logs"
     setup_github_fixture
+    check_shared_policy
     check_github_selection
     check_github_pagination
     check_review_states

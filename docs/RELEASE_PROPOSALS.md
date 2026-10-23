@@ -213,11 +213,14 @@ These names are output data only.
 
 ## Maintenance compatibility
 
-Check a complete PR title/body or commit message from stdin:
+Check a complete PR title/body or commit message:
 
 ```sh
-bash tools/release/compatibility.sh < message.txt
+bash tools/release/check-maintenance.sh --message message.txt
 ```
+
+Use `--message -` to read stdin. This mode needs Bash and jq. For a complete
+release-branch PR check, pass `--event EVENT_JSON [--repo DIR]` instead.
 
 The check rejects `feat`, a Conventional Commit `!`, and `BREAKING CHANGE` or
 `BREAKING-CHANGE` footers. Branch proposals apply it to reviewed release commits

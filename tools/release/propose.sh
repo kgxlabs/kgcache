@@ -140,15 +140,11 @@ validate_history() {
             release_fail "missing reviewed first-parent progression: $revision"
         git --no-replace-objects -C "$repo" show -s --format=%B "$revision" \
             > "$proposal_workspace/message"
-        bash "$RELEASE_ROOT/tools/release/compatibility.sh" < "$proposal_workspace/message"
+        release_validate_maintenance < "$proposal_workspace/message"
         jq -r --arg source "$revision" '.[] | select(.source_sha == $source) | .main_commits[]' \
             "$proposal_workspace/reviews.json" > "$proposal_workspace/main-commits"
         while IFS= read -r main_sha; do
-            require_commit "$repo" "$main_sha"
-            require_ancestor "$repo" "$main_sha" "$policy_sha" 'backport source is not merged on main'
-            git --no-replace-objects -C "$repo" show -s --format=%B "$main_sha" \
-                > "$proposal_workspace/message"
-            bash "$RELEASE_ROOT/tools/release/compatibility.sh" < "$proposal_workspace/message"
+            release_validate_main_commit "$repo" "$main_sha" "$policy_sha"
         done < "$proposal_workspace/main-commits"
     done < "$proposal_workspace/commits"
 

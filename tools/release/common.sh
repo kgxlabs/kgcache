@@ -137,6 +137,30 @@ release_validate_version() {
     fi
 }
 
+release_validate_maintenance() {
+    jq --raw-input --slurp --exit-status -L "$RELEASE_ROOT/tools/release" \
+        'include "policy"; validate_maintenance' > /dev/null
+}
+
+release_backport_commits() {
+    jq --raw-input --slurp --raw-output -L "$RELEASE_ROOT/tools/release" \
+        'include "policy"; backport_commits[]'
+}
+
+release_validate_main_commit() {
+    local repo=$1 revision=$2 main=$3 kind message
+
+    [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || release_fail 'expected a full main commit SHA'
+    kind=$(git --no-replace-objects -C "$repo" cat-file -t "$revision") ||
+        release_fail "missing commit or history: $revision"
+    [[ "$kind" == commit ]] || release_fail "not a commit: $revision"
+    git --no-replace-objects -C "$repo" merge-base --is-ancestor "$revision" "$main" ||
+        release_fail 'backport source is not merged on main'
+    message=$(git --no-replace-objects -C "$repo" show -s --format=%B "$revision") ||
+        release_fail 'cannot read main source message'
+    printf '%s' "$message" | release_validate_maintenance
+}
+
 release_development_version() {
     local version
 

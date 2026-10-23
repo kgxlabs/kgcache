@@ -107,6 +107,10 @@ main() {
         '*.sh' '.githooks/*' \
         > "$shell_file_list"
     while IFS= read -r -d '' script; do
+        # Git still lists tracked files deleted from the working tree.
+        if [[ ! -e "$script" && ! -L "$script" ]]; then
+            continue
+        fi
         scripts+=("$script")
     done < "$shell_file_list"
     [[ ${#scripts[@]} -gt 0 ]] || fail 'no shell scripts were found'

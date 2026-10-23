@@ -29,10 +29,6 @@ def merged_pr($repository; $branch; $source):
       (.user.login | reference) and (.merged_by.login | reference);
       "expected a merged PR for this exact source and base branch");
 
-def fix_request($message; $title):
-  ($message | split("\n")[0] | test("^fix(?:\\([^()]+\\))?: "; "i")) or
-  ($title | test("^fix(?:\\([^()]+\\))?: "; "i"));
-
 # Comments do not revoke an approval. A later change request or dismissal does.
 # Require approval of the final PR head before the merge, from another user.
 def review_decisions($pr):

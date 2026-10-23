@@ -310,13 +310,13 @@ check_maintenance() {
     local message
 
     printf 'fix(parser): correct framing\n\nReviewed compatible fix.\n' |
-        bash "$RELEASE_ROOT/tools/release/compatibility.sh"
+        bash "$RELEASE_ROOT/tools/release/check-maintenance.sh" --message -
     for message in 'feat: add behavior' 'Feat(cache): add behavior' 'fix!: change behavior' \
         $'fix: correction\n\nBREAKING CHANGE: changed replies' \
         $'chore: cleanup\n\nBREAKING-CHANGE: changed config'; do
         printf '%s\n' "$message" > "$proposal_test_workspace/message"
         expect_rejection "compatibility-${RANDOM}" 'must not declare features or breaking changes' \
-            bash "$RELEASE_ROOT/tools/release/compatibility.sh" < "$proposal_test_workspace/message"
+            bash "$RELEASE_ROOT/tools/release/check-maintenance.sh" --message "$proposal_test_workspace/message"
     done
     new_fixture
     save_creation

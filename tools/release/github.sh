@@ -229,17 +229,15 @@ github_select_branch() {
         github_commit_pr "$revision" "$branch"
         number=$(jq -r '.number' "$github_workspace/selected-pr.json")
         git --no-replace-objects -C "$repo" show -s --format=%B "$revision" > "$github_workspace/message"
-        bash "$RELEASE_ROOT/tools/release/compatibility.sh" < "$github_workspace/message"
+        release_validate_maintenance < "$github_workspace/message"
         jq -r '.title + "\n" + (.body // "")' "$github_workspace/selected-pr.json" > "$github_workspace/pr-message"
-        bash "$RELEASE_ROOT/tools/release/compatibility.sh" < "$github_workspace/pr-message"
-        kind=maintenance
-        if jq -en -L "$RELEASE_ROOT/tools/release" \
+        release_validate_maintenance < "$github_workspace/pr-message"
+        kind=$(jq -rn -L "$RELEASE_ROOT/tools/release" \
             --rawfile message "$github_workspace/message" \
             --slurpfile pr "$github_workspace/selected-pr.json" \
-            'include "github"; fix_request($message; $pr[0].title)' > /dev/null; then
-            kind=fix
-        fi
-        sed -nE 's/^\(cherry picked from commit ([0-9a-f]{40})\)$/\1/p' "$github_workspace/message" \
+            'include "policy"; if fix_request($message; $pr[0].title)
+             then "fix" else "maintenance" end')
+        release_backport_commits < "$github_workspace/message" \
             > "$github_workspace/main-commits"
         [[ "$kind" != fix || -s "$github_workspace/main-commits" ]] ||
             release_fail 'fix squash message must retain the full main cherry-pick reference'

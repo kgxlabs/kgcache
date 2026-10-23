@@ -14,8 +14,8 @@ digest in `check.sh`. Docker selects the image for its engine architecture.
 No tools are installed on the host.
 
 The checks include tracked scripts and new scripts that Git does not ignore.
-They skip ignored dependencies and generated output. File names are passed as
-separate arguments, including names that contain spaces. Checks mount the
+They skip deleted files, ignored dependencies, and generated output. File names
+are passed as separate arguments, including names that contain spaces. Checks mount the
 repository read-only; formatting mounts it writable and uses the caller's UID
 and GID. Each Docker phase has a deadline and owned containers are removed on
 exit.

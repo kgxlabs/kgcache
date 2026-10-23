@@ -12,6 +12,21 @@ def regular: semver and (semver_parts | .prerelease == null);
 def unique_by_field($field): length == (map(.[$field]) | unique | length);
 def only_keys($allowed): (keys - $allowed | length) == 0;
 
+# Conventional Commit declarations are a guard. Review still judges compatibility.
+def validate_maintenance:
+  require((test("\\Afeat(?:\\([^()\\r\\n]+\\))?!?:[ \\t]+"; "i") or
+    test("\\A[A-Za-z0-9_]+(?:\\([^()\\r\\n]+\\))?!:") or
+    test("(^|\\n)BREAKING[ -]CHANGE:[ \\t]*"; "i")) | not;
+    "maintenance changes must not declare features or breaking changes")
+  | true;
+
+def fix_request($message; $title):
+  ($message | (split("\n")[0] // "") | test("^fix(?:\\([^()]+\\))?: "; "i")) or
+  ($title | test("^fix(?:\\([^()]+\\))?: "; "i"));
+
+def backport_commits:
+  split("\n") | map(capture("\\A\\(cherry picked from commit (?<sha>[0-9a-f]{40})\\)\\z") | .sha);
+
 def validate_line:
   require(type == "object"; "release line must be an object")
   | require(only_keys(["line", "branch", "cut_sha", "status", "channel", "prerelease_prefix",
