@@ -1,5 +1,9 @@
 # Linux release checks
 
+For a complete source/image qualification and saved-image handoff, see
+[release candidates](../../docs/RELEASE_CANDIDATES.md). The runner uses the
+checks below and the existing prepared-image service checks. It never publishes.
+
 For read-only version and source proposals, see
 [release proposals](../../docs/RELEASE_PROPOSALS.md). Run their isolated Git
 fixtures with `bash tests/release/proposals.sh`. Those checks need no compiler,
