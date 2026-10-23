@@ -268,7 +268,7 @@ wait_persistence() {
 }
 
 check_layout() {
-    local name=$1 layout status dependencies actual_sha
+    local name=$1 layout status dependencies actual_sha actual_version
 
     layout=$(docker_call exec "$name" stat -c '%u:%g:%a' \
         /data /etc/kgcache/kgcache.conf /usr/local/bin/kgcache)
@@ -291,17 +291,11 @@ check_layout() {
         > "$workspace/evidence/build-info.json"
     actual_sha=$(docker_call exec "$name" sha256sum /usr/local/bin/kgcache)
     actual_sha=${actual_sha%% *}
-    jq -e --arg sha "$actual_sha" --slurpfile image "$workspace/evidence/image.json" \
-        '.binary.sha256 == $sha and .persistence_test_controls == false and
-        .target == "x86_64-linux-gnu.2.36" and .cpu == "baseline" and
-        .optimize == "ReleaseSafe" and
-        .source.revision == $image[0][0].Config.Labels["org.opencontainers.image.revision"] and
-        (.source.dirty | type == "boolean") and
-        ((.source.revision | test("^[0-9a-f]{40}$")) or
-          (.source.revision == "unknown" and .source.dirty)) and
-        (.version | type == "string" and length > 0) and
-        (.version == $image[0][0].Config.Labels["org.opencontainers.image.version"] or
-          (.source.dirty and $image[0][0].Config.Labels["org.opencontainers.image.version"] == ""))' \
+    actual_version=$(docker_call exec "$name" /usr/local/bin/kgcache --version)
+    printf '%s\n' "$actual_version" > "$workspace/evidence/version.log"
+    jq -e -L "$RELEASE_ROOT/tools/release" --arg sha "$actual_sha" \
+        --arg version "$actual_version" --slurpfile image "$workspace/evidence/image.json" \
+        --from-file "$RELEASE_ROOT/tools/container/validate-image.jq" \
         "$workspace/evidence/build-info.json" > /dev/null
 }
 

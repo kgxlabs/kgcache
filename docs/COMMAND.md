@@ -39,7 +39,7 @@ the selected database.
 | Field | Value |
 | --- | --- |
 | `server` | `kgcache` |
-| `version` | The kgcache package version used for this build |
+| `version` | The effective kgcache version used for this build, see [build versions](BUILDING.md) |
 | `proto` | The connection's current protocol version, initially `2` |
 | `id` | The connection's positive integer ID, never reused within a server run |
 | `mode` | `standalone` |

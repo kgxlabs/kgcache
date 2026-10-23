@@ -5,13 +5,14 @@ set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/common.sh"
 
 usage() {
-    printf 'Usage: bash tools/release/verify.sh [--prefix DIR] [--allow-dirty]\n'
+    printf 'Usage: bash tools/release/verify.sh [--prefix DIR] [--version SEMVER] [--allow-dirty]\n'
 }
 
 validate_record() {
     local metadata=$1 target=$2
 
     if ! jq --exit-status \
+        -L "$RELEASE_ROOT/tools/release" \
         --arg target "$target" \
         --arg cpu "$RELEASE_CPU" \
         --arg optimize "$RELEASE_OPTIMIZE" \
@@ -24,11 +25,16 @@ validate_record() {
 }
 
 main() {
-    local prefix="$RELEASE_ROOT/zig-out/release/linux-amd64" allow_dirty=false
-    local metadata platform target dirty expected_sha actual_sha
+    local prefix="$RELEASE_ROOT/zig-out/release/linux-amd64" allow_dirty=false version=''
+    local metadata platform target dirty expected_sha actual_sha recorded_version
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --version)
+                release_require_value "$1" "${2:-}"
+                version=$2
+                shift 2
+                ;;
             --prefix)
                 release_require_value "$1" "${2:-}"
                 prefix=$2
@@ -48,12 +54,19 @@ main() {
 
     release_require_commands jq file
     release_require_sha256
+    if [[ -n "$version" ]]; then
+        release_validate_version "$version"
+    fi
 
     metadata="$prefix/build-info.json"
     [[ -f "$metadata" ]] || release_fail "missing build record: $metadata"
     platform=$(release_read_field "$metadata" .platform)
     target=$(release_target "$platform")
     validate_record "$metadata" "$target"
+    recorded_version=$(release_read_field "$metadata" .version)
+    if [[ -n "$version" && "$recorded_version" != "$version" ]]; then
+        release_fail 'build record version differs from the requested version'
+    fi
 
     dirty=$(release_read_field "$metadata" .source.dirty)
     if [[ "$dirty" == true && "$allow_dirty" == false ]]; then

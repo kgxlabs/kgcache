@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - 'release/**'
   pull_request:
 
 permissions:
@@ -23,3 +24,9 @@ jobs:
 
       - name: Lint shell scripts
         run: make check-shell
+
+      - name: Validate GitHub Actions workflows
+        run: |
+          timeout --signal=TERM --kill-after=5s 120s docker run --rm --network none \
+            --volume "$PWD:/repo:ro" --workdir /repo \
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667

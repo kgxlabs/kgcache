@@ -1,5 +1,19 @@
 # Linux release checks
 
+The [release workflow](../../docs/RELEASE_WORKFLOW.md) runs read-only branch
+qualification and manual previews in CI. Test its GitHub evidence collector
+locally with `bash tests/release/github.sh`. The fixtures use a GET-only API
+stub and temporary Git history. They need no GitHub token or network access.
+
+For a complete source/image qualification and saved-image handoff, see
+[release candidates](../../docs/RELEASE_CANDIDATES.md). The runner uses the
+checks below and the existing prepared-image service checks. It never publishes.
+
+For read-only version and source proposals, see
+[release proposals](../../docs/RELEASE_PROPOSALS.md). Run their isolated Git
+fixtures with `bash tests/release/proposals.sh`. Those checks need no compiler,
+Docker, credentials, or published versions.
+
 Use Bash 3.2 or later on macOS or Linux. Install Git, curl, tar with xz support,
 jq, `file`, GNU `timeout`, and a SHA-256 tool (`sha256sum` or `shasum`). Scripts
 check their dependencies before building or creating release output.
@@ -22,10 +36,15 @@ bin/kgcache
 build-info.json
 ```
 
-The build record includes the package version, source commit, clean/dirty state,
+The build record includes the effective version, development default, source commit, clean/dirty state,
 platform, target, mode, compiler version and archive checksum, runtime base,
 and executable checksum. It contains no build-host paths or timestamps.
 Persistence test controls are disabled in the release server.
+
+Use `--version SEMVER` to select an explicit version without changing
+`build.zig.zon`. `verify.sh --version SEMVER` also checks the expected record
+version. See the shared [build-version contract](../../docs/BUILDING.md) for
+accepted inputs, schema version `2`, and executable version inspection.
 
 Use `--prefix DIR` for an isolated output location. The ordinary `zig-out/bin`
 development build does not replace this release output. `--allow-dirty` creates
@@ -44,6 +63,10 @@ policy, optimization mode, and pinned Bookworm base. Platform helpers return
 values without changing shared variables. Server and helper builds use the
 same compile function. JSON creation and validation are in named `.jq` files;
 validation errors identify the failing field. ELF parsing runs with `LC_ALL=C`.
+
+Run `bash tests/build/run.sh` with Zig 0.16.0 to check native defaults, the
+shared SemVer fixtures, versioned server/test-tool builds, and foreign run
+guards. It uses local build outputs and creates no releases.
 
 Build the arm64 candidate separately:
 

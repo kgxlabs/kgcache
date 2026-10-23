@@ -12,6 +12,8 @@
 !tools/release/settings.sh
 !tools/release/zig.sh
 !tools/release/create-build-info.jq
+!tools/release/semver.zig
+!tools/release/semver.jq
 !tools/container/
 !tools/container/build.sh
 !containers/

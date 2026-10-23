@@ -134,7 +134,7 @@ check_image_metadata() {
     expect_failure image-invalid-dirty 1 'SOURCE_DIRTY must be true or false' \
         env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION=unknown \
         SOURCE_DIRTY=invalid bash tools/container/build.sh
-    expect_failure image-version-mismatch 1 'VERSION must match build.zig.zon' \
+    expect_failure image-invalid-version 1 'VERSION must be SemVer 2.0.0' \
         env TARGETOS=linux TARGETARCH=amd64 SOURCE_REVISION=unknown \
         SOURCE_DIRTY=true VERSION=invalid bash tools/container/build.sh
     expect_failure image-base-mismatch 1 'image base differs from the qualified release base' \
@@ -191,6 +191,12 @@ main() {
     check_image_metadata
     expect_failure missing-option-value 1 'missing value for --prefix' \
         bash tools/release/build.sh --prefix --allow-dirty
+    expect_failure missing-version-value 1 'missing value for --version' \
+        bash tools/release/build.sh --version --allow-dirty
+    expect_failure invalid-release-version 1 'version must be SemVer 2.0.0' \
+        bash tools/release/build.sh --version 0.2.0-01
+    expect_failure invalid-verify-version 1 'version must be SemVer 2.0.0' \
+        bash tools/release/verify.sh --version v0.2.0
     if [[ ${1:-} == --docker ]]; then
         check_docker_timeout
     fi

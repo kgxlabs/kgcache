@@ -16,6 +16,7 @@ main() {
 
     ldd /usr/local/bin/kgcache
     sha256sum /usr/local/bin/kgcache
+    /usr/local/bin/kgcache --version
 }
 
 main "$@"

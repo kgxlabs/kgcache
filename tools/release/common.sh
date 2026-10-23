@@ -128,12 +128,54 @@ release_read_field() {
         release_fail "cannot read build record field $2 from $1"
 }
 
+release_validate_version() {
+    local value=$1 name=${2:-version}
+
+    if ! jq --exit-status --null-input -L "$RELEASE_ROOT/tools/release" \
+        --arg version "$value" 'include "semver"; $version | semver' > /dev/null; then
+        release_fail "$name must be SemVer 2.0.0"
+    fi
+}
+
+release_validate_maintenance() {
+    jq --raw-input --slurp --exit-status -L "$RELEASE_ROOT/tools/release" \
+        'include "policy"; validate_maintenance' > /dev/null
+}
+
+release_backport_commits() {
+    jq --raw-input --slurp --raw-output -L "$RELEASE_ROOT/tools/release" \
+        'include "policy"; backport_commits[]'
+}
+
+release_validate_main_commit() {
+    local repo=$1 revision=$2 main=$3 kind message
+
+    [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || release_fail 'expected a full main commit SHA'
+    kind=$(git --no-replace-objects -C "$repo" cat-file -t "$revision") ||
+        release_fail "missing commit or history: $revision"
+    [[ "$kind" == commit ]] || release_fail "not a commit: $revision"
+    git --no-replace-objects -C "$repo" merge-base --is-ancestor "$revision" "$main" ||
+        release_fail 'backport source is not merged on main'
+    message=$(git --no-replace-objects -C "$repo" show -s --format=%B "$revision") ||
+        release_fail 'cannot read main source message'
+    printf '%s' "$message" | release_validate_maintenance
+}
+
+release_development_version() {
+    local version
+
+    version=$(sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p' \
+        "$RELEASE_ROOT/build.zig.zon") || release_fail 'cannot read package version'
+    release_validate_version "$version" 'development version'
+    printf '%s\n' "$version"
+}
+
 # Keep server and test-tool compilation on the same release contract.
 # Extra arguments select optional Zig build steps such as integration-tools.
 release_compile() {
-    local compiler=$1 output=$2 platform=$3 target
+    local compiler=$1 output=$2 platform=$3 version=$4 target
 
-    shift 3
+    shift 4
     target=$(release_target "$platform") || return 1
 
     timeout --signal=TERM --kill-after=10s 600s \
@@ -141,5 +183,6 @@ release_compile() {
         "-Dtarget=$target" \
         "-Dcpu=$RELEASE_CPU" \
         "-Doptimize=$RELEASE_OPTIMIZE" \
+        "-Dversion=$version" \
         --prefix "$output"
 }

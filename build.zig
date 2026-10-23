@@ -1,4 +1,5 @@
 const std = @import("std");
+const semver = @import("tools/release/semver.zig");
 
 // Learn more about this file here: https://ziglang.org/learn/build-system
 pub fn build(b: *std.Build) void {
@@ -6,8 +7,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const execution_guard = executionGuard(b, target);
     const build_options = b.addOptions();
+    const version = b.option([]const u8, "version", "Effective version (SemVer 2.0.0)") orelse
+        @import("build.zig.zon").version;
+    if (!semver.isValid(version)) std.process.fatal("version must be SemVer 2.0.0", .{});
 
-    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    build_options.addOption([]const u8, "version", version);
     build_options.addOption(bool, "persistence_test_controls", false);
 
     const exe = b.addExecutable(.{
@@ -81,7 +85,7 @@ pub fn build(b: *std.Build) void {
     integration_runner.root_module.addImport("server_process", server_process);
 
     const control_options = b.addOptions();
-    control_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    control_options.addOption([]const u8, "version", version);
     control_options.addOption(bool, "persistence_test_controls", true);
     const controlled_server = b.addExecutable(.{
         .name = "kgcache-controlled-server",
@@ -122,6 +126,18 @@ pub fn build(b: *std.Build) void {
         });
         integration_tools.dependOn(&install_tool.step);
     }
+
+    const build_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/build/semver_tests.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    build_tests.root_module.addImport("semver", b.createModule(.{
+        .root_source_file = b.path("tools/release/semver.zig"),
+    }));
+    b.step("test-build", "Test build version validation on the host")
+        .dependOn(&b.addRunArtifact(build_tests).step);
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`

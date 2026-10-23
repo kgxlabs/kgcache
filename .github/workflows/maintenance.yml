@@ -1,0 +1,35 @@
+name: Maintenance compatibility
+
+on:
+  pull_request:
+    branches:
+      - 'release/**'
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  maintenance:
+    name: Maintenance compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out trusted base tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
+      - name: Fetch the exact PR head and complete history as data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: pr-source
+          persist-credentials: false
+
+      - name: Check declarations and main-first backport references
+        run: bash base/tools/release/check-maintenance.sh --event "$GITHUB_EVENT_PATH" --repo pr-source
