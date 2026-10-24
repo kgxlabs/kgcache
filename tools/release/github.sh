@@ -84,6 +84,7 @@ github_permission() {
 
 github_reviewed_pr() {
     local number=$1 branch=$2 revision=$3 login permission approvers=0
+    local required=1
 
     [[ "$number" =~ ^[1-9][0-9]*$ ]] || release_fail 'invalid PR number'
     github_get "/repos/$github_repository/pulls/$number" "$github_output/api/pr-$number.json"
@@ -96,6 +97,13 @@ github_reviewed_pr() {
     permission=$(cat "$github_workspace/can-write")
     if [[ "$permission" != true ]]; then
         release_fail 'PR merger needs current maintainer write access'
+    fi
+    if jq -e --argjson bypass "${github_review_bypass:-null}" \
+        '$bypass != null and .merged_by.login == $bypass.login and .merged_by.id == $bypass.id' \
+        "$github_output/api/pr-$number.json" > /dev/null; then
+        jq -e '.permission == "admin"' "$github_output/api/permission-$login.json" > /dev/null ||
+            release_fail 'review bypass requires current owner administration access'
+        required=0
     fi
     github_list "/repos/$github_repository/pulls/$number/reviews?per_page=100" \
         "$github_output/api/reviews-$number.json"
@@ -118,7 +126,8 @@ github_reviewed_pr() {
             approvers=$((approvers + 1))
         fi
     done < "$github_workspace/approvals"
-    [[ "$approvers" -gt 0 ]] || release_fail 'PR needs a maintainer approval of its final head'
+    [[ "$approvers" -ge "$required" ]] ||
+        release_fail "PR needs a maintainer approval of its final head (required: $required)"
 }
 
 github_commit_pr() {
@@ -190,7 +199,8 @@ github_rules() {
             jq -e -L "$RELEASE_ROOT/tools/release" --arg branch "$name" \
                 --slurpfile config "$github_workspace/automation.json" \
                 'include "publication"; validate_merge_rules($config[0].required_checks.main +
-                  (if $branch == "main" then [] else $config[0].required_checks.release end))' \
+                  (if $branch == "main" then [] else $config[0].required_checks.release end);
+                  ($config[0] | review_bypass))' \
                 "$github_workspace/rules.json" > /dev/null
         fi
         cp "$github_workspace/rules.json" "$github_workspace/rules-${name//\//-}.json"
@@ -313,6 +323,7 @@ github_select_branch() {
     local repo=$1 event_file=$2 event_name=$3 source=$4 branch cut policy creation_id
     local creation_time creation_policy registration_ref registration_number revision parents
     local number main_sha kind before creation_count update_count
+    local github_review_bypass=null
 
     jq -e -L "$RELEASE_ROOT/tools/release" --arg name "$event_name" \
         --arg repository "$github_repository" --arg source "$source" \
@@ -320,6 +331,12 @@ github_select_branch() {
         "$event_file" > "$github_workspace/event.json"
     branch=$(jq -r '.branch' "$github_workspace/event.json")
     policy=$(git --no-replace-objects -C "$repo" rev-parse refs/remotes/origin/main)
+    if git --no-replace-objects -C "$repo" cat-file -e "$policy:.github/release-automation.json" 2> /dev/null; then
+        git --no-replace-objects -C "$repo" show "$policy:.github/release-automation.json" \
+            > "$github_workspace/approval-policy.json"
+        github_review_bypass=$(jq -c -L "$RELEASE_ROOT/tools/release" \
+            'include "publication"; review_bypass' "$github_workspace/approval-policy.json")
+    fi
     git --no-replace-objects -C "$repo" show "$policy:.github/release-lines.json" > "$github_workspace/policy.json"
     jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" --arg branch "$branch" \
         'include "policy"; validate_policy($repository) | .lines |

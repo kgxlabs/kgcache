@@ -312,6 +312,40 @@ check_review_states() {
     restore_api pr-3.json
 }
 
+check_owner_review_bypass() {
+    local original_main policy file
+
+    original_main=$(git -C "$fixture_repo" rev-parse refs/remotes/origin/main)
+    git -C "$fixture_repo" switch --quiet main
+    printf '{"review_bypass":{"login":"maintainer","id":101}}\n' \
+        > "$fixture_repo/.github/release-automation.json"
+    policy=$(fixture_commit 'ci: allow the owner to bypass reviews')
+    for file in pr-3.json reviews-3.json permission.json; do
+        cp "$fixture_api/$file" "$fixture_api/owner-$file"
+    done
+    printf '[]\n' > "$fixture_api/reviews-3.json"
+    expect_github_failure untrusted-review-bypass 'approval of its final head' \
+        select_fixture untrusted-review-bypass "$github_test_workspace/update.json" "$fixture_backport"
+    git -C "$fixture_repo" update-ref refs/remotes/origin/main "$policy"
+    expect_github_failure other-review-merger 'approval of its final head' \
+        select_fixture other-review-merger "$github_test_workspace/update.json" "$fixture_backport"
+    mutate_api pr-3.json '.merged_by.id = 101 | .user.login = "maintainer"'
+    expect_github_failure non-admin-review-bypass 'owner administration access' \
+        select_fixture non-admin-review-bypass "$github_test_workspace/update.json" "$fixture_backport"
+    printf '{"permission":"admin"}\n' > "$fixture_api/permission.json"
+    select_fixture owner-review-bypass "$github_test_workspace/update.json" "$fixture_backport"
+    mutate_api reviews-3.json '[{id: 2, state: "CHANGES_REQUESTED",
+        submitted_at: "2026-10-20T00:00:03Z", user: {login: "reviewer"}}]'
+    route /repos/fixture/kgcache/collaborators/reviewer/permission permission.json
+    expect_github_failure owner-change-request 'unresolved maintainer change request' \
+        select_fixture owner-change-request "$github_test_workspace/update.json" "$fixture_backport"
+    for file in pr-3.json reviews-3.json permission.json; do
+        cp "$fixture_api/owner-$file" "$fixture_api/$file"
+    done
+    git -C "$fixture_repo" update-ref refs/remotes/origin/main "$original_main"
+    printf 'Passed: only the configured owner can merge without approval\n'
+}
+
 check_maintenance_prs() {
     local feature_sha
 
@@ -351,6 +385,7 @@ main() {
     check_github_selection
     check_github_pagination
     check_review_states
+    check_owner_review_bypass
     check_github_previews
     check_maintenance_prs
     cp "$fixture_api/calls.log" "$github_test_logs/calls.log"

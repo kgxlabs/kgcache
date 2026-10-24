@@ -45,14 +45,24 @@ Use the saved image, without rebuilding it or assigning a release-version tag.
 
 Open **Actions**, then **Registry image verification**, and select **Run
 workflow** on main. Set `candidate_run_id` to that successful main preview run.
+Keep `credential_repository` set to `testing` while using the testing PAT.
 Its selected source must belong to main history. The workflow downloads the
 candidate and its independent transfer receipt. It checks their identity, then
 pulls the testing image by digest into a fresh native Linux amd64 image store.
 It verifies the image and runs the prepared-image service and client checks.
 
-The workflow has no publishing credentials or release environment. It cannot
-upload images, allocate versions, or create Git tags or GitHub releases. Its
-result is marked non-publishing. Missing or expired evidence stops verification.
+The image job has no publishing credentials or release environment. Its result
+is marked non-publishing. Missing or expired evidence stops verification.
+
+Manual runs on protected main also check the publisher App and Docker Hub
+credentials through the `release` environment. The App must authenticate with
+the configured permissions. Docker Hub must issue pull and push grants for the
+chosen repository. No image upload or release operation is attempted.
+
+After replacing the Docker PAT, choose `production` to verify the replacement.
+Leave `candidate_run_id` empty to check credentials alone. This is separate
+from proving registry image transport. The final job rejects missing requested
+checks. Both modes leave release versions and publication state unchanged.
 
 For workflow changes before merge, push a working branch named
 `ci/registry-check/RUN_ID`. This starts the same read-only verification for an
@@ -71,12 +81,23 @@ The local fixtures below cover tags, registry writes, and release API recovery.
 2. Create the `release` Actions environment. Store `RELEASE_APP_PRIVATE_KEY` and
    `DOCKERHUB_TOKEN` as secrets. Set `RELEASE_APP_ID` and `DOCKERHUB_USERNAME` as
    variables. Keep publisher credentials out of qualification jobs.
-3. Protect main and `release/*` with active rulesets. Require PRs, at least one
-   approval, dismissal of stale approvals, resolved review threads, and squash
-   merging. Require linear history, block deletion and force pushes, and set
+   Allow deployment branches `release/*` and `main`. Publication uses release
+   branches. Only manual credential checks on protected main use the main rule.
+3. Protect main and `release/*` with active rulesets. Require PRs, dismissal of
+   stale approvals, resolved review threads, and squash merging.
+   Require linear history, block deletion and force pushes, and set
    strict required checks. Use the exact contexts and integration IDs in the
    settings file. Release branches need the main checks plus **Maintenance
    compatibility**. No actor may bypass these merge rules.
+   Keep the base PR rule at zero approvals. Add a separate review ruleset with
+   one required approval. Only the account in `review_bypass` may bypass that
+   ruleset, using **For pull requests only**. Classic protection must also require
+   one approval and allow only that account to bypass reviews.
+   The review collector checks this account's administration access before
+   accepting a merge without approval. Other mergers need an independent maintainer approval.
+   Unresolved maintainer change requests still stop admission.
+   To restore review for everyone, remove `review_bypass` and its GitHub bypass
+   entries, then require one approval in the base PR rule.
 4. Protect `release-state` with creation, update, deletion, and force-push
    restrictions. Its only bypass actor must be the publisher App, with mode
    **Always**. Contributors and the normal Actions token must not update it.
