@@ -202,7 +202,7 @@ jobs:
   selection:
     name: Pass the selected identity to read-only jobs
     needs: [route, select, admit]
-    if: always() && needs.route.result == 'success' && (needs.select.result == 'success' || needs.admit.result == 'success')
+    if: ${{ !cancelled() && needs.route.result == 'success' && (needs.select.result == 'success' || needs.admit.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -221,6 +221,8 @@ jobs:
   qualify:
     name: Qualify selected source on native Linux amd64
     needs: selection
+    # Selection joins two alternative paths. One upstream job is always skipped.
+    if: ${{ !cancelled() && needs.selection.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -326,6 +328,7 @@ jobs:
   verify-transfer:
     name: Verify saved image on a fresh native Linux amd64 runner
     needs: [selection, qualify]
+    if: ${{ !cancelled() && needs.selection.result == 'success' && needs.qualify.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
@@ -382,7 +385,10 @@ jobs:
   upload-image:
     name: Record qualification, tag, and upload retained image
     needs: [selection, qualify, verify-transfer]
-    if: needs.selection.outputs.publish == 'true'
+    if: >-
+      ${{ !cancelled() && needs.selection.outputs.publish == 'true' &&
+          needs.selection.result == 'success' && needs.qualify.result == 'success' &&
+          needs.verify-transfer.result == 'success' }}
     environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -456,8 +462,9 @@ jobs:
     name: Record an untagged qualification failure
     needs: [selection, qualify, verify-transfer]
     if: >-
-      always() && needs.selection.outputs.publish == 'true' &&
-      (needs.qualify.result == 'failure' || needs.verify-transfer.result == 'failure')
+      ${{ !cancelled() && needs.selection.result == 'success' &&
+          needs.selection.outputs.publish == 'true' &&
+          (needs.qualify.result == 'failure' || needs.verify-transfer.result == 'failure') }}
     environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -508,7 +515,10 @@ jobs:
   verify-registry:
     name: Qualify the digest on a fresh native image store
     needs: [selection, qualify, upload-image]
-    if: needs.selection.outputs.publish == 'true'
+    if: >-
+      ${{ !cancelled() && needs.selection.outputs.publish == 'true' &&
+          needs.selection.result == 'success' && needs.qualify.result == 'success' &&
+          needs.upload-image.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
@@ -563,7 +573,10 @@ jobs:
   publish:
     name: Publish fixed references, release assets, and forward aliases
     needs: [selection, qualify, verify-registry]
-    if: needs.selection.outputs.publish == 'true'
+    if: >-
+      ${{ !cancelled() && needs.selection.outputs.publish == 'true' &&
+          needs.selection.result == 'success' && needs.qualify.result == 'success' &&
+          needs.verify-registry.result == 'success' }}
     environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -627,3 +640,35 @@ jobs:
       - name: Remove registry credentials
         if: always()
         run: docker logout docker.io
+
+  result:
+    name: Verify release workflow completion
+    needs: [route, select, admit, selection, qualify, verify-transfer, upload-image, verify-registry, publish]
+    if: ${{ !cancelled() && needs.route.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require completed qualification and expected publication results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          if ! jq -e '
+            . as $jobs |
+            all(["route", "selection", "qualify", "verify-transfer"][];
+              . as $id | $jobs[$id].result == "success") and
+            (if $jobs.route.outputs.publish == "true" then
+              $jobs.select.result == "skipped" and
+              all(["admit", "upload-image", "verify-registry", "publish"][];
+                . as $id | $jobs[$id].result == "success")
+            elif $jobs.route.outputs.publish == "false" then
+              $jobs.select.result == "success" and
+              all(["admit", "upload-image", "verify-registry", "publish"][];
+                . as $id | $jobs[$id].result == "skipped")
+            else false end)
+          ' <<< "$NEEDS_JSON" > /dev/null; then
+            printf 'Required release workflow jobs did not complete as expected.\n' >&2
+            jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS_JSON" >&2
+            exit 1
+          fi
+          printf 'Required qualification, transfer, and publication results verified.\n' \
+            >> "$GITHUB_STEP_SUMMARY"
