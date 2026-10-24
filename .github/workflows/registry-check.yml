@@ -1,0 +1,164 @@
+name: Registry image verification
+
+on:
+  push:
+    branches:
+      - 'ci/registry-check/*'
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: 'Successful manual preview run on main, already uploaded as ci-RUN_ID to the testing repository'
+        required: true
+        type: string
+
+# This workflow only reads GitHub artifacts and the public testing repository.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    name: Verify testing-registry image on native Linux amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      REGISTRY: docker.io/kgxlabs/kgcachetesting
+    steps:
+      - name: Identify the successful main preview and its artifacts
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUN: ${{ inputs.candidate_run_id }}
+          BRANCH: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          [[ "$REPOSITORY" == kgxlabs/kgcache ]]
+          run=$INPUT_RUN
+          if [[ -z "$run" ]]; then run=${BRANCH#ci/registry-check/}; fi
+          [[ "$run" =~ ^[1-9][0-9]*$ ]]
+          api="https://api.github.com/repos/$REPOSITORY/actions/runs/$run"
+          curl --fail --silent --show-error --max-time 45 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$api" > "$RUNNER_TEMP/preview-run.json"
+          jq -e --arg repository "$REPOSITORY" \
+            '.repository.full_name == $repository and .head_repository.full_name == $repository and
+              .head_branch == "main" and .event == "workflow_dispatch" and
+              .path == ".github/workflows/release.yml" and .conclusion == "success"' \
+            "$RUNNER_TEMP/preview-run.json"
+          attempt=$(jq -r .run_attempt "$RUNNER_TEMP/preview-run.json")
+          curl --fail --silent --show-error --max-time 45 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$api/artifacts?per_page=100" > "$RUNNER_TEMP/preview-artifacts.json"
+          jq -e '.total_count < 100' "$RUNNER_TEMP/preview-artifacts.json"
+          jq -e --arg suffix "-$run-$attempt" \
+            '[.artifacts[] | select(.expired == false and
+              (.name | startswith("candidate-preview-") and endswith($suffix)))] |
+              if length == 1 then .[0] else error("expected one preview candidate") end' \
+            "$RUNNER_TEMP/preview-artifacts.json" > "$RUNNER_TEMP/selected-artifact.json"
+          artifact=$(jq -r .id "$RUNNER_TEMP/selected-artifact.json")
+          source=$(jq -er '.name | capture("-(?<source>[0-9a-f]{40})-[0-9]+-[0-9]+$") | .source' \
+            "$RUNNER_TEMP/selected-artifact.json")
+          transfer=$(jq -er --arg name "transfer-$source-$run-$attempt" \
+            '[.artifacts[] | select(.expired == false and .name == $name)] |
+              if length == 1 then .[0].id else error("expected one transfer receipt") end' \
+            "$RUNNER_TEMP/preview-artifacts.json")
+          {
+            printf 'run=%s\nsource=%s\nartifact=%s\ntransfer=%s\n' \
+              "$run" "$source" "$artifact" "$transfer"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out the exact qualified source and verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.candidate.outputs.source }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the retained preview
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.candidate.outputs.artifact }}
+          run-id: ${{ steps.candidate.outputs.run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate
+
+      - name: Download its independent transfer receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.candidate.outputs.transfer }}
+          run-id: ${{ steps.candidate.outputs.run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/transfer
+
+      - name: Install the source's pinned Go version
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/integration/clients/go/go-redis/v9/.go-version
+          cache: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: tests/integration/clients/node/node-redis/v6/.node-version
+          package-manager-cache: false
+
+      - name: Pull and qualify the same image without credentials or rebuilding
+        env:
+          PREVIEW_RUN: ${{ steps.candidate.outputs.run }}
+          SOURCE_SHA: ${{ steps.candidate.outputs.source }}
+          GOTOOLCHAIN: local
+        run: |
+          source tools/release/common.sh
+          source tools/release/candidate-common.sh
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          jq -e --arg source "$SOURCE_SHA" '.passed == true and .rebuilt == false and
+            .publishable == false and .native_import == true and .source_sha == $source and
+            .candidate_qualified_amd64 == true' "$RUNNER_TEMP/transfer/import.json"
+          expected=$(jq -r .candidate_sha256 "$RUNNER_TEMP/transfer/import.json")
+          candidate_snapshot_bundle "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/bundle" "$expected"
+          candidate_check_archive "$RUNNER_TEMP/bundle" "$RUNNER_TEMP/archive"
+          manifest="$RUNNER_TEMP/bundle/candidate.json"
+          jq -e --arg source "$SOURCE_SHA" --arg run "$PREVIEW_RUN" \
+            '.source_sha == $source and .run.id == $run and .mode == "preview" and
+              .publishable == false and .qualification.qualified_amd64 == true' "$manifest"
+          [[ "$(uname -m)" == x86_64 && "$(candidate_engine)" == linux/amd64 ]]
+          image=$(jq -r .image.id "$manifest")
+          if docker image inspect "$image" > /dev/null 2>&1; then
+            release_fail 'candidate image is already present; use a fresh runner'
+          fi
+          ref="$REGISTRY:ci-$PREVIEW_RUN"
+          docker buildx imagetools inspect "$ref" --raw > "$RUNNER_TEMP/registry-manifest.json"
+          jq -e --arg image "$image" '.schemaVersion == 2 and .config.digest == $image' \
+            "$RUNNER_TEMP/registry-manifest.json"
+          digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' |
+            jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))')
+          docker image pull --platform linux/amd64 "$REGISTRY@$digest"
+          [[ "$(docker image inspect "$REGISTRY@$digest" --format '{{.Id}}')" == "$image" ]]
+          container="kgcache-registry-check-$GITHUB_RUN_ID"
+          trap 'timeout 10s docker rm --force "$container" > /dev/null 2>&1 || true' EXIT
+          candidate_inspect_image "$image" "$RUNNER_TEMP/bundle" "$container" "$RUNNER_TEMP/inspected"
+          bash tests/container/run.sh --image "$REGISTRY@$digest" \
+            --artifacts "$RUNNER_TEMP/registry-check/service"
+          set -- "$RUNNER_TEMP"/registry-check/service/run.*/result.json
+          [[ $# == 1 && -f "$1" ]]
+          jq -e --arg image "$image" '.passed == true and .qualified_amd64 == true and
+            .compose.passed == true and .image_id == $image' "$1"
+          jq -n --arg run "$PREVIEW_RUN" --arg source "$SOURCE_SHA" --arg image "$image" \
+            --arg digest "$digest" --arg registry "$REGISTRY" --arg manifest "$expected" \
+            '{passed:true, publishable:false, rebuilt:false, native_amd64:true,
+              candidate_run_id:$run, source_sha:$source, image_id:$image, digest:$digest,
+              registry:$registry, candidate_sha256:$manifest}' \
+            > "$RUNNER_TEMP/registry-check/result.json"
+          jq -r '"### Registry image verification passed", "",
+            "Preview run: `\(.candidate_run_id)`", "Source: `\(.source_sha)`",
+            "Image: `\(.image_id)`", "Digest: `\(.digest)`", "",
+            "Native clean pull and service/client checks passed. No release was published."' \
+            "$RUNNER_TEMP/registry-check/result.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain registry verification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registry-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/registry-check
+          if-no-files-found: ignore
+          retention-days: 30

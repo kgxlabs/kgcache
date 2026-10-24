@@ -36,6 +36,29 @@ The workflow reads trusted tooling from main. Qualification and client profiles
 come from the exact selected source. That source must contain the candidate and
 transfer tooling. Previews at existing tags remain previews.
 
+## Verify an uploaded testing image
+
+**Registry image verification** checks Docker Hub transport without creating a
+release. First verify and upload the retained preview image to
+`docker.io/kgxlabs/kgcachetesting:ci-RUN_ID`, using its original preview run ID.
+Use the saved image, without rebuilding it or assigning a release-version tag.
+
+Open **Actions**, then **Registry image verification**, and select **Run
+workflow** on main. Set `candidate_run_id` to that successful main preview run.
+Its selected source must belong to main history. The workflow downloads the
+candidate and its independent transfer receipt. It checks their identity, then
+pulls the testing image by digest into a fresh native Linux amd64 image store.
+It verifies the image and runs the prepared-image service and client checks.
+
+The workflow has no publishing credentials or release environment. It cannot
+upload images, allocate versions, or create Git tags or GitHub releases. Its
+result is marked non-publishing. Missing or expired evidence stops verification.
+
+For workflow changes before merge, push a working branch named
+`ci/registry-check/RUN_ID`. This starts the same read-only verification for an
+already uploaded test image. The branch suffix identifies a CI run, not a
+release version. No `release/*` branch is needed.
+
 ## Configure publication
 
 Complete setup through reviewed changes before enabling production writes.
