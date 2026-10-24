@@ -169,13 +169,17 @@ validate_history() {
 
 main() {
     local repo="$RELEASE_ROOT" repository=kgxlabs/kgcache source_ref=HEAD
-    local policy_sha='' line='' version='' event='' state='' source_given=false
+    local policy_sha='' line='' version='' event='' state='' source_given=false validate_source=false
     local mode=preview source_sha branch='' main_sha remote_sha='' cut='' shallow
     local development_version request_key='' revision key record_branch \
         source_version_key expected_key reused prior_policy
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --validate-source)
+                validate_source=true
+                shift
+                ;;
             --help)
                 printf 'Usage: bash tools/release/propose.sh [--repo DIR] [--repository OWNER/REPO] [--policy-sha SHA] [--state FILE] [--source REF] [--line MAJOR.MINOR] [--version SEMVER] [--event FILE]\n'
                 return
@@ -273,11 +277,19 @@ main() {
     printf 'null\n' > "$proposal_workspace/creation.json"
     if [[ "$mode" == branch ]]; then
         jq -e '. != null' "$proposal_workspace/line.json" > /dev/null || release_fail 'unregistered release line'
+        jq -e '.status != "retired"' "$proposal_workspace/line.json" > /dev/null || release_fail 'release line is retired'
         cut=$(jq -r '.cut_sha' "$proposal_workspace/line.json")
         remote_sha=$(git --no-replace-objects -C "$repo" rev-parse --verify "refs/remotes/origin/$branch^{commit}") ||
             release_fail 'registered remote release branch is missing'
         validate_history "$repo" "$source_sha" "$policy_sha" "$branch" "$cut" "$remote_sha"
         request_key=$(tuple_key request "$repository" "$branch" "$source_sha" '')
+    fi
+
+    if [[ "$validate_source" == true ]]; then
+        [[ "$mode" == branch ]] || release_fail 'source admission requires a branch event'
+        jq -n --arg source "$source_sha" --arg key "$request_key" \
+            '{source_sha: $source, request_key: $key, source_eligible: true, publishable: false}'
+        return
     fi
 
     git --no-replace-objects -C "$repo" for-each-ref \

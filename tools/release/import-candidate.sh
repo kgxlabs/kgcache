@@ -24,7 +24,7 @@ cleanup_import() {
 }
 
 main() {
-    local candidate='' expected='' allow_emulation=false qualified engine image native=false
+    local candidate='' expected='' allow_emulation=false qualified engine image native=false manifest_sha
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -73,12 +73,14 @@ main() {
     import_container="kgcache-import-${import_workspace##*.}"
     candidate_inspect_image "$image" "$import_workspace/bundle" "$import_container" "$import_workspace/image"
     import_container=
+    manifest_sha=$(release_sha256 "$import_workspace/bundle/candidate.json")
     jq -n \
+        --arg manifest "$manifest_sha" \
         --arg image "$image" \
         --arg engine "$engine" \
         --argjson native "$native" \
         --slurpfile candidate "$import_workspace/bundle/candidate.json" \
-        '{schema_version: 1, passed: true, publishable: false, rebuilt: false,
+        '{schema_version: 1, passed: true, publishable: false, rebuilt: false, candidate_sha256: $manifest,
           source_sha: $candidate[0].source_sha, version: $candidate[0].version, image_id: $image,
           engine: $engine, native_import: $native,
           candidate_qualified_amd64: $candidate[0].qualification.qualified_amd64}'

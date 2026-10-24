@@ -27,6 +27,9 @@ jobs:
 
       - name: Validate GitHub Actions workflows
         run: |
+          # actionlint 1.7.12 predates GitHub's documented concurrency queue field.
+          # Keep every other syntax and embedded shell check enabled.
           timeout --signal=TERM --kill-after=5s 120s docker run --rm --network none \
             --volume "$PWD:/repo:ro" --workdir /repo \
-            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+            rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -ignore 'unexpected key "queue" for "concurrency" section'

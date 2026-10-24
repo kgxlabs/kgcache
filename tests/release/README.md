@@ -1,9 +1,18 @@
 # Linux release checks
 
-The [release workflow](../../docs/RELEASE_WORKFLOW.md) runs read-only branch
-qualification and manual previews in CI. Test its GitHub evidence collector
+The [release workflow](../../docs/RELEASE_WORKFLOW.md) runs qualification and
+manual previews in CI. Publication requires explicit activation. Test its GitHub evidence collector
 locally with `bash tests/release/github.sh`. The fixtures use a GET-only API
 stub and temporary Git history. They need no GitHub token or network access.
+
+Run `bash tests/release/publication.sh` for durable request, tag, ordering, and
+protection checks. Add `--docker` for real registry transport and a stateful
+GitHub API fixture. That option needs Docker, Buildx, and Node.js. All Git tags
+stay in temporary repositories. API releases exist only in the loopback server.
+The registry contains synthetic images and is removed on exit. On macOS, the
+fixture seeds transport through the registry API to test upload recovery.
+Native Linux also tests the Docker push path. No Docker Hub upload or
+real GitHub release is part of these checks.
 
 For a complete source/image qualification and saved-image handoff, see
 [release candidates](../../docs/RELEASE_CANDIDATES.md). The runner uses the
