@@ -1,164 +1,193 @@
-# Release candidate workflow
+# Release workflow
 
-**Release candidate qualification** runs the
-[candidate tools](RELEASE_CANDIDATES.md) in GitHub Actions. It selects a source
-and version, qualifies them on native Linux amd64, and verifies the saved image
-on a fresh runner. Every event is read-only. No version is reserved, tagged,
-uploaded to a registry, or published as a GitHub Release.
+**Release candidate qualification** supports manual previews and automatic
+publication from registered release branches. Publication starts disabled in
+[release automation settings](../.github/release-automation.json).
+
+Manual previews stay read-only even after publication is enabled. They build
+and test a chosen source/version pair and retain its image. They never create
+Git tags, GitHub releases, or registry uploads. The development version in
+`build.zig.zon` does not change.
 
 ## Run a manual preview
 
-The workflow must exist on the repository's default branch before GitHub shows
-**Run workflow**. See [GitHub's manual workflow instructions](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
-
 1. Open **Actions**, then **Release candidate qualification**.
-2. Select **Run workflow**. Choose the branch containing the workflow code.
-3. Set `source_ref` to the source branch, tag, or full commit SHA to test.
-4. Optionally set `release_line` or a complete `version`.
-5. Run the workflow. Check all three jobs and the summary.
-
-The workflow branch and `source_ref` are separate inputs. The source ref is
-resolved once to a full SHA. Qualification, client profiles, dependency locks,
-and the import verifier all come from that selected commit. It must contain
-the candidate tooling and its request-evidence support.
-
-With [GitHub CLI](https://cli.github.com/manual/gh_workflow_run):
+2. Select **Run workflow**. Choose the branch containing the workflow.
+3. Set `source_ref` to a branch, tag, or full commit SHA.
+4. Optionally set `release_line` or a complete SemVer `version`.
+5. Check source qualification and saved-image transfer verification.
 
 ```sh
 gh workflow run release.yml --ref main \
   -f source_ref=YOUR_WORKING_BRANCH \
   -f version=0.2.0-rc.1+local.001
-gh run list --workflow release.yml
-gh run view RUN_ID
 ```
 
-Use `--ref YOUR_WORKFLOW_BRANCH` to test workflow changes after pushing them.
-The workflow still needs to exist on the default branch for manual dispatch.
-Use a full source SHA to repeat exactly the same source/version pair.
+This version labels test artifacts. It reserves no release number. Without a
+line or explicit version, the preview uses the selected source's development
+version. Repeated previews may reuse the same version.
 
-`source_ref` defaults to `main`. Without a line or version, the preview uses
-the source's development default. `release_line` proposes an unreserved version
-from that line. An explicit version must belong to the supplied line. Ambiguous
-branch/tag names require `refs/heads/NAME` or `refs/tags/NAME`.
+The workflow reads trusted tooling from main. Qualification and client profiles
+come from the exact selected source. That source must contain the candidate and
+transfer tooling. Previews at existing tags remain previews.
 
-Previews at tags remain previews. There is no publication input, environment,
-secret, registry login, or write-permission job.
+## Configure publication
 
-## Prepare a release branch
+Complete setup through reviewed changes before enabling production writes.
+Do not cut a production branch or create a GitHub version to test local changes.
+The local fixtures below cover tags, registry writes, and release API recovery.
 
-Only cut a production release branch for an intentional release decision.
-Use previews and local fixtures to test automation changes.
+1. Install a dedicated GitHub App on this repository. Grant Contents write,
+   Pull requests read, Administration read, and Actions read. Give it no
+   administration write permission. Restrict its installation to this repository.
+2. Create the `release` Actions environment. Store `RELEASE_APP_PRIVATE_KEY` and
+   `DOCKERHUB_TOKEN` as secrets. Set `RELEASE_APP_ID` and `DOCKERHUB_USERNAME` as
+   variables. Keep publisher credentials out of qualification jobs.
+3. Protect main and `release/*` with active rulesets. Require PRs, at least one
+   approval, dismissal of stale approvals, resolved review threads, and squash
+   merging. Require linear history, block deletion and force pushes, and set
+   strict required checks. Use the exact contexts and integration IDs in the
+   settings file. Release branches need the main checks plus **Maintenance
+   compatibility**. No actor may bypass these merge rules.
+4. Protect `release-state` with creation, update, deletion, and force-push
+   restrictions. Its only bypass actor must be the publisher App, with mode
+   **Always**. Contributors and the normal Actions token must not update it.
+5. Protect `v*` tags with creation, update, and deletion restrictions. Its only
+   bypass actor must be the same App. Record this tag ruleset's ID in settings.
+   The automation never replaces or deletes a version tag.
+6. Choose an owned, public Docker Hub repository. Scope its automation token to
+   that destination where supported. Use selected-tag immutability for full
+   version and `src-*` tags. Keep line and `latest` aliases mutable. Do not use
+   an all-tags-immutable policy with moving aliases.
+7. Set the repository slug, App ID, tag ruleset ID, owned registry, and UTC
+   `enforcement_since` in settings. This time is the reviewed baseline after
+   the protections became active. Existing branches from before that baseline
+   need a reviewed migration. They cannot enter automatically.
+8. Enable publication only after local checks and native CI pass. The first
+   intended branch operation initializes `release-state` if absent, reports its
+   root SHA, and stops. Review that root, pin `state_root_sha` through a main PR,
+   and rerun the original workflow. This is a one-time trust setup. It creates
+   no version tag or release.
 
-1. Choose a stable main commit containing the required automation. Review its
-   scope, compatibility, and notes.
-2. Open a registration PR on main for
-   [`.github/release-lines.json`](../.github/release-lines.json). Record the exact
-   cut SHA, canonical `release/MAJOR.MINOR` branch, lifecycle, channel, and notes.
-3. Set `decision_ref` to that registration PR's full GitHub URL before merging.
-   Obtain a maintainer approval of the final PR head, then merge it on main.
-4. Confirm the registration has merged before creating the branch at its exact
-   recorded cut. The cut may predate the registry commit because policy is read
-   from protected main.
-5. Inspect the resulting qualification run and candidate. Publication is not
-   implemented by this workflow.
+The configured rehearsal image destination is `docker.io/kgxlabs/kgcachetesting`.
+It grants no permission to create test GitHub tags or releases. Routine tests
+use a temporary local registry and a loopback API instead.
 
-Git branch creation and the GitHub branch UI are both covered. Matching create
-and push deliveries have the same branch/source request key. The workflow uses
-`create` for the initial cut and skips the accompanying creation push. Genuine
-redelivery or a rerun can create another evidence run without consuming a version.
+The collector verifies effective main/release rules, covering ruleset bypass
+lists, state restrictions, and version-tag restrictions. A changed enforcement
+fingerprint stops admission. Review the change before reconciling its baseline.
+Missing state, an unpinned root, and retired or blocked versions stop writes.
 
-The collector uses GitHub's
-[repository activity API](https://docs.github.com/en/rest/repos/repos#list-repository-activities)
-to identify the branch's original creation and the main policy already present
-at that time. It uses server activity times, not Git commit dates. Registration
-must be in a reviewed main PR. Same-second chronology that cannot be proved
-stops selection.
+See [GitHub branch rules](https://docs.github.com/en/rest/repos/rules) and
+[Docker immutable tags](https://docs.docker.com/docker-hub/repos/manage/hub-images/immutable-tags/).
 
-## Merge a compatible backport
+## Request a release
+
+1. Choose a stable main commit. Review scope, compatibility, upgrade steps,
+   known limits, and release notes.
+2. Register the line in [release-lines.json](../.github/release-lines.json)
+   through a reviewed main PR. Record the exact cut SHA and canonical branch
+   name, such as `release/0.2`. Set `decision_ref` to that PR's full URL.
+3. Set `notes_ref` to a reviewed repository file path. Its content at the pinned
+   main policy commit becomes release notes. It must be nonempty. Use it to
+   explain compatibility and migration needs.
+4. Merge registration before creating the branch at its exact cut SHA.
+5. Inspect the resulting workflow. With publication disabled, it only qualifies.
+   With complete activation, the branch operation requests publication.
+
+`release/0.2` is a branch for one maintenance line. `v0.2.0` is an immutable tag
+for one release. The first automatic regular version for this line is `0.2.0`.
+A `release/0.0` line starts at `0.0.0`. Choose the intended starting line and
+channel in reviewed policy. Manual preview versions do not affect this choice.
+
+The coordinator stores requests by repository, branch, and exact source SHA.
+Duplicate create/push deliveries and reruns recover that identity. GitHub
+activity proves initial creation and prior registration once. Later updates
+use stored progression and current enforced PR rules, without replaying all
+historical approvals.
+
+## Merge a patch or prepare a breaking change
 
 Follow the [backport guide](../CONTRIBUTING.md#backport-a-compatible-fix).
-Merge the fix on main, then cherry-pick its squash commit with `-x` into a
-working branch based on the target release line. Open and review a PR against
-that line. Preserve the full `(cherry picked from commit ...)` reference in the
-final squash message.
+Merge the fix on main first. Cherry-pick its squash commit with `-x` into a
+working branch based on the supported release line. Review and squash its PR
+into that line. Preserve the full cherry-pick reference in the final message.
 
-The **Maintenance compatibility** PR check rejects declared features and
-breaking changes in the title, body, and introduced commit messages. Fix PRs
-need a full main source reference. Reviewers still judge compatibility and
-conflict resolutions. Add this check to the required checks for active release
-branches. Keep the existing title, commit, source, client, shell, and build
-checks required. Branch qualification jobs run after merging and should not
-be required PR checks.
+CI checks the merged PR, source order, declared compatibility, and main-first
+references. A later branch tip cannot replace the event commit. Once `0.2.0`
+is complete and policy marks the line supported, the next accepted update
+receives `0.2.1`. Necessary compatible maintenance may have no main fix reference.
 
-After merging, the collector checks the actual event SHA and its one-parent
-squash progression. It finds the merged PR, a maintainer approval of its final
-head, and main-first source references. It checks all earlier maintenance
-commits after the registered cut too. A later branch tip cannot replace the
-event commit. Necessary maintenance may have no main fix reference.
+New features and breaking changes stay on main for a new release line. Before
+1.0, review compatibility and choose the next minor line explicitly. From 1.0,
+breaking changes require a new major line. Conventional Commit markers help
+reject declared breaking backports. Reviewers still judge actual compatibility.
 
-## Inspect results and artifacts
+A prerelease line uses policy's target version and prefix, such as
+`0.3.0-rc.1`. Each accepted request advances its counter. Graduation to a regular
+release needs a reviewed channel change. Prereleases never update normal aliases.
 
-| Job | Result |
+## Follow the publication stages
+
+| Stage | Responsibility |
 | --- | --- |
-| Select candidate source and version | Pinned source and main policy, advisory version, original creation, review history, and checksummed API evidence. |
-| Qualify selected source on native Linux amd64 | Full qualification of the selected source/version and the saved tested image. |
-| Verify saved image on a fresh native Linux amd64 runner | Download by artifact ID, verify the expected manifest checksum, load, and inspect without rebuilding. |
+| Registration, branch cut, or backport merge | Maintainer review requests release. |
+| Durable admission and allocation | CI verifies current policy and rules, then stores one ordered request/version. |
+| Qualification and transfer | Read-only native runners build, run the pinned client profiles, save the image, and verify its transfer. |
+| Tag and transport upload | Publisher stores qualification and tag intent, atomically reserves the annotated tag, and uploads the saved image. |
+| Registry verification | A separate native runner pulls the digest into a fresh image store and runs prepared-image service/client checks. It has no publishing credential. |
+| Fixed publication | Publisher verifies the receipt, assigns full-version and source/version image tags, then creates a draft and checks every downloaded asset. |
+| Release and aliases | CI publishes with `make_latest: false`, then advances eligible Docker line/latest and GitHub latest pointers. |
 
-Artifacts are retained for 30 days. Names contain the run ID and attempt.
-Candidate names also contain mode, version, and full source SHA. Completed
-bundles, selection evidence, transfer results, and failed attempts have separate
-names. The candidate binds the selection evidence to its exact proposal through
-`evidence/request.json` and the bundle's checksum inventory.
+The actual registry digest must describe the retained image configuration.
+Only Linux amd64 is published. Fixed tags with other content are conflicts.
+Release assets are `build-info.json`, `release-info.json`, `qualification.json`,
+and `SHA256SUMS`. GitHub notes retain full SemVer. Docker tags map `+` to `_`.
 
-Download the complete candidate artifact for a local check:
+Docker aliases advance by SemVer precedence. Build metadata does not change
+precedence. Older maintenance releases may advance their line alias while
+leaving global latest on a newer line. Equal precedence with different content
+keeps the current alias. There are no moving Git tags or major-only image aliases.
 
-```sh
-gh run download RUN_ID --name CANDIDATE_ARTIFACT_NAME --dir ./candidate
-bash tools/release/import-candidate.sh --candidate ./candidate \
-  --expected-sha256 EXPECTED_MANIFEST_SHA256
-```
+## Inspect and recover
 
-Use the manifest checksum reported by the qualification job. On a development
-machine, add `--allow-emulation`. This does not change the native qualification
-record made by CI. See [candidate verification](RELEASE_CANDIDATES.md#verify-a-transfer).
+Artifacts are retained for 30 days. Candidate names include mode, version,
+source SHA, run ID, and attempt. Request selection, admission evidence, image
+transfer, registry verification, and final publication use separate artifacts.
+Durable checkpoints remain in the protected state branch.
 
-## Stop and retry
+Read the failed job and retained evidence. Rerun the original workflow. Do not
+push a replacement tag, recreate a release branch, or enter a new version to
+repair an interrupted publication. The workflow restores the original candidate
+and resumes its checkpoints without rebuilding a tagged version.
 
-Read the failed job and its retained evidence. Fix the cause and rerun the
-original workflow, or run another explicit preview of the same source/version.
-Reruns recheck current policy. Use an explicit preview when the same proposed
-version is needed after a policy change. No production number has been consumed.
-Missing or delayed API evidence can
-require a later rerun. Do not recreate a release branch to repair its history.
+An untagged failed qualification may be retried. A reviewed descendant may
+supersede it and reuse its unused version. A tagged version stays reserved.
+If required candidate bytes expire or are lost, stop. Restore byte-identical,
+authenticated evidence or prepare a new version through review.
 
-The collector reads at most one year of activity, 20 pages per list, 100
-maintenance commits, and 500 API responses. Raw responses are capped at
-16 MiB and retained selection files at 32 MiB. Missing original creation,
-missing policy/review history, force updates, observed recreation, or ambiguous
-history stops branch selection. Use a manual preview while maintainers resolve
-the missing evidence.
+Source gaps, full queues, unexplained tags, conflicting assets, and changed
+fixed digests stop progression. Retry the missing original request or review
+the conflict. Do not bypass the check. Alias recovery finishes partial writes
+and never moves a newer pointer backward.
 
-This read-only collector does not supply durable creation or request state.
-It checks the available activity window. It cannot establish branch history
-outside that window. Existing production tags require matching durable release
-records; it refuses unexplained tags instead of inventing their state.
+Workflows share a publication concurrency group with `queue: max`. GitHub keeps
+up to 100 pending runs. Waiting order can differ from source order, so the
+ledger checks progression separately. See [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
-Automatic patch progression, durable deduplication, retained-candidate recovery,
-Git tags, image publication, and GitHub Releases belong to the publication
-coordinator. Until that exists, separate branch updates may propose the same
-unused version. Passing qualification does not authorize publication.
-
-## Check changes locally
+## Check automation changes
 
 ```sh
-bash tests/release/github.sh
 bash tests/release/proposals.sh
 bash tests/release/candidates.sh
+bash tests/release/github.sh
+bash tests/release/publication.sh
+bash tests/release/publication.sh --docker
 make check-shell
 ```
 
-The GitHub fixtures use temporary Git history and a local GET-only API stub.
-They make no external API calls or changes to project refs. The **Shell lint**
-workflow also runs pinned actionlint to validate workflow syntax and embedded
-shell commands. Hosted event delivery and artifact transfer still need an
-actual Actions run.
+The publication fixtures use temporary local Git histories and a stateful fake
+GitHub API. The Docker option adds a disposable registry and needs Node.js.
+Synthetic receipts are marked as fixtures and cannot authorize production.
+No test changes project refs, creates a GitHub version, or uploads to Docker Hub.
+Native clean-pull qualification and hosted artifact handoff need CI verification.

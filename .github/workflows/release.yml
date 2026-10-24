@@ -21,18 +21,54 @@ on:
         required: false
         type: string
 
-# All events, including manual dispatch at a version tag, are read-only.
+# Manual dispatch stays read-only. Branch publication requires main activation.
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'create' && !startsWith(github.event.ref, 'release/'))) && format('release-read-only-{0}', github.run_id) || 'release-publication' }}
+  cancel-in-progress: false
+  queue: max
 
 jobs:
-  select:
-    name: Select candidate source and version
+  route:
+    name: Read publication activation from main
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.event.created == false) ||
       (github.event_name == 'create' && github.event.ref_type == 'branch' &&
         startsWith(github.event.ref, 'release/'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      publish: ${{ steps.policy.outputs.publish }}
+      tooling_sha: ${{ steps.policy.outputs.tooling_sha }}
+      registry: ${{ steps.policy.outputs.registry }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - id: policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          jq -e -L tools/release --arg repository "$REPOSITORY" \
+            'include "publication"; validate_automation($repository)' .github/release-automation.json
+          enabled=$(jq -r .enabled .github/release-automation.json)
+          [[ "$EVENT_NAME" != workflow_dispatch ]] || enabled=false
+          {
+            printf 'publish=%s\n' "$enabled"
+            printf 'tooling_sha=%s\n' "$(git rev-parse HEAD)"
+            jq -r '"registry=\(.registry_repository // "")"' .github/release-automation.json
+          } >> "$GITHUB_OUTPUT"
+
+  select:
+    name: Select candidate source and version
+    needs: route
+    if: needs.route.outputs.publish != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -48,7 +84,7 @@ jobs:
       - name: Check out the immutable workflow revision and complete history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ needs.route.outputs.tooling_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -91,13 +127,105 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  admit:
+    name: Admit and allocate the branch request
+    needs: route
+    if: needs.route.outputs.publish == 'true'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      source_sha: ${{ steps.request.outputs.source_sha }}
+      version_tag: ${{ steps.request.outputs.version_tag }}
+      mode: branch
+      artifact_id: ${{ steps.request.outputs.artifact_id }}
+      artifact_run_id: ${{ steps.request.outputs.artifact_run_id }}
+      selection_artifact: selection-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.tooling_sha }}
+          persist-credentials: false
+      - name: Create a repository-scoped publisher token
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+          permission-administration: read
+          permission-actions: read
+      - name: Recover the original request before allocating a version
+        id: request
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          remote="https://github.com/$REPOSITORY.git"
+          existing=$(git ls-remote --refs "$remote" refs/heads/release-state)
+          if [[ -z "$existing" ]]; then
+            bash tools/release/coordinate.sh init --remote "$remote" --repository "$REPOSITORY"
+            printf 'Review the new state root, pin state_root_sha on main, and rerun this original workflow.\n' >&2
+            exit 1
+          fi
+          bash tools/release/coordinate.sh enqueue --remote "$remote" --repository "$REPOSITORY" \
+            --event "$GITHUB_EVENT_PATH" --event-name "$EVENT_NAME" --source "$EVENT_SHA" \
+            --output "$RUNNER_TEMP/admission" > "$RUNNER_TEMP/enqueued.json"
+          request=$(jq -r .request_key "$RUNNER_TEMP/enqueued.json")
+          bash tools/release/coordinate.sh allocate --remote "$remote" --repository "$REPOSITORY" \
+            --request "$request" --output "$RUNNER_TEMP/selection" > "$RUNNER_TEMP/request.json"
+          jq -r '"source_sha=\(.source_sha)", "version_tag=\(.proposal.image.version_tag)",
+            "artifact_id=\(.candidate.artifact_id // "")",
+            "artifact_run_id=\(.candidate.run.id // "")"' "$RUNNER_TEMP/request.json" >> "$GITHUB_OUTPUT"
+      - name: Retain the admitted request and evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/selection
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Retain current admission API evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/admission
+          if-no-files-found: ignore
+          retention-days: 30
+
+  selection:
+    name: Pass the selected identity to read-only jobs
+    needs: [route, select, admit]
+    if: always() && needs.route.result == 'success' && (needs.select.result == 'success' || needs.admit.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      source_sha: ${{ needs.admit.outputs.source_sha || needs.select.outputs.source_sha }}
+      version_tag: ${{ needs.admit.outputs.version_tag || needs.select.outputs.version_tag }}
+      mode: ${{ needs.admit.outputs.mode || needs.select.outputs.mode }}
+      artifact_id: ${{ needs.admit.outputs.artifact_id }}
+      artifact_run_id: ${{ needs.admit.outputs.artifact_run_id }}
+      selection_artifact: ${{ needs.admit.outputs.selection_artifact || needs.select.outputs.selection_artifact }}
+      publish: ${{ needs.route.outputs.publish }}
+      tooling_sha: ${{ needs.route.outputs.tooling_sha }}
+      registry: ${{ needs.route.outputs.registry }}
+    steps:
+      - run: printf 'Source selection completed.\n'
+
   qualify:
     name: Qualify selected source on native Linux amd64
-    needs: select
+    needs: selection
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id || needs.selection.outputs.artifact_id }}
+      artifact_run_id: ${{ steps.bundle.outputs.artifact_run_id }}
       manifest_sha256: ${{ steps.bundle.outputs.manifest_sha256 }}
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
 
@@ -105,14 +233,14 @@ jobs:
       - name: Check out the selected source and complete history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.select.outputs.source_sha }}
+          ref: ${{ needs.selection.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Download the request selection from this run
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ needs.select.outputs.selection_artifact }}
+          name: ${{ needs.selection.outputs.selection_artifact }}
           path: test-artifacts/release/selection
 
       - name: Install pinned Go from the selected source
@@ -128,20 +256,33 @@ jobs:
           package-manager-cache: false
 
       - name: Qualify and save the exact source/version image
+        if: needs.selection.outputs.artifact_id == ''
         run: |
           bash tools/release/qualify.sh \
             --proposal test-artifacts/release/selection/proposal.json \
             --request-evidence test-artifacts/release/selection/github-evidence.json \
             --artifacts test-artifacts/release/candidates
 
+      - name: Restore the original retained candidate on retry
+        if: needs.selection.outputs.artifact_id != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.selection.outputs.artifact_id }}
+          run-id: ${{ needs.selection.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: test-artifacts/release/restored
+
       - name: Identify the completed native bundle
         id: bundle
         env:
-          SELECTED_SHA: ${{ needs.select.outputs.source_sha }}
-          VERSION_TAG: ${{ needs.select.outputs.version_tag }}
-          CANDIDATE_MODE: ${{ needs.select.outputs.mode }}
+          SELECTED_SHA: ${{ needs.selection.outputs.source_sha }}
+          VERSION_TAG: ${{ needs.selection.outputs.version_tag }}
+          CANDIDATE_MODE: ${{ needs.selection.outputs.mode }}
+          RESTORED_ARTIFACT: ${{ needs.selection.outputs.artifact_id }}
         run: |
           set -- test-artifacts/release/candidates/run.*/candidate.json
+          if [[ -n "$RESTORED_ARTIFACT" ]]; then set -- test-artifacts/release/restored/candidate.json; fi
           [[ $# == 1 && -f "$1" ]]
           manifest=$1
           jq -e --arg source "$SELECTED_SHA" --arg mode "$CANDIDATE_MODE" \
@@ -150,6 +291,7 @@ jobs:
           checksum=$(sha256sum "$manifest")
           {
             printf 'manifest_sha256=%s\n' "${checksum%% *}"
+            jq -r '"artifact_run_id=\(.run.id)"' "$manifest"
             printf 'bundle_path=%s\n' "${manifest%/*}"
             printf 'artifact_name=candidate-%s-%s-%s-%s-%s\n' \
               "$CANDIDATE_MODE" "$VERSION_TAG" "$SELECTED_SHA" \
@@ -163,6 +305,7 @@ jobs:
 
       - name: Retain the completed candidate
         id: upload
+        if: needs.selection.outputs.artifact_id == ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.bundle.outputs.artifact_name }}
@@ -175,28 +318,33 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: candidate-failure-${{ needs.select.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: candidate-failure-${{ needs.selection.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-artifacts/release/candidates
           if-no-files-found: ignore
           retention-days: 30
 
   verify-transfer:
     name: Verify saved image on a fresh native Linux amd64 runner
-    needs: [select, qualify]
+    needs: [selection, qualify]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      artifact_id: ${{ steps.transfer.outputs.artifact-id }}
 
     steps:
       - name: Check out the same selected verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.select.outputs.source_sha }}
+          ref: ${{ needs.selection.outputs.source_sha }}
           persist-credentials: false
 
       - name: Download only the candidate artifact produced by qualification
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
+          run-id: ${{ needs.qualify.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
           path: test-artifacts/release/transferred
 
       - name: Verify the archive and loaded image without rebuilding
@@ -222,10 +370,260 @@ jobs:
             test-artifacts/release/transfer-result/import.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Retain transfer verification
+        id: transfer
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: transfer-${{ needs.select.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: transfer-${{ needs.selection.outputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-artifacts/release/transfer-result
           if-no-files-found: ignore
           retention-days: 30
+
+  upload-image:
+    name: Record qualification, tag, and upload retained image
+    needs: [selection, qualify, verify-transfer]
+    if: needs.selection.outputs.publish == 'true'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      record_artifact: ${{ steps.record.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.selection.outputs.tooling_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
+          run-id: ${{ needs.qualify.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.verify-transfer.outputs.artifact_id }}
+          path: ${{ runner.temp }}/transfer
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+          permission-administration: read
+          permission-actions: read
+      - name: Log in to the owned image repository
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+      - name: Preserve qualification before creating the annotated tag
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          ARTIFACT_ID: ${{ needs.qualify.outputs.artifact_id }}
+          REGISTRY: ${{ needs.selection.outputs.registry }}
+        run: |
+          remote="https://github.com/$REPOSITORY.git"
+          request=$(jq -r .proposal.request_key "$RUNNER_TEMP/candidate/candidate.json")
+          bash tools/release/coordinate.sh status --remote "$remote" --repository "$REPOSITORY" > "$RUNNER_TEMP/state.json"
+          status=$(jq -r --arg key "$request" '.requests[$key].status' "$RUNNER_TEMP/state.json")
+          if [[ "$status" == admitted || "$status" == qualified ]]; then
+            bash tools/release/coordinate.sh qualify --remote "$remote" --repository "$REPOSITORY" \
+              --request "$request" --candidate "$RUNNER_TEMP/candidate" --artifact-id "$ARTIFACT_ID" \
+              --transfer "$RUNNER_TEMP/transfer/import.json"
+          fi
+          bash tools/release/coordinate.sh tag --remote "$remote" --repository "$REPOSITORY" \
+            --request "$request" --candidate "$RUNNER_TEMP/candidate"
+          bash tools/release/publish.sh upload --remote "$remote" --repository "$REPOSITORY" \
+            --request "$request" --candidate "$RUNNER_TEMP/candidate" --registry "$REGISTRY" \
+            --output "$RUNNER_TEMP/upload-record"
+      - id: record
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registry-upload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/upload-record
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout docker.io
+
+  record-qualification-failure:
+    name: Record an untagged qualification failure
+    needs: [selection, qualify, verify-transfer]
+    if: >-
+      always() && needs.selection.outputs.publish == 'true' &&
+      (needs.qualify.result == 'failure' || needs.verify-transfer.result == 'failure')
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.selection.outputs.tooling_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.selection.outputs.selection_artifact }}
+          path: ${{ runner.temp }}/selection
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+          permission-administration: read
+          permission-actions: read
+      - name: Preserve the failed request for retry or reviewed supersession
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          request=$(jq -r .request_key "$RUNNER_TEMP/selection/proposal.json")
+          jq -n --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg request "$request" '{request_key:$request, run_id:$run, attempt:$attempt,
+              result:"qualification failed before tagging"}' > "$RUNNER_TEMP/failure.json"
+          bash tools/release/coordinate.sh status --remote "https://github.com/$REPOSITORY.git" \
+            --repository "$REPOSITORY" > "$RUNNER_TEMP/state.json"
+          status=$(jq -r --arg key "$request" '.requests[$key].status' "$RUNNER_TEMP/state.json")
+          if [[ "$status" == admitted ]]; then
+            bash tools/release/coordinate.sh fail --remote "https://github.com/$REPOSITORY.git" \
+              --repository "$REPOSITORY" --request "$request" --failure "$RUNNER_TEMP/failure.json"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: qualification-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/failure.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  verify-registry:
+    name: Qualify the digest on a fresh native image store
+    needs: [selection, qualify, upload-image]
+    if: needs.selection.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      evidence_artifact: ${{ steps.evidence.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.selection.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
+          run-id: ${{ needs.qualify.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.upload-image.outputs.record_artifact }}
+          path: ${{ runner.temp }}/upload-record
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/integration/clients/go/go-redis/v9/.go-version
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: tests/integration/clients/node/node-redis/v6/.node-version
+          package-manager-cache: false
+      - name: Pull and qualify without publishing credentials or rebuilding
+        id: verify
+        env:
+          REGISTRY: ${{ needs.selection.outputs.registry }}
+        run: |
+          if jq -e '.registry.verified != null' "$RUNNER_TEMP/upload-record/request.json" > /dev/null; then
+            printf 'The original clean-pull verification is already recorded.\n'
+            exit 0
+          fi
+          request=$(jq -r .request_key "$RUNNER_TEMP/upload-record/request.json")
+          bash tools/release/publish.sh verify --request "$request" --registry "$REGISTRY" \
+            --candidate "$RUNNER_TEMP/candidate" --record "$RUNNER_TEMP/upload-record/request.json" \
+            --output "$RUNNER_TEMP/registry-verification"
+      - name: Retain clean-pull verification
+        id: evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registry-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/registry-verification
+          if-no-files-found: ignore
+          retention-days: 30
+
+  publish:
+    name: Publish fixed references, release assets, and forward aliases
+    needs: [selection, qualify, verify-registry]
+    if: needs.selection.outputs.publish == 'true'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.selection.outputs.tooling_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
+          run-id: ${{ needs.qualify.outputs.artifact_run_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.verify-registry.outputs.evidence_artifact != ''
+        with:
+          artifact-ids: ${{ needs.verify-registry.outputs.evidence_artifact }}
+          path: ${{ runner.temp }}/registry-verification
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+          permission-administration: read
+          permission-actions: read
+      - name: Log in to the owned image repository
+        env:
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+      - name: Complete the original publication
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          REGISTRY: ${{ needs.selection.outputs.registry }}
+        run: |
+          request=$(jq -r .proposal.request_key "$RUNNER_TEMP/candidate/candidate.json")
+          args=(--remote "https://github.com/$REPOSITORY.git" --repository "$REPOSITORY"
+            --request "$request" --candidate "$RUNNER_TEMP/candidate" --registry "$REGISTRY")
+          bash tools/release/publish.sh promote "${args[@]}" --verification "$RUNNER_TEMP/registry-verification"
+          bash tools/release/publish.sh release "${args[@]}"
+          bash tools/release/publish.sh aliases "${args[@]}" > "$RUNNER_TEMP/completed.json"
+          jq -e '.status == "complete"' "$RUNNER_TEMP/completed.json"
+          jq -r '"### Release publication verified", "", "Version: `\(.version)`",
+            "Source: `\(.source_sha)`", "Digest: `\(.registry.fixed.digest)`"' \
+            "$RUNNER_TEMP/completed.json" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain final publication record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/completed.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout docker.io

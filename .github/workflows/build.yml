@@ -54,6 +54,7 @@ jobs:
           bash tests/release/proposals.sh
           bash tests/release/candidates.sh
           bash tests/release/github.sh
+          bash tests/release/publication.sh --docker
 
       - name: Build the Linux release
         run: bash tools/release/build.sh
