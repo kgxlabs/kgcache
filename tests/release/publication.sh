@@ -169,6 +169,18 @@ publish_fixture() {
         --candidate "$candidate_test_workspace/good" "$@"
 }
 
+check_alias_precedence() {
+    jq -en -L tools/release 'include "publication";
+        {version: "0.3.0", digest: "new"} as $new |
+        {version: "0.2.9", digest: "old"} as $old |
+        (alias_decision($new; $old; "latest"; "latest") | .advance == false and .target == $new) and
+        (alias_decision($old; $new; "latest"; "latest") | .advance == true and .target == $new) and
+        (alias_decision({version:"0.2.1+one",digest:"a"}; {version:"0.2.1+two",digest:"b"}; "latest"; "latest") |
+          .advance == false and .reason == "equal precedence with different content") and
+        ({requests:{k:{version:"0.3.0-rc.1"}}} | alias_plan("k") | .line == null and .latest == null)' > /dev/null
+    printf 'Passed: maintenance, prerelease, and metadata alias precedence\n'
+}
+
 seed_registry_transport() {
     local archive="$publication_workspace/seed" path checksum bytes location base separator
 
@@ -210,7 +222,7 @@ seed_registry_transport() {
 }
 
 check_registry_and_api() {
-    local port attempt digest image summary asset_id host_os
+    local port attempt digest image summary asset_id host_os main_fix descendant prior_key
 
     host_os=$(uname -s)
     publication_registry_container="kgcache-registry-test-${publication_workspace##*.}"
@@ -282,6 +294,55 @@ check_registry_and_api() {
     cp "$publication_workspace/http/clean.json" "$publication_workspace/http/state.json"
     printf 'Passed: partial assets, lost publication response, asset conflicts, and exact release retry\n'
 
+    printf '{"method":"PATCH","path":"/releases/1","after":false}\n' > "$publication_workspace/http/fault.json"
+    expect_github_failure partial-latest 'cannot read back GitHub latest' publish_fixture aliases
+    publish_fixture aliases > "$publication_workspace/complete.json"
+    publish_fixture aliases > "$publication_workspace/complete-retry.json"
+    cmp "$publication_workspace/complete.json" "$publication_workspace/complete-retry.json"
+    jq -e '.status == "complete" and .alias.complete.verified == true' "$publication_workspace/complete.json" > /dev/null
+    jq -e '.latest == .releases[0].id' "$publication_workspace/http/state.json" > /dev/null
+    printf 'Passed: partial latest recovery and completed-request verification\n'
+
+    git -C "$fixture_repo" switch --quiet main
+    jq '.lines[0].status = "supported"' "$fixture_repo/.github/release-lines.json" > "$publication_workspace/policy.json"
+    cp "$publication_workspace/policy.json" "$fixture_repo/.github/release-lines.json"
+    fixture_commit 'chore: support completed fixture line' > /dev/null
+    git -C "$fixture_repo" push --quiet "$publication_remote" main
+    publication_key=$(jq -r '.request_key' "$publication_workspace/patch.json")
+    rm "$publication_workspace/git-fault/used"
+    GIT_FIXTURE_MODE=conflict PATH="$publication_workspace/git-fault:$PATH" \
+        expect_github_failure stale-state 'state write conflict or failed push' \
+        coordinate_fixture allocate --request "$publication_key"
+    coordinate_fixture allocate --request "$publication_key" > "$publication_workspace/allocated-patch.json"
+    jq -e '.version == "0.2.1"' "$publication_workspace/allocated-patch.json" > /dev/null
+    printf 'Passed: the next reviewed source receives the next patch version\n'
+
+    printf 'synthetic qualification failure\n' > "$publication_workspace/failure.txt"
+    coordinate_fixture fail --request "$publication_key" --failure "$publication_workspace/failure.txt" > /dev/null
+    coordinate_fixture allocate --request "$publication_key" > "$publication_workspace/retried-patch.json"
+    jq -e '.version == "0.2.1" and .status == "admitted" and .proposal.reused == true' \
+        "$publication_workspace/retried-patch.json" > /dev/null
+    coordinate_fixture fail --request "$publication_key" --failure "$publication_workspace/failure.txt" > /dev/null
+    prior_key=$publication_key
+    printf 'corrected behavior\n' > "$fixture_repo/another-fix.txt"
+    main_fix=$(fixture_commit 'fix: correct fixture qualification')
+    fixture_pr 4 "$main_fix" main 2026-10-20T00:00:07Z
+    git -C "$fixture_repo" switch --quiet --detach "$fixture_backport"
+    git -C "$fixture_repo" cherry-pick -x "$main_fix" > /dev/null
+    descendant=$(git -C "$fixture_repo" rev-parse HEAD)
+    fixture_pr 5 "$descendant" release/0.2 2026-10-20T00:00:08Z
+    git -C "$fixture_repo" update-ref refs/heads/release/0.2 "$descendant"
+    git -C "$fixture_repo" push --quiet "$publication_remote" main release/0.2
+    jq --arg before "$fixture_backport" --arg source "$descendant" '.before = $before | .after = $source' \
+        "$github_test_workspace/update.json" > "$publication_workspace/descendant-event.json"
+    coordinate_fixture enqueue --event "$publication_workspace/descendant-event.json" \
+        --event-name push --source "$descendant" > "$publication_workspace/descendant.json"
+    publication_key=$(jq -r '.request_key' "$publication_workspace/descendant.json")
+    coordinate_fixture allocate --request "$publication_key" > "$publication_workspace/superseding.json"
+    jq -e --arg old "$prior_key" '.version == "0.2.1" and .proposal.supersedes == [$old]' \
+        "$publication_workspace/superseding.json" > /dev/null
+    expect_github_failure superseded-retry 'request was superseded' coordinate_fixture allocate --request "$prior_key"
+    printf 'Passed: failed qualification retry and reviewed descendant reuse without another tag\n'
 }
 
 check_publication_protections() {
@@ -324,6 +385,7 @@ main() {
     setup_publication_rules
     check_publication_requests
     check_publication_protections
+    check_alias_precedence
     if [[ "$docker_checks" == true ]]; then check_registry_and_api; fi
     printf 'Publication contracts passed with local Git fixtures. No external writes.\n'
 }

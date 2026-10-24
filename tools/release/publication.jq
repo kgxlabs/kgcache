@@ -124,7 +124,9 @@ def checkpoint($key; $phase; $value):
   | ({registry_intent: ["registry", "intent"], uploaded: ["registry", "uploaded"],
       verified: ["registry", "verified"], fixed: ["registry", "fixed"],
       github_intent: ["github", "intent"], draft: ["github", "draft"],
-      published: ["github", "published"]}[$phase]) as $path
+      published: ["github", "published"], alias_intent: ["alias", "intent"],
+      alias_line: ["alias", "line"], alias_latest: ["alias", "latest"],
+      complete: ["alias", "complete"]}[$phase]) as $path
   | require($path != null; "unknown publication checkpoint")
   | require($request.tag_object_sha | sha; "publication requires the reserved tag")
   | require($value | type == "object"; "checkpoint must be an object")
@@ -143,7 +145,44 @@ def checkpoint($key; $phase; $value):
   | require($phase != "draft" or $request.github.intent != null; "missing GitHub publication intent")
   | require($phase != "published" or
       ($request.github.draft.id == $value.id and $value.verified == true); "release publication lacks verified draft")
+  | require(($phase | startswith("alias_") | not) or $request.github.published.verified == true;
+      "aliases require a verified public release")
+  | require($phase != "alias_line" or
+      ($value == $request.alias.intent.line.target and
+       (.aliases[$request.alias.intent.line.key] == $request.alias.intent.line.previous or
+        .aliases[$request.alias.intent.line.key] == $value)); "line alias checkpoint conflicts")
+  | require($phase != "alias_latest" or
+      ($value == $request.alias.intent.latest.target and
+       (.aliases.latest == $request.alias.intent.latest.previous or .aliases.latest == $value));
+      "latest alias checkpoint conflicts")
+  | require($phase != "complete" or
+      ($request.github.published.verified == true and $value.verified == true and
+       $request.alias.intent != null and
+       ($request.alias.intent.line == null or $request.alias.line == $request.alias.intent.line.target) and
+       ($request.alias.intent.latest == null or $request.alias.latest == $request.alias.intent.latest.target));
+      "release lacks final alias verification")
   | .requests[$key] |= setpath($path; $value)
+  | if $phase == "alias_line" then .aliases[$request.alias.intent.line.key] = $value
+    elif $phase == "alias_latest" then .aliases.latest = $value else . end
   | if $phase == "fixed" and .requests[$key].status == "tagged" then .requests[$key].status = "image"
     elif $phase == "published" and .requests[$key].status != "complete" then .requests[$key].status = "release"
+    elif $phase == "complete" then .requests[$key].status = "complete"
     else . end;
+
+def alias_decision($previous; $target; $key; $tag):
+  (if $previous == null then 1 else semver_compare($target.version; $previous.version) end) as $order
+  | {key: $key, tag: $tag, previous: $previous,
+      advance: ($order > 0), target: (if $order > 0 then $target else $previous end),
+      reason: (if $order > 0 then "higher precedence"
+        elif $order < 0 then "newer release is already selected"
+        elif $target.digest == $previous.digest then "same content and precedence"
+        else "equal precedence with different content" end)};
+
+def alias_plan($key):
+  . as $ledger | .requests[$key] as $r
+  | if ($r.version | semver_parts | .prerelease) != null then {line: null, latest: null}
+    else {version: $r.version, digest: $r.registry.fixed.digest, request_key: $key,
+      repository: $r.registry.intent.repository, release_id: $r.github.published.id} as $target
+    | ($r.version | version_line) as $line
+    | {line: alias_decision($ledger.aliases["line/" + $line]; $target; "line/" + $line; $line),
+        latest: alias_decision($ledger.aliases.latest; $target; "latest"; "latest")} end;

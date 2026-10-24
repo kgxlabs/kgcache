@@ -221,6 +221,88 @@ publish_promote() {
     publish_checkpoint fixed "$publish_workspace/fixed-result.json"
 }
 
+publish_alias_image() {
+    local decision=$1 tag previous target current
+
+    tag=$(jq -r '.tag' "$decision")
+    previous=$(jq -r '.previous.digest // empty' "$decision")
+    target=$(jq -r '.target.digest' "$decision")
+    publish_manifest "$publish_registry:$tag" "$publish_workspace/alias-image.json"
+    current=$(jq -r '.digest // empty' "$publish_workspace/alias-image.json")
+    [[ "$current" == "$previous" || "$current" == "$target" ]] || release_fail "unrecorded alias content: $tag"
+    if [[ "$current" != "$target" ]]; then
+        publish_authorize
+        # Read back the alias even if the write response was lost.
+        # shellcheck disable=SC2310
+        if publish_docker buildx imagetools create --prefer-index=false \
+            --tag "$publish_registry:$tag" "$publish_registry@$target" \
+            > "$publish_workspace/alias-write.log" 2>&1; then :; fi
+    fi
+    publish_manifest "$publish_registry:$tag" "$publish_workspace/alias-image.json"
+    jq -e --arg digest "$target" '.digest == $digest' "$publish_workspace/alias-image.json" > /dev/null ||
+        release_fail "alias read-back failed: $tag"
+}
+
+publish_alias_github() {
+    local decision=$1 previous target current
+
+    previous=$(jq -r '.previous.release_id // empty' "$decision")
+    target=$(jq -r '.target.release_id' "$decision")
+    publish_api_call GET "/repos/$publish_repository/releases/latest" "$publish_workspace/latest.json"
+    case "$publish_http_code" in
+        200) current=$(jq -er '.id' "$publish_workspace/latest.json") ;;
+        404) current='' ;;
+        *) release_fail 'cannot inspect GitHub latest' ;;
+    esac
+    [[ "$current" == "$previous" || "$current" == "$target" ]] || release_fail 'unrecorded GitHub latest release'
+    if [[ "$current" != "$target" ]]; then
+        printf '{"make_latest":"true"}\n' > "$publish_workspace/latest-intent.json"
+        publish_api_call PATCH "/repos/$publish_repository/releases/$target" "$publish_workspace/response.json" \
+            "$publish_workspace/latest-intent.json"
+    fi
+    publish_api_call GET "/repos/$publish_repository/releases/latest" "$publish_workspace/latest.json"
+    [[ "$publish_http_code" == 200 ]] || release_fail 'cannot read back GitHub latest'
+    jq -e --argjson id "$target" '.id == $id and .draft == false and .prerelease == false' \
+        "$publish_workspace/latest.json" > /dev/null || release_fail 'GitHub latest read-back failed'
+}
+
+publish_aliases() {
+    local kind key line
+
+    if jq -e '.status == "complete"' "$publish_workspace/request.json" > /dev/null; then
+        # An old retry verifies the current recorded pointers. It never replays
+        # its old promotion over a newer successful release.
+        line=$(jq -r '.version | split(".")[0:2] | join(".")' "$publish_workspace/request.json")
+        for key in "line/$line" latest; do
+            jq --arg key "$key" '.aliases[$key] // null' "$publish_workspace/state.json" > "$publish_workspace/current-alias.json"
+            if jq -e '. != null' "$publish_workspace/current-alias.json" > /dev/null; then
+                jq --arg tag "${key#line/}" '{tag: $tag, previous: ., target: .}' \
+                    "$publish_workspace/current-alias.json" > "$publish_workspace/decision.json"
+                publish_alias_image "$publish_workspace/decision.json"
+                if [[ "$key" == latest ]]; then publish_alias_github "$publish_workspace/decision.json"; fi
+            fi
+        done
+        return
+    fi
+    if jq -e '.alias.intent != null' "$publish_workspace/request.json" > /dev/null; then
+        jq '.alias.intent' "$publish_workspace/request.json" > "$publish_workspace/alias-intent.json"
+    else
+        jq -L "$RELEASE_ROOT/tools/release" --arg key "$publish_request" \
+            'include "publication"; alias_plan($key)' "$publish_workspace/state.json" > "$publish_workspace/alias-intent.json"
+        publish_checkpoint alias_intent "$publish_workspace/alias-intent.json"
+    fi
+    for kind in line latest; do
+        jq --arg kind "$kind" '.[$kind]' "$publish_workspace/alias-intent.json" > "$publish_workspace/decision.json"
+        if jq -e '. == null' "$publish_workspace/decision.json" > /dev/null; then continue; fi
+        publish_alias_image "$publish_workspace/decision.json"
+        if [[ "$kind" == latest ]]; then publish_alias_github "$publish_workspace/decision.json"; fi
+        jq '.target' "$publish_workspace/decision.json" > "$publish_workspace/alias-result.json"
+        publish_checkpoint "alias_$kind" "$publish_workspace/alias-result.json"
+    done
+    printf '{"verified":true}\n' > "$publish_workspace/complete.json"
+    publish_checkpoint complete "$publish_workspace/complete.json"
+}
+
 main() {
     local operation=${1:-} candidate='' record='' verification='' output='' sha expected config
 
@@ -301,6 +383,7 @@ main() {
         verify) publish_verify "$output" ;;
         promote) publish_promote "$verification" ;;
         release) publish_release ;;
+        aliases) publish_aliases ;;
         *) release_fail 'unknown publication operation' ;;
     esac
     if [[ "$operation" != verify ]]; then
