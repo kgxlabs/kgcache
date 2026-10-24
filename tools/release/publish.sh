@@ -3,6 +3,7 @@
 set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/common.sh"
 source "${BASH_SOURCE[0]%/*}/candidate-common.sh"
+source "${BASH_SOURCE[0]%/*}/publish-github.sh"
 
 publish_workspace=
 publish_container=
@@ -227,7 +228,7 @@ main() {
     shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --remote | --repository | --request | --registry | --candidate | --record | --verification | --output)
+            --remote | --repository | --request | --registry | --candidate | --record | --verification | --output | --api-base)
                 release_require_value "$1" "${2:-}"
                 case "$1" in
                     --remote) publish_remote=$2 ;;
@@ -238,6 +239,7 @@ main() {
                     --record) record=$2 ;;
                     --verification) verification=$2 ;;
                     --output) output=$2 ;;
+                    --api-base) publish_api=$2 ;;
                 esac
                 shift 2
                 ;;
@@ -255,8 +257,10 @@ main() {
         [[ "$publish_registry" =~ ^127\.0\.0\.1:[0-9]+/fixture/[a-z0-9_-]+$ &&
             "$publish_repository" == fixture/* ]] || release_fail 'fixtures may publish only to a loopback registry'
         [[ "$operation" != verify ]] || release_fail 'synthetic fixtures cannot claim native verification'
+        [[ "$publish_api" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || release_fail 'fixtures require a loopback GitHub API'
     else
         [[ "$publish_registry" =~ ^docker\.io/[a-z0-9_-]+/[a-z0-9_-]+$ ]] || release_fail 'expected an owned Docker Hub repository'
+        [[ "$publish_api" == https://api.github.com ]] || release_fail 'production API cannot be overridden'
     fi
     trap cleanup_publish EXIT
     publish_workspace=$(mktemp -d "${TMPDIR:-/tmp}/kgcache-publish.XXXXXX")
@@ -296,6 +300,7 @@ main() {
         upload) publish_upload ;;
         verify) publish_verify "$output" ;;
         promote) publish_promote "$verification" ;;
+        release) publish_release ;;
         *) release_fail 'unknown publication operation' ;;
     esac
     if [[ "$operation" != verify ]]; then

@@ -122,7 +122,9 @@ def proposer_state($ledger; $line):
 def checkpoint($key; $phase; $value):
   .requests[$key] as $request
   | ({registry_intent: ["registry", "intent"], uploaded: ["registry", "uploaded"],
-      verified: ["registry", "verified"], fixed: ["registry", "fixed"]}[$phase]) as $path
+      verified: ["registry", "verified"], fixed: ["registry", "fixed"],
+      github_intent: ["github", "intent"], draft: ["github", "draft"],
+      published: ["github", "published"]}[$phase]) as $path
   | require($path != null; "unknown publication checkpoint")
   | require($request.tag_object_sha | sha; "publication requires the reserved tag")
   | require($value | type == "object"; "checkpoint must be an object")
@@ -137,6 +139,11 @@ def checkpoint($key; $phase; $value):
   | require($phase != "fixed" or
       ($request.registry.verified.passed == true and $value.digest == $request.registry.uploaded.digest);
       "fixed references require verified uploaded content")
+  | require($phase != "github_intent" or $request.registry.fixed != null; "image is not fixed")
+  | require($phase != "draft" or $request.github.intent != null; "missing GitHub publication intent")
+  | require($phase != "published" or
+      ($request.github.draft.id == $value.id and $value.verified == true); "release publication lacks verified draft")
   | .requests[$key] |= setpath($path; $value)
   | if $phase == "fixed" and .requests[$key].status == "tagged" then .requests[$key].status = "image"
+    elif $phase == "published" and .requests[$key].status != "complete" then .requests[$key].status = "release"
     else . end;

@@ -2,6 +2,13 @@
 # Local GET-only API transport for release-history fixtures.
 set -euo pipefail
 
+for argument in "$@"; do
+    if [[ "$argument" == http://127.0.0.1:* ]]; then
+        [[ -n "${GITHUB_FIXTURE_ROOT:-}" && -n "${GITHUB_FIXTURE_REAL_CURL:-}" ]]
+        exec "$GITHUB_FIXTURE_REAL_CURL" "$@"
+    fi
+done
+
 output='' headers='' url=''
 while [[ $# -gt 0 ]]; do
     case "$1" in

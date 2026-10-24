@@ -7,7 +7,9 @@ source "${BASH_SOURCE[0]%/*}/github.sh"
 publication_workspace=
 publication_remote=
 publication_registry_container=
+publication_api_pid=
 publication_registry=
+publication_api=
 publication_key=
 publication_transport=
 
@@ -47,6 +49,10 @@ cleanup_publication_tests() {
     local exit_status=$?
 
     trap - EXIT
+    if [[ -n "$publication_api_pid" ]]; then
+        kill "$publication_api_pid" 2> /dev/null || exit_status=1
+        wait "$publication_api_pid" 2> /dev/null || true
+    fi
     if [[ -n "$publication_registry_container" ]]; then
         if [[ "$exit_status" != 0 ]]; then
             timeout 10s docker logs --tail 40 "$publication_registry_container" >&2 || true
@@ -159,7 +165,7 @@ publish_fixture() {
     shift
     bash tools/release/publish.sh "$operation" --fixture --remote "$publication_remote" \
         --repository fixture/kgcache --request "$publication_key" \
-        --registry "$publication_registry" \
+        --registry "$publication_registry" --api-base "$publication_api" \
         --candidate "$candidate_test_workspace/good" "$@"
 }
 
@@ -204,7 +210,7 @@ seed_registry_transport() {
 }
 
 check_registry_and_api() {
-    local port attempt digest image summary host_os
+    local port attempt digest image summary asset_id host_os
 
     host_os=$(uname -s)
     publication_registry_container="kgcache-registry-test-${publication_workspace##*.}"
@@ -222,6 +228,15 @@ check_registry_and_api() {
         sleep 0.1
     done
     "$GITHUB_FIXTURE_REAL_CURL" --fail --silent --max-time 2 "http://$port/v2/" > /dev/null
+    mkdir -p "$publication_workspace/http"
+    node tests/release/github-api.js "$publication_workspace/http" > "$publication_workspace/http/server.log" 2>&1 &
+    publication_api_pid=$!
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        [[ ! -f "$publication_workspace/http/port" ]] || break
+        sleep 0.1
+    done
+    port=$(cat "$publication_workspace/http/port")
+    publication_api="http://127.0.0.1:$port"
     if [[ "$host_os" == Darwin ]]; then seed_registry_transport; fi
     publish_fixture upload > "$publication_workspace/uploaded.json"
     publish_fixture upload > "$publication_workspace/upload-retry.json"
@@ -248,6 +263,24 @@ check_registry_and_api() {
     publish_fixture promote --verification "$publication_workspace/verification" > "$publication_workspace/promote-retry.json"
     cmp "$publication_workspace/promoted.json" "$publication_workspace/promote-retry.json"
     printf 'Passed: real local registry digest/config identity, upload retry, fixed promotion, and partial recovery\n'
+
+    printf '{"method":"POST","path":"/releases/1/assets","after":false}\n' > "$publication_workspace/http/fault.json"
+    expect_github_failure partial-assets 'missing complete asset' publish_fixture release
+    jq -e '.releases | length == 1 and .[0].draft == true' "$publication_workspace/http/state.json" > /dev/null
+    printf '{"method":"PATCH","path":"/releases/1","after":true}\n' > "$publication_workspace/http/fault.json"
+    publish_fixture release > "$publication_workspace/released.json"
+    publish_fixture release > "$publication_workspace/release-retry.json"
+    cmp "$publication_workspace/released.json" "$publication_workspace/release-retry.json"
+    jq -e '.latest == null and (.releases | length == 1) and
+        .releases[0].draft == false and (.releases[0].assets | length == 4)' \
+        "$publication_workspace/http/state.json" > /dev/null
+    cp "$publication_workspace/http/state.json" "$publication_workspace/http/clean.json"
+    asset_id=$(jq -r '.releases[0].assets[0].id | tostring' "$publication_workspace/http/state.json")
+    jq --arg id "$asset_id" '.assets[$id] = ("conflicting bytes" | @base64)' \
+        "$publication_workspace/http/clean.json" > "$publication_workspace/http/state.json"
+    expect_github_failure conflicting-asset 'release asset bytes conflict' publish_fixture release
+    cp "$publication_workspace/http/clean.json" "$publication_workspace/http/state.json"
+    printf 'Passed: partial assets, lost publication response, asset conflicts, and exact release retry\n'
 
 }
 
