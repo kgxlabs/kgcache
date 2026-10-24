@@ -2,12 +2,12 @@
   "schema_version": 1,
   "repository": "kgxlabs/kgcache",
   "enabled": false,
-  "publisher_app_id": null,
-  "tag_ruleset_id": null,
-  "enforcement_since": null,
+  "publisher_app_id": 5454497,
+  "tag_ruleset_id": 25780892,
+  "enforcement_since": "2026-10-24T12:12:00Z",
   "state_ref": "refs/heads/release-state",
   "state_root_sha": null,
-  "registry_repository": null,
+  "registry_repository": "docker.io/kgxlabs/kgcache",
   "rehearsal_registry_repository": "docker.io/kgxlabs/kgcachetesting",
   "required_checks": {
     "main": [
