@@ -4,10 +4,16 @@ include "policy";
 def publication_statuses:
   ["queued", "admitted", "failed", "superseded", "qualified", "tagged", "image", "release", "complete"];
 
+def review_bypass:
+  (if has("review_bypass") then .review_bypass else null end)
+  | require(. == null or (type == "object" and (.login | reference) and
+      (.id | type == "number" and . > 0 and floor == .)); "invalid review bypass");
+
 def validate_automation($repository):
   require(.schema_version == 1 and .repository == $repository and
     (.enabled | type == "boolean") and .state_ref == "refs/heads/release-state";
     "invalid release automation settings")
+  | require(review_bypass | . == null or type == "object"; "invalid review bypass")
   | require(.enabled == false or
     ((.publisher_app_id | type == "number" and . > 0 and floor == .) and
      (.tag_ruleset_id | type == "number" and . > 0 and floor == .) and
@@ -77,22 +83,32 @@ def validate_ledger($repository):
 
 # API responses must come from the trusted collector. Ruleset detail is needed
 # because effective branch rules alone do not expose bypass permissions.
-def validate_merge_rules($required):
+def validate_merge_rules($required; $bypass):
   . as $proof
   | require(.effective | type == "array"; "missing effective branch rules")
   | require(.rulesets | type == "array" and length > 0; "missing ruleset detail")
-  | require(all(.rulesets[]; .enforcement == "active" and .target == "branch" and
-      has("bypass_actors") and .bypass_actors == []); "inactive or bypassable merge rules")
+  | require(all(.rulesets[]; . as $ruleset |
+      .enforcement == "active" and .target == "branch" and has("bypass_actors") and
+      (.bypass_actors == [] or ($bypass != null and .bypass_actors ==
+        [{actor_id: $bypass.id, actor_type: "User", bypass_mode: "pull_request"}] and
+        ([$proof.effective[] | select(.ruleset_id == $ruleset.id)] |
+          length == 1 and all(.[]; .type == "pull_request")))));
+      "inactive or bypassable merge rules")
   | require(all(.effective[]; .ruleset_id as $id | any($proof.rulesets[]; .id == $id));
       "effective rule has no verified ruleset detail")
   | require(any(.effective[]; .type == "deletion") and
       any(.effective[]; .type == "non_fast_forward") and
       any(.effective[]; .type == "required_linear_history"); "missing branch history protections")
-  | require(any(.effective[]; .type == "pull_request" and
-      .parameters.required_approving_review_count >= 1 and
+  | require(any(.effective[]; .ruleset_id as $id |
+      .type == "pull_request" and
+      (.parameters.required_approving_review_count | type == "number") and
+      .parameters.required_approving_review_count >= (if $bypass == null then 1 else 0 end) and
+      any($proof.rulesets[]; .id == $id and .bypass_actors == []) and
       .parameters.dismiss_stale_reviews_on_push == true and
       .parameters.required_review_thread_resolution == true and
       .parameters.allowed_merge_methods == ["squash"]); "missing required PR review protections")
+  | require(any(.effective[]; .type == "pull_request" and
+      .parameters.required_approving_review_count >= 1); "missing required PR review protections")
   | require(any(.effective[]; .type == "required_status_checks" and
       .parameters.strict_required_status_checks_policy == true and
       all($required[]; . as $required |
@@ -101,6 +117,8 @@ def validate_merge_rules($required):
           .context == $required.context and .integration_id == $required.integration_id)));
       "missing required status checks")
   | true;
+
+def validate_merge_rules($required): validate_merge_rules($required; null);
 
 def proposer_state($ledger; $line):
   ($ledger.lines[$line] // null) as $stored
