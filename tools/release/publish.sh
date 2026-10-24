@@ -66,7 +66,7 @@ publish_manifest() {
         :
     else
         exit_status=$?
-        if rg -q 'manifest unknown|no such manifest' "$output.log"; then
+        if grep -Eq 'manifest unknown|no such manifest' "$output.log"; then
             printf 'null\n' > "$output"
             return
         fi
@@ -332,7 +332,7 @@ main() {
             *) release_fail "unknown publication argument: $1" ;;
         esac
     done
-    release_require_commands git jq docker timeout rg cmp tar gzip mktemp
+    release_require_commands git jq docker timeout grep cmp tar gzip mktemp
     release_require_sha256
     [[ "$publish_request" =~ ^[0-9a-f]{64}$ && -n "$candidate" ]] || release_fail 'request and retained candidate are required'
     if [[ "$publish_fixture" == true ]]; then
