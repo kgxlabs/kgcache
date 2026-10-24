@@ -1,0 +1,119 @@
+include "semver";
+include "policy";
+
+def publication_statuses:
+  ["queued", "admitted", "failed", "superseded", "qualified", "tagged", "image", "release", "complete"];
+
+def validate_automation($repository):
+  require(.schema_version == 1 and .repository == $repository and
+    (.enabled | type == "boolean") and .state_ref == "refs/heads/release-state";
+    "invalid release automation settings")
+  | require(.enabled == false or
+    ((.publisher_app_id | type == "number" and . > 0 and floor == .) and
+     (.tag_ruleset_id | type == "number" and . > 0 and floor == .) and
+     (.enforcement_since | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")) and
+     (.registry_repository | type == "string" and test("^docker.io/[a-z0-9_-]+/[a-z0-9_-]+$")));
+    "activation needs a publisher app, enforcement baseline, and owned registry")
+  | require(all(.required_checks.main[], .required_checks.release[];
+      (.context | type == "string" and length > 0) and
+      (.integration_id | type == "number" and . > 0)); "invalid required check identity");
+
+def validate_state_rules($app):
+  . as $proof
+  | require(.effective | type == "array"; "missing state branch protections")
+  | require(any(.effective[]; .type == "creation") and
+      any(.effective[]; .type == "update") and
+      any(.effective[]; .type == "deletion") and
+      any(.effective[]; .type == "non_fast_forward"); "state branch must restrict updates and history")
+  | require(all(.effective[]; .ruleset_id as $id |
+      any($proof.rulesets[]; .id == $id and .enforcement == "active" and .target == "branch" and
+        .bypass_actors == [{actor_id: $app, actor_type: "Integration", bypass_mode: "always"}]));
+      "only the publisher app may bypass state restrictions")
+  | true;
+
+def validate_tag_rules($app):
+  . as $ruleset
+  | require(.target == "tag" and .enforcement == "active" and
+    .conditions.ref_name.include == ["refs/tags/v*"] and .conditions.ref_name.exclude == [] and
+    .bypass_actors == [{actor_id: $app, actor_type: "Integration", bypass_mode: "always"}] and
+    all(["creation", "update", "deletion"][]; . as $kind | any($ruleset.rules[]; .type == $kind));
+    "invalid tag rules");
+
+def validate_ledger($repository):
+  require(type == "object" and .schema_version == 1 and .repository == $repository;
+    "invalid durable release ledger")
+  | require(only_keys(["schema_version", "repository", "lines", "requests", "aliases"]);
+    "unknown ledger field")
+  | require((.lines | type == "object") and (.requests | type == "object") and
+      (.aliases | type == "object"); "invalid ledger collections")
+  | .lines |= with_entries(.value |= (
+      require((.branch | type == "string") and (.cut_sha | sha) and
+          (.last_source_sha | sha) and (.enforcement_sha256 | checksum) and
+          (.creation | type == "object") and (.creation.source_sha == .cut_sha) and
+          (.creation.creation_id | reference) and (.creation.policy_sha | sha) and
+          (.updates | type == "array"); "invalid durable line identity")
+      | .updates |= map(validate_review)))
+  | require(all(.lines | to_entries[]; (.key | line_name) and .value.branch == "release/" + .key);
+      "durable line key mismatch")
+  | .requests |= with_entries(.value |= (
+      require((.request_key | checksum) and (.source_sha | sha) and (.policy_sha | sha) and
+          (.branch | type == "string") and (.event | type == "object") and
+          (.event.source_sha == .source_sha and .event.branch == .branch);
+          "invalid durable request identity")
+      | require(.status as $s | publication_statuses | index($s) != null;
+          "invalid durable request status")
+      | require(.status == "queued" or (.version | semver); "allocated request lacks a version")
+      | require(.status == "queued" or (.proposal.source_sha == .source_sha and
+          .proposal.version == .version and .proposal.request_key == .request_key);
+          "allocated request/proposal mismatch")
+      | require((.status | IN("queued", "admitted", "failed", "superseded")) or
+          ((.candidate_sha256 | checksum) and (.candidate.image_id | type == "string"));
+          "qualified request lacks retained candidate identity")
+      | require((.status | IN("queued", "admitted", "failed", "superseded", "qualified")) or
+          (.tag_object_sha | sha); "tagged request lacks tag proof")))
+  | require(all(.requests | to_entries[]; .key == .value.request_key); "request key mismatch")
+  | require([.requests[] | select(.status != "queued" and .status != "superseded") |
+      .branch + ":" + .version] | length == (unique | length); "duplicate allocated version");
+
+# API responses must come from the trusted collector. Ruleset detail is needed
+# because effective branch rules alone do not expose bypass permissions.
+def validate_merge_rules($required):
+  . as $proof
+  | require(.effective | type == "array"; "missing effective branch rules")
+  | require(.rulesets | type == "array" and length > 0; "missing ruleset detail")
+  | require(all(.rulesets[]; .enforcement == "active" and .target == "branch" and
+      has("bypass_actors") and .bypass_actors == []); "inactive or bypassable merge rules")
+  | require(all(.effective[]; .ruleset_id as $id | any($proof.rulesets[]; .id == $id));
+      "effective rule has no verified ruleset detail")
+  | require(any(.effective[]; .type == "deletion") and
+      any(.effective[]; .type == "non_fast_forward") and
+      any(.effective[]; .type == "required_linear_history"); "missing branch history protections")
+  | require(any(.effective[]; .type == "pull_request" and
+      .parameters.required_approving_review_count >= 1 and
+      .parameters.dismiss_stale_reviews_on_push == true and
+      .parameters.required_review_thread_resolution == true and
+      .parameters.allowed_merge_methods == ["squash"]); "missing required PR review protections")
+  | require(any(.effective[]; .type == "required_status_checks" and
+      .parameters.strict_required_status_checks_policy == true and
+      all($required[]; . as $required |
+        any($proof.effective[] | select(.type == "required_status_checks") |
+          .parameters.required_status_checks[];
+          .context == $required.context and .integration_id == $required.integration_id)));
+      "missing required status checks")
+  | true;
+
+def proposer_state($ledger; $line):
+  ($ledger.lines[$line] // null) as $stored
+  | {schema_version: 1, repository: $ledger.repository,
+      creation: $stored.creation, updates: ($stored.updates // []),
+      requests: [$ledger.requests[] | select(.branch == "release/" + $line) |
+        select(.status | IN("admitted", "qualified", "failed", "superseded")) |
+        {mode: "branch", repository: $ledger.repository, branch, source_sha,
+          policy_sha: .proposal.original_policy_sha, request_key, version,
+          status: (if .status == "failed" then "failed"
+            elif .status == "superseded" then "superseded" else "proposed" end)}],
+      releases: [$ledger.requests[] | select(.branch == "release/" + $line) |
+        select(.tag_object_sha != null) |
+        {branch, source_sha, version, request_key, tag_object_sha,
+          policy_sha: .proposal.original_policy_sha,
+          status: (if .status == "complete" then "complete" else "incomplete" end)}]};

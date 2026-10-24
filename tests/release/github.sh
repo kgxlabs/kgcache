@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Git history and API fixtures stay local. No project refs or releases change.
 set -euo pipefail
-source "${BASH_SOURCE[0]%/*}/../../tools/release/common.sh"
-source "${BASH_SOURCE[0]%/*}/../../tools/release/candidate-common.sh"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    source "${BASH_SOURCE[0]%/*}/../../tools/release/common.sh"
+    source "${BASH_SOURCE[0]%/*}/../../tools/release/candidate-common.sh"
+fi
 
 github_test_workspace=
 github_test_logs=
@@ -357,4 +359,6 @@ main() {
     printf 'GitHub release contracts passed. No external requests or production refs were used.\n'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

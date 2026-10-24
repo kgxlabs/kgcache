@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "repository": "kgxlabs/kgcache",
+  "enabled": false,
+  "publisher_app_id": null,
+  "tag_ruleset_id": null,
+  "enforcement_since": null,
+  "state_ref": "refs/heads/release-state",
+  "state_root_sha": null,
+  "registry_repository": null,
+  "rehearsal_registry_repository": "docker.io/kgxlabs/kgcachetesting",
+  "required_checks": {
+    "main": [
+      {"context": "PR title", "integration_id": 15368},
+      {"context": "Commit messages", "integration_id": 15368},
+      {"context": "Unit and process integration tests", "integration_id": 15368},
+      {"context": "Shell lint", "integration_id": 15368},
+      {"context": "Native Linux amd64 release on Bookworm", "integration_id": 15368},
+      {"context": "go-redis and node-redis tests / go-redis v9.22.0 tests", "integration_id": 15368},
+      {"context": "go-redis and node-redis tests / go-redis v9.23.0 tests", "integration_id": 15368},
+      {"context": "go-redis and node-redis tests / node-redis 6.2.1 tests", "integration_id": 15368},
+      {"context": "go-redis and node-redis tests / node-redis 6.2.0 tests", "integration_id": 15368}
+    ],
+    "release": [
+      {"context": "Maintenance compatibility", "integration_id": 15368}
+    ]
+  }
+}

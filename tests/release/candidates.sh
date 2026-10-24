@@ -37,19 +37,23 @@ create_fixture() {
     mkdir -p "$bundle/evidence/logs" "$bundle/evidence/reports" "$raw/layer"
     # The caller may have a shallow, detached PR checkout with no origin/main.
     # Keep proposal history and refs inside the fixture, like the saved image.
-    git init --quiet --initial-branch=main "$repo"
-    cp "$RELEASE_ROOT/.gitignore" "$repo/.gitignore"
-    printf '.{\n    .version = "0.0.0",\n}\n' > "$repo/build.zig.zon"
-    git -C "$repo" add .gitignore build.zig.zon
-    git -C "$repo" -c core.hooksPath=/dev/null \
-        -c user.name='Candidate fixture' -c user.email=fixture@example.invalid \
-        -c commit.gpgsign=false commit --quiet -m 'chore: create candidate fixture'
-    revision=$(git -C "$repo" rev-parse HEAD)
-    git -C "$repo" update-ref refs/remotes/origin/main "$revision"
-    bash tools/release/propose.sh --repo "$repo" --repository fixture/kgcache \
-        --source "$revision" --version 0.2.0-rc.1+fixture.001 > "$bundle/proposal.json"
+    if [[ -n "${1:-}" ]]; then
+        cp "$1" "$bundle/proposal.json"
+    else
+        git init --quiet --initial-branch=main "$repo"
+        cp "$RELEASE_ROOT/.gitignore" "$repo/.gitignore"
+        printf '.{\n    .version = "0.0.0",\n}\n' > "$repo/build.zig.zon"
+        git -C "$repo" add .gitignore build.zig.zon
+        git -C "$repo" -c core.hooksPath=/dev/null \
+            -c user.name='Candidate fixture' -c user.email=fixture@example.invalid \
+            -c commit.gpgsign=false commit --quiet -m 'chore: create candidate fixture'
+        revision=$(git -C "$repo" rev-parse HEAD)
+        git -C "$repo" update-ref refs/remotes/origin/main "$revision"
+        bash tools/release/propose.sh --repo "$repo" --repository fixture/kgcache \
+            --source "$revision" --version 0.2.0-rc.1+fixture.001 > "$bundle/proposal.json"
+    fi
     printf 'synthetic candidate fixture\n' > "$raw/layer/fixture.txt"
-    tar -cf "$raw/layer.tar" -C "$raw/layer" fixture.txt
+    COPYFILE_DISABLE=1 tar --no-xattrs -cf "$raw/layer.tar" -C "$raw/layer" fixture.txt
     layer_sha=$(release_sha256 "$raw/layer.tar")
     jq -n \
         --slurpfile proposal "$bundle/proposal.json" \
@@ -63,7 +67,7 @@ create_fixture() {
     mv "$raw/layer.tar" "$raw/$layer_sha/layer.tar"
     jq -n --arg config "$config_sha.json" --arg layer "$layer_sha/layer.tar" \
         '[{Config: $config, RepoTags: null, Layers: [$layer]}]' > "$raw/manifest.json"
-    tar -cf "$candidate_test_workspace/fixture.tar" -C "$raw" manifest.json "$config_sha.json" "$layer_sha/layer.tar"
+    COPYFILE_DISABLE=1 tar --no-xattrs -cf "$candidate_test_workspace/fixture.tar" -C "$raw" manifest.json "$config_sha.json" "$layer_sha/layer.tar"
     gzip -n -c "$candidate_test_workspace/fixture.tar" > "$bundle/kgcache-linux-amd64.docker.tar.gz"
     jq -n \
         --slurpfile proposal "$bundle/proposal.json" \
@@ -356,7 +360,7 @@ main() {
     candidate_test_workspace=$(mktemp -d "$RELEASE_ROOT/.zig-cache/candidate-contracts.XXXXXX")
     candidate_test_logs=$(mktemp -d "$RELEASE_ROOT/test-artifacts/release/candidate-contracts/run.XXXXXX")
     trap cleanup_candidate_tests EXIT
-    create_fixture
+    create_fixture ''
     mkdir -p "$candidate_test_workspace/cache/.client-tools/go" "$candidate_test_workspace/cache/.client-tools/node" \
         "$candidate_test_workspace/cache/.zig-cache/toolchains"
     fixture_revision=$(git -C "$candidate_test_workspace/repository" rev-parse HEAD)
@@ -377,4 +381,6 @@ main() {
     printf 'Candidate contract checks passed. Evidence: %s\n' "$candidate_test_logs"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
