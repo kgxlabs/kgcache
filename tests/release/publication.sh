@@ -6,6 +6,10 @@ source "${BASH_SOURCE[0]%/*}/github.sh"
 
 publication_workspace=
 publication_remote=
+publication_registry_container=
+publication_registry=
+publication_key=
+publication_transport=
 
 setup_git_fault() {
     local real_git
@@ -43,6 +47,15 @@ cleanup_publication_tests() {
     local exit_status=$?
 
     trap - EXIT
+    if [[ -n "$publication_registry_container" ]]; then
+        if [[ "$exit_status" != 0 ]]; then
+            timeout 10s docker logs --tail 40 "$publication_registry_container" >&2 || true
+        fi
+        timeout 15s docker rm --force "$publication_registry_container" > /dev/null || exit_status=1
+    fi
+    if [[ -n "$publication_transport" ]] && timeout 10s docker image inspect "$publication_transport" > /dev/null 2>&1; then
+        timeout 15s docker image rm "$publication_transport" > /dev/null || exit_status=1
+    fi
     [[ -z "$publication_workspace" ]] || rm -rf -- "$publication_workspace"
     exit "$exit_status"
 }
@@ -104,6 +117,7 @@ check_publication_requests() {
     coordinate_fixture enqueue --event "$github_test_workspace/create.json" \
         --event-name push --source "$fixture_cut" > "$publication_workspace/request.json"
     key=$(jq -r '.request_key' "$publication_workspace/request.json")
+    publication_key=$key
     first_head=$(git -C "$publication_remote" rev-parse refs/heads/release-state)
     coordinate_fixture enqueue --event "$github_test_workspace/ui-create.json" \
         --event-name create --source "$fixture_cut" > "$publication_workspace/duplicate.json"
@@ -139,6 +153,104 @@ check_publication_requests() {
     printf 'Passed: durable identity, source ordering, qualified tag, lost push response, and retry\n'
 }
 
+publish_fixture() {
+    local operation=$1
+
+    shift
+    bash tools/release/publish.sh "$operation" --fixture --remote "$publication_remote" \
+        --repository fixture/kgcache --request "$publication_key" \
+        --registry "$publication_registry" \
+        --candidate "$candidate_test_workspace/good" "$@"
+}
+
+seed_registry_transport() {
+    local archive="$publication_workspace/seed" path checksum bytes location base separator
+
+    mkdir -p "$archive"
+    candidate_check_archive "$candidate_test_workspace/good" "$archive"
+    base="http://${publication_registry%%/*}/v2/${publication_registry#*/}"
+    : > "$archive/layers.jsonl"
+    # This is a test seed for Docker Desktop's split host/daemon loopback.
+    # It also exercises recovery when transport succeeded before a checkpoint.
+    jq -r '.[0].Config, .[0].Layers[]' "$archive/manifest.json" > "$archive/blobs"
+    while IFS= read -r path; do
+        tar -xOf "$archive/image.tar" "$path" > "$archive/blob"
+        checksum=$(release_sha256 "$archive/blob")
+        bytes=$(candidate_file_size "$archive/blob")
+        "$GITHUB_FIXTURE_REAL_CURL" --fail --silent --show-error --max-time 30 \
+            --request POST --dump-header "$archive/headers" --output /dev/null "$base/blobs/uploads/"
+        location=$(sed -nE 's/^[Ll]ocation: (.*)/\1/p' "$archive/headers" | tr -d '\r')
+        [[ "$location" == "$base/blobs/uploads/"* ]] || release_fail 'unexpected fixture upload location'
+        separator='?'
+        [[ "$location" != *\?* ]] || separator='&'
+        "$GITHUB_FIXTURE_REAL_CURL" --fail --silent --show-error --max-time 30 \
+            --request PUT --header 'Content-Type: application/octet-stream' \
+            --data-binary "@$archive/blob" --output /dev/null "$location${separator}digest=sha256:$checksum"
+        if [[ "$path" == */layer.tar ]]; then
+            jq -cn --arg digest "sha256:$checksum" --argjson size "$bytes" \
+                '{mediaType:"application/vnd.oci.image.layer.v1.tar", digest:$digest, size:$size}' >> "$archive/layers.jsonl"
+        else
+            jq -n --arg digest "sha256:$checksum" --argjson size "$bytes" \
+                '{mediaType:"application/vnd.oci.image.config.v1+json", digest:$digest, size:$size}' > "$archive/config-descriptor.json"
+        fi
+    done < "$archive/blobs"
+    jq -sn --slurpfile config "$archive/config-descriptor.json" --slurpfile layers "$archive/layers.jsonl" \
+        '{schemaVersion:2, mediaType:"application/vnd.oci.image.manifest.v1+json", config:$config[0], layers:$layers}' \
+        > "$archive/registry-manifest.json"
+    "$GITHUB_FIXTURE_REAL_CURL" --fail --silent --show-error --max-time 30 --request PUT \
+        --header 'Content-Type: application/vnd.oci.image.manifest.v1+json' \
+        --data-binary "@$archive/registry-manifest.json" --output /dev/null \
+        "$base/manifests/candidate-$publication_key"
+}
+
+check_registry_and_api() {
+    local port attempt digest image summary host_os
+
+    host_os=$(uname -s)
+    publication_registry_container="kgcache-registry-test-${publication_workspace##*.}"
+    timeout 120s docker run --detach --name "$publication_registry_container" \
+        --publish 127.0.0.1::5000 \
+        --env REGISTRY_LOG_LEVEL=error --env OTEL_TRACES_EXPORTER=none \
+        --tmpfs /var/lib/registry:rw,mode=0755 \
+        registry:3@sha256:01cd312e67026f06f5d89c3e133a4a9adc7cb9eeb9b1194e0b2954dfd770efd2 > /dev/null
+    port=$(docker port "$publication_registry_container" 5000/tcp)
+    port="127.0.0.1:${port##*:}"
+    publication_registry="$port/fixture/kgcache"
+    publication_transport="$publication_registry:candidate-$publication_key"
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        if "$GITHUB_FIXTURE_REAL_CURL" --fail --silent --max-time 2 "http://$port/v2/" > /dev/null; then break; fi
+        sleep 0.1
+    done
+    "$GITHUB_FIXTURE_REAL_CURL" --fail --silent --max-time 2 "http://$port/v2/" > /dev/null
+    if [[ "$host_os" == Darwin ]]; then seed_registry_transport; fi
+    publish_fixture upload > "$publication_workspace/uploaded.json"
+    publish_fixture upload > "$publication_workspace/upload-retry.json"
+    cmp "$publication_workspace/uploaded.json" "$publication_workspace/upload-retry.json"
+    expect_github_failure wrong-registry 'publication destination differs' \
+        bash tools/release/publish.sh verify --request "$publication_key" \
+        --registry docker.io/fixture/different --record "$publication_workspace/uploaded.json" \
+        --candidate "$candidate_test_workspace/good" --output "$publication_workspace/wrong-destination"
+    digest=$(jq -r '.registry.uploaded.digest' "$publication_workspace/uploaded.json")
+    image=$(jq -r '.candidate.image_id' "$publication_workspace/uploaded.json")
+    mkdir "$publication_workspace/verification"
+    jq -n --arg image "$image" '{passed:true, image_id:$image, synthetic:true, qualified_amd64:false}' \
+        > "$publication_workspace/verification/service.json"
+    summary=$(release_sha256 "$publication_workspace/verification/service.json")
+    jq -n --slurpfile request "$publication_workspace/uploaded.json" --arg sha "$summary" \
+        '{passed:true, synthetic:true, native_amd64:false, digest:$request[0].registry.uploaded.digest,
+          request_key:$request[0].request_key, candidate_sha256:$request[0].candidate_sha256,
+          image_id:$request[0].candidate.image_id, engine_id:"synthetic-separate-engine", service_sha256:$sha}' \
+        > "$publication_workspace/verification/verification.json"
+    # Start with one already assigned fixed reference to test partial recovery.
+    timeout 60s docker buildx imagetools create --prefer-index=false \
+        --tag "$publication_registry:0.2.0" "$publication_registry@$digest" > /dev/null
+    publish_fixture promote --verification "$publication_workspace/verification" > "$publication_workspace/promoted.json"
+    publish_fixture promote --verification "$publication_workspace/verification" > "$publication_workspace/promote-retry.json"
+    cmp "$publication_workspace/promoted.json" "$publication_workspace/promote-retry.json"
+    printf 'Passed: real local registry digest/config identity, upload retry, fixed promotion, and partial recovery\n'
+
+}
+
 check_publication_protections() {
     mutate_api merge-ruleset.json '.bypass_actors = [{actor_id: 1, actor_type: "RepositoryRole", bypass_mode: "always"}]'
     expect_github_failure bypassable 'bypassable merge rules' coordinate_fixture enqueue \
@@ -161,7 +273,11 @@ check_publication_protections() {
 }
 
 main() {
-    [[ $# == 0 ]] || release_fail 'usage: bash tests/release/publication.sh'
+    local docker_checks=false
+
+    if [[ "${1:-}" == --docker && $# == 1 ]]; then
+        docker_checks=true
+    elif [[ $# != 0 ]]; then release_fail 'usage: bash tests/release/publication.sh [--docker]'; fi
     release_require_commands git jq timeout curl mktemp tar gzip cmp
     trap cleanup_publication_tests EXIT
     publication_workspace=$(mktemp -d "${TMPDIR:-/tmp}/kgcache-publication-tests.XXXXXX")
@@ -175,6 +291,7 @@ main() {
     setup_publication_rules
     check_publication_requests
     check_publication_protections
+    if [[ "$docker_checks" == true ]]; then check_registry_and_api; fi
     printf 'Publication contracts passed with local Git fixtures. No external writes.\n'
 }
 

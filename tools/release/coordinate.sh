@@ -103,7 +103,7 @@ coordinate_key() {
 
 main() {
     local operation=${1:-} remote='' state_ref=refs/heads/release-state fixture=false
-    local repository='' event='' event_name='' source='' output='' request='' candidate='' failure='' artifact='' transfer=''
+    local repository='' event='' event_name='' source='' output='' request='' candidate='' failure='' artifact='' checkpoint_file='' transfer=''
     local expected key branch line policy status version tag object candidate_sha now before earlier
     local fixture_path selected
 
@@ -111,7 +111,7 @@ main() {
     shift
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --remote | --repository | --event | --event-name | --source | --output | --request | --candidate | --failure | --artifact-id | --transfer)
+            --remote | --repository | --event | --event-name | --source | --output | --request | --candidate | --failure | --artifact-id | --checkpoint | --transfer)
                 release_require_value "$1" "${2:-}"
                 case "$1" in
                     --remote) remote=$2 ;;
@@ -124,6 +124,7 @@ main() {
                     --candidate) candidate=$2 ;;
                     --failure) failure=$2 ;;
                     --artifact-id) artifact=$2 ;;
+                    --checkpoint) checkpoint_file=$2 ;;
                     --transfer) transfer=$2 ;;
                 esac
                 shift 2
@@ -139,7 +140,7 @@ main() {
     release_require_sha256
     [[ -n "$remote" && "$repository" =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] ||
         release_fail 'remote and lowercase repository are required'
-    case "$operation" in init | enqueue | allocate | qualify | tag | status | fail) ;;
+    case "$operation" in init | enqueue | allocate | qualify | tag | status | fail | checkpoint) ;;
     *) release_fail 'unsupported coordinate operation' ;;
     esac
     if [[ "$fixture" == true ]]; then
@@ -257,7 +258,27 @@ main() {
         --arg line "$line" 'include "policy"; validate_policy($repository) |
         any(.lines[]; .line == $line and .status != "retired")' \
         "$coordinate_workspace/policy.json" > /dev/null || release_fail 'line is not currently authorized'
-    if [[ "$operation" == allocate ]]; then
+    if [[ "$operation" == checkpoint ]]; then
+        version=$(jq -r --arg key "$request" '.requests[$key].version' "$coordinate_workspace/state.json")
+        jq -e --arg line "$line" --arg version "$version" \
+            'any(.lines[]; .line == $line and (.blocked_versions | index($version)) == null)' \
+            "$coordinate_workspace/policy.json" > /dev/null || release_fail 'version was blocked'
+        tag="v$version"
+        object=$(coordinate_git ls-remote --refs "$remote" "refs/tags/$tag")
+        jq -e --arg key "$request" --arg object "${object%%$'\t'*}" \
+            '.requests[$key].tag_object_sha == $object' "$coordinate_workspace/state.json" > /dev/null ||
+            release_fail 'reserved tag is missing or changed'
+        [[ -f "$checkpoint_file" && ! -L "$checkpoint_file" ]] || release_fail 'checkpoint file is required'
+        candidate_sha=$(candidate_file_size "$checkpoint_file")
+        [[ "$candidate_sha" -le 1048576 ]] || release_fail 'checkpoint exceeds 1 MiB'
+        jq -e -L "$RELEASE_ROOT/tools/release" --arg key "$request" --argjson fixture "$fixture" \
+            --slurpfile change "$checkpoint_file" \
+            'include "policy"; include "publication"; require($fixture or $change[0].phase != "verified" or
+               ($change[0].value.native_amd64 == true and $change[0].value.synthetic == false);
+               "production requires native registry verification") |
+             checkpoint($key; $change[0].phase; $change[0].value)' \
+            "$coordinate_workspace/state.json" > "$coordinate_workspace/next.json"
+    elif [[ "$operation" == allocate ]]; then
         if [[ "$status" != queued && "$status" != failed ]]; then
             [[ -z "$output" ]] || coordinate_export "$request" "$output"
             jq --arg key "$request" '.requests[$key]' "$coordinate_workspace/state.json"

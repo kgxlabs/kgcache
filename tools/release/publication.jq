@@ -117,3 +117,26 @@ def proposer_state($ledger; $line):
         {branch, source_sha, version, request_key, tag_object_sha,
           policy_sha: .proposal.original_policy_sha,
           status: (if .status == "complete" then "complete" else "incomplete" end)}]};
+
+# Freeze each operation's intent and its read-back result separately.
+def checkpoint($key; $phase; $value):
+  .requests[$key] as $request
+  | ({registry_intent: ["registry", "intent"], uploaded: ["registry", "uploaded"],
+      verified: ["registry", "verified"], fixed: ["registry", "fixed"]}[$phase]) as $path
+  | require($path != null; "unknown publication checkpoint")
+  | require($request.tag_object_sha | sha; "publication requires the reserved tag")
+  | require($value | type == "object"; "checkpoint must be an object")
+  | require(($request | getpath($path)) == null or ($request | getpath($path)) == $value;
+      "checkpoint differs from recorded operation; reconcile original identity")
+  | require($phase != "uploaded" or $request.registry.intent != null; "missing upload intent")
+  | require($phase != "verified" or
+      ($request.registry.uploaded.digest == $value.digest and $value.passed == true and
+       $value.image_id == $request.candidate.image_id and
+       $value.candidate_sha256 == $request.candidate_sha256 and
+       $value.engine_id != $request.registry.intent.engine_id); "invalid clean-pull verification")
+  | require($phase != "fixed" or
+      ($request.registry.verified.passed == true and $value.digest == $request.registry.uploaded.digest);
+      "fixed references require verified uploaded content")
+  | .requests[$key] |= setpath($path; $value)
+  | if $phase == "fixed" and .requests[$key].status == "tagged" then .requests[$key].status = "image"
+    else . end;
