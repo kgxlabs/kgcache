@@ -17,6 +17,11 @@ Git tags, GitHub releases, or registry uploads. The development version in
 4. Optionally set `release_line` or a complete SemVer `version`.
 5. Check source qualification and saved-image transfer verification.
 
+Confirm that both jobs ran and passed, and that **Verify release workflow
+completion** passed. A skipped qualification or transfer makes that final check
+fail. Publishing jobs stay skipped for manual previews. After workflow changes,
+start a new manual run to use the merged workflow definition.
+
 ```sh
 gh workflow run release.yml --ref main \
   -f source_ref=YOUR_WORKING_BRANCH \
