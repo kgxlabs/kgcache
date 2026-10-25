@@ -208,7 +208,16 @@
         "object_sha": "870a1c5e12a2193862b301ab027f89d9a8494e10",
         "epoch": "1792949886"
       },
-      "tag_object_sha": "870a1c5e12a2193862b301ab027f89d9a8494e10"
+      "tag_object_sha": "870a1c5e12a2193862b301ab027f89d9a8494e10",
+      "registry": {
+        "intent": {
+          "repository": "docker.io/kgxlabs/kgcache",
+          "transport": "candidate-7e6c0742e99bdff138ea540da01c4d189c2515ef2e0b4cd6d6c334247bcde183",
+          "engine_id": "6134b6ae-8eb1-4f62-889e-a360c80bcfbf",
+          "image_id": "sha256:8cedbafd3e460ad35712ae59b09684fc69be1dcc2678f64a3cd464026aad381f",
+          "candidate_sha256": "58197afb96224ba9c1abe87201c90e8ee0eb132ec6e218490a679d49560d4243"
+        }
+      }
     }
   },
   "aliases": {}
