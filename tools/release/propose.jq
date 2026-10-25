@@ -10,16 +10,6 @@ def next_regular($line; $releases):
   | if $last == null then $line + ".0"
     else ($last | semver_parts) | .major + "." + .minor + "." + (.patch | numeric_increment) end;
 
-def next_candidate($target; $prefix; $releases):
-  ("0.0.0-" + $prefix + ".1" | semver_parts | .prerelease[:-1]) as $prefix_parts
-  | ($releases | map(.version | semver_parts | select(.prerelease != null)
-       | select((.major + "." + .minor + "." + .patch) == $target)
-       | select(.prerelease[:-1] == $prefix_parts)
-       | .prerelease[-1] | select(test("\\A(0|[1-9][0-9]*)\\z")))) as $counters
-  | (reduce $counters[] as $counter ("0";
-       if numeric_compare($counter; .) > 0 then $counter else . end) | numeric_increment) as $next
-  | $target + "-" + $prefix + "." + $next;
-
 $policy[0] as $policy
 | $state[0] as $state
 | $event[0] as $event

@@ -4,17 +4,31 @@
 # shellcheck disable=SC2154
 
 merged_pr_fixture() {
-    local number=$1 branch=$2 version_message=$3 source
+    local number=$1 branch=$2 version_message=$3 main_fix=${4:-} source parent
 
     if git -C "$fixture_repo" show-ref --verify --quiet "refs/heads/$branch"; then
         git -C "$fixture_repo" switch --quiet "$branch"
     else
         git -C "$fixture_repo" switch --quiet -c "$branch" main
     fi
-    printf '%s\n' "$number" > "$fixture_repo/release-request.txt"
-    source=$(fixture_commit "$version_message")
+    if [[ -n "$main_fix" ]]; then
+        git -C "$fixture_repo" cherry-pick -x "$main_fix" > /dev/null
+        source=$(git -C "$fixture_repo" rev-parse HEAD)
+    else
+        printf '%s\n' "$number" > "$fixture_repo/release-request.txt"
+        source=$(fixture_commit "$version_message")
+    fi
+    parent=$(git -C "$fixture_repo" rev-parse "$source^")
+    if ! jq -e --arg path "/repos/fixture/kgcache/commits/$parent/pulls?per_page=100" \
+        'has($path)' "$fixture_api/routes.json" > /dev/null; then
+        printf '[]\n' > "$fixture_api/associated-$parent.json"
+        route "/repos/fixture/kgcache/commits/$parent/pulls?per_page=100" "associated-$parent.json"
+    fi
     fixture_pr "$number" "$source" "$branch" 2026-10-20T00:00:10Z
-    jq '.title = "chore(release): publish candidate" | .body = "Candidate notes from the PR." |
+    jq --arg main "$main_fix" '
+        .title = (if $main == "" then "chore(release): publish candidate" else "fix: correct released behavior" end) |
+        .body = ("Candidate notes from the PR." +
+          if $main == "" then "" else "\n\n(cherry picked from commit " + $main + ")" end) |
         .head.repo = {full_name:"fixture/kgcache"}' "$fixture_api/pr-$number.json" \
         > "$fixture_api/release-pr.json"
     cp "$fixture_api/release-pr.json" "$fixture_api/pr-$number.json"
@@ -110,38 +124,141 @@ check_merged_release_prs() {
     printf 'Passed: merged versioned PRs, automatic state, frozen notes, exact versions, and immutable retry\n'
 }
 
+check_rc_release_prs() {
+    local original_repo=$fixture_repo
+    local fixture_repo="$publication_workspace/rc-repo"
+    local publication_remote="$publication_workspace/rc-remote.git"
+    local candidate_test_workspace="$publication_workspace/rc-candidate"
+    local first_source second_source source first_key second_key main_fix saved_head actual_head
+
+    git clone --quiet "$original_repo" "$fixture_repo"
+    git -C "$fixture_repo" config user.name 'Release fixture'
+    git -C "$fixture_repo" config user.email fixture@example.invalid
+    git -C "$fixture_repo" config commit.gpgsign false
+    git -C "$fixture_repo" config core.hooksPath /dev/null
+    git -C "$fixture_repo" switch --quiet main
+    git -C "$fixture_repo" rm --quiet .github/release-lines.json
+    fixture_commit 'chore: remove the release registry' > /dev/null
+    git clone --quiet --bare "$fixture_repo" "$publication_remote"
+    first_source=$(merged_pr_fixture 31 release/0.1.0-rc 'chore(release): prepare candidate')
+    git -C "$fixture_repo" switch --quiet main
+    printf 'main-first correction\n' > "$fixture_repo/rc-fix.txt"
+    main_fix=$(fixture_commit 'fix: correct released behavior')
+    fixture_pr 32 "$main_fix" main 2026-10-20T00:00:05Z
+    git -C "$fixture_repo" push --quiet "$publication_remote" main
+    git -C "$fixture_repo" update-ref refs/remotes/origin/main "$main_fix"
+    second_source=$(merged_pr_fixture 33 release/0.1.0-rc 'fix: correct released behavior' "$main_fix")
+    expect_github_failure rc-admission-order 'previous RC merge has no stored request' coordinate_fixture enqueue \
+        --event "$publication_workspace/release-event-33.json" --event-name pull_request --source "$second_source"
+    coordinate_fixture enqueue --event "$publication_workspace/release-event-31.json" \
+        --event-name pull_request --source "$first_source" > "$publication_workspace/rc-first.json"
+    first_key=$(jq -r .request_key "$publication_workspace/rc-first.json")
+    jq -e '.version == "0.1.0-rc.1" and .event.version == .version and .status == "queued"' \
+        "$publication_workspace/rc-first.json" > /dev/null
+    jq --arg base "$first_source" '.pull_request.base.sha = $base' \
+        "$publication_workspace/release-event-33.json" > "$publication_workspace/rc-maintenance.json"
+    bash "$RELEASE_ROOT/tools/release/check-maintenance.sh" --repo "$fixture_repo" \
+        --event "$publication_workspace/rc-maintenance.json"
+    mutate_api pr-32.json '.merged_at = "2026-10-20T00:00:11Z"'
+    expect_github_failure rc-main-first 'not merged on main first' coordinate_fixture enqueue \
+        --event "$publication_workspace/release-event-33.json" --event-name pull_request --source "$second_source"
+    restore_api pr-32.json
+    coordinate_fixture enqueue --event "$publication_workspace/release-event-33.json" \
+        --event-name pull_request --source "$second_source" > "$publication_workspace/rc-second.json"
+    second_key=$(jq -r .request_key "$publication_workspace/rc-second.json")
+    jq -e '.version == "0.1.0-rc.2" and .event.branch == "release/0.1.0-rc"' \
+        "$publication_workspace/rc-second.json" > /dev/null
+    expect_github_failure rc-source-order 'earlier source is unresolved' \
+        coordinate_fixture allocate --request "$second_key"
+
+    coordinate_fixture allocate --request "$first_key" > "$publication_workspace/rc-first-allocated.json"
+    printf 'synthetic qualification failure\n' > "$publication_workspace/rc-failure.txt"
+    coordinate_fixture fail --request "$first_key" --failure "$publication_workspace/rc-failure.txt" > /dev/null
+    coordinate_fixture allocate --request "$first_key" > "$publication_workspace/rc-first-retry.json"
+    jq -e --slurpfile original "$publication_workspace/rc-first-allocated.json" \
+        '.version == $original[0].version and .proposal == $original[0].proposal and .status == "admitted"' \
+        "$publication_workspace/rc-first-retry.json" > /dev/null
+    coordinate_fixture fail --request "$first_key" --failure "$publication_workspace/rc-failure.txt" > /dev/null
+    saved_head=$(git -C "$publication_remote" rev-parse refs/heads/release-state)
+    jq '.pull_request.body = "Edited after admission."' "$publication_workspace/release-event-31.json" \
+        > "$publication_workspace/rc-redelivery.json"
+    coordinate_fixture enqueue --event "$publication_workspace/rc-redelivery.json" \
+        --event-name pull_request --source "$first_source" > "$publication_workspace/rc-redelivered.json"
+    jq -e '.version == "0.1.0-rc.1" and .event.notes == "Candidate notes from the PR."' \
+        "$publication_workspace/rc-redelivered.json" > /dev/null
+    actual_head=$(git -C "$publication_remote" rev-parse refs/heads/release-state)
+    [[ "$saved_head" == "$actual_head" ]]
+
+    coordinate_fixture allocate --request "$second_key" --output "$publication_workspace/rc-selection" \
+        > "$publication_workspace/rc-second-allocated.json"
+    jq -e --arg source "$second_source" '.version == "0.1.0-rc.2" and .source_sha == $source and
+        .proposal.branch == "release/0.1.0-rc" and .proposal.intended_tag == "v0.1.0-rc.2" and
+        .proposal.image.version_tag == "0.1.0-rc.2"' "$publication_workspace/rc-second-allocated.json" > /dev/null
+    candidate_validate_request "$publication_workspace/rc-selection/proposal.json" \
+        "$publication_workspace/rc-selection/github-evidence.json"
+    jq '.branch = "release/0.2.0-rc"' "$publication_workspace/rc-selection/proposal.json" \
+        > "$publication_workspace/rc-wrong-series.json"
+    expect_github_failure rc-candidate-series 'line/version mismatch' \
+        jq -e -L "$RELEASE_ROOT/tools/release" 'include "candidate"; validate_candidate_proposal' \
+        "$publication_workspace/rc-wrong-series.json"
+    mkdir -p "$candidate_test_workspace"
+    create_fixture "$publication_workspace/rc-selection/proposal.json"
+    coordinate_fixture qualify --request "$second_key" --candidate "$candidate_test_workspace/good" > /dev/null
+    coordinate_fixture tag --request "$second_key" --candidate "$candidate_test_workspace/good" \
+        > "$publication_workspace/rc-tagged.json"
+    actual_head=$(git -C "$publication_remote" rev-parse 'refs/tags/v0.1.0-rc.2^{commit}')
+    [[ "$second_source" == "$actual_head" ]]
+    source=$(merged_pr_fixture 34 release/0.1.0-rc.2 'chore: duplicate exact candidate')
+    expect_github_failure rc-exact-collision 'version already belongs' coordinate_fixture enqueue \
+        --event "$publication_workspace/release-event-34.json" --event-name pull_request --source "$source"
+    source=$(merged_pr_fixture 35 release/0.1.0-rc 'chore(release): prepare another candidate')
+    coordinate_fixture enqueue --event "$publication_workspace/release-event-35.json" \
+        --event-name pull_request --source "$source" > "$publication_workspace/rc-third.json"
+    jq -e '.version == "0.1.0-rc.3"' "$publication_workspace/rc-third.json" > /dev/null
+    printf 'Passed: one RC branch, main-first backport, queued numbers, failed retry, frozen notes, and candidate tag\n'
+}
+
 check_merged_release_publication() {
-    local publication_remote="$publication_workspace/versioned-remote.git"
-    local candidate_test_workspace="$publication_workspace/versioned-candidate"
-    local publication_key image summary previous_latest actual_latest
+    local fixture_name=${1:-versioned} tag=${2:-v0.3.0-rc.1}
+    local publication_remote="$publication_workspace/$fixture_name-remote.git"
+    local candidate_test_workspace="$publication_workspace/$fixture_name-candidate"
+    local result="$publication_workspace/$fixture_name"
+    local publication_key image summary previous_latest actual_latest next_key
 
     # The publication helpers consume this local through Bash's dynamic scope.
     # shellcheck disable=SC2034
-    publication_key=$(jq -r .request_key "$publication_workspace/versioned-tagged.json")
+    publication_key=$(jq -r .request_key "$result-tagged.json")
     previous_latest=$(jq -r .latest "$publication_workspace/http/state.json")
     seed_registry_transport
-    publish_fixture upload > "$publication_workspace/versioned-uploaded.json"
-    image=$(jq -r '.candidate.image_id' "$publication_workspace/versioned-uploaded.json")
-    mkdir "$publication_workspace/versioned-verification"
+    publish_fixture upload > "$result-uploaded.json"
+    image=$(jq -r '.candidate.image_id' "$result-uploaded.json")
+    mkdir "$result-verification"
     jq -n --arg image "$image" '{passed:true,image_id:$image,synthetic:true,qualified_amd64:false}' \
-        > "$publication_workspace/versioned-verification/service.json"
-    summary=$(release_sha256 "$publication_workspace/versioned-verification/service.json")
-    jq -n --slurpfile request "$publication_workspace/versioned-uploaded.json" --arg sha "$summary" \
+        > "$result-verification/service.json"
+    summary=$(release_sha256 "$result-verification/service.json")
+    jq -n --slurpfile request "$result-uploaded.json" --arg sha "$summary" \
         '{passed:true,synthetic:true,native_amd64:false,digest:$request[0].registry.uploaded.digest,
           request_key:$request[0].request_key,candidate_sha256:$request[0].candidate_sha256,
           image_id:$request[0].candidate.image_id,engine_id:"synthetic-separate-engine",service_sha256:$sha}' \
-        > "$publication_workspace/versioned-verification/verification.json"
-    publish_fixture promote --verification "$publication_workspace/versioned-verification" > /dev/null
-    publish_fixture release > "$publication_workspace/versioned-published.json"
-    publish_fixture release > "$publication_workspace/versioned-publish-retry.json"
-    cmp "$publication_workspace/versioned-published.json" "$publication_workspace/versioned-publish-retry.json"
-    publish_fixture aliases > "$publication_workspace/versioned-complete.json"
+        > "$result-verification/verification.json"
+    publish_fixture promote --verification "$result-verification" > /dev/null
+    publish_fixture release > "$result-published.json"
+    publish_fixture release > "$result-publish-retry.json"
+    cmp "$result-published.json" "$result-publish-retry.json"
+    publish_fixture aliases > "$result-complete.json"
     jq -e '.status == "complete" and .alias.intent.line == null and .alias.intent.latest == null' \
-        "$publication_workspace/versioned-complete.json" > /dev/null
-    jq -e 'any(.releases[]; .tag_name == "v0.3.0-rc.1" and .prerelease == true and
+        "$result-complete.json" > /dev/null
+    jq -e --arg tag "$tag" 'any(.releases[]; .tag_name == $tag and .prerelease == true and
         (.body | startswith("Candidate notes from the PR.")) and (.assets | length == 4))' \
         "$publication_workspace/http/state.json" > /dev/null
     actual_latest=$(jq -r .latest "$publication_workspace/http/state.json")
     [[ "$actual_latest" == "$previous_latest" ]]
     printf 'Passed: versioned PR image, frozen GitHub notes, release assets, and unchanged stable latest\n'
+    if [[ "$fixture_name" == rc ]]; then
+        next_key=$(jq -r .request_key "$publication_workspace/rc-third.json")
+        coordinate_fixture allocate --request "$next_key" > "$publication_workspace/rc-after-publication.json"
+        jq -e '.version == "0.1.0-rc.3" and .status == "admitted"' \
+            "$publication_workspace/rc-after-publication.json" > /dev/null
+        printf 'Passed: the same RC branch continues after successful publication\n'
+    fi
 }

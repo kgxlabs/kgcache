@@ -345,6 +345,7 @@ check_registry_and_api() {
     expect_github_failure superseded-retry 'request was superseded' coordinate_fixture allocate --request "$prior_key"
     printf 'Passed: failed qualification retry and reviewed descendant reuse without another tag\n'
     check_merged_release_publication
+    check_merged_release_publication rc v0.1.0-rc.2
 }
 
 check_publication_protections() {
@@ -420,6 +421,7 @@ main() {
     check_publication_protections
     check_owner_review_rules
     check_merged_release_prs
+    check_rc_release_prs
     check_alias_precedence
     if [[ "$docker_checks" == true ]]; then check_registry_and_api; fi
     printf 'Publication contracts passed with local Git fixtures. No external writes.\n'

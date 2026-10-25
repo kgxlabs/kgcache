@@ -60,7 +60,8 @@ candidate_tooling_inventory() {
 
     for path in tools/release/qualify.sh tools/release/common.sh tools/release/settings.sh \
         tools/release/candidate-common.sh tools/release/candidate.jq tools/release/create-candidate.jq \
-        tools/release/semver.jq tools/release/validate-build-info.jq tools/release/verify.sh \
+        tools/release/semver.jq tools/release/policy.jq tools/release/release-pr.jq \
+        tools/release/validate-build-info.jq tools/release/verify.sh \
         tools/container/validate-image.jq; do
         checksum=$(release_sha256 "$RELEASE_ROOT/$path") || return 1
         jq -cn --arg path "$path" --arg sha "$checksum" \

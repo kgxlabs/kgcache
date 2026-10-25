@@ -258,6 +258,10 @@ main() {
         jq -e '[.requests[] | select(.status != "complete" and .status != "superseded")] | length < 100' \
             "$coordinate_workspace/state.json" > /dev/null || release_fail 'durable request queue is full'
         if jq -e '.kind == "release"' "$selected/event.json" > /dev/null; then
+            jq -L "$RELEASE_ROOT/tools/release" --slurpfile ledger "$coordinate_workspace/state.json" \
+                'include "release-pr"; .version = release_request_version($ledger[0])' \
+                "$selected/event.json" > "$coordinate_workspace/release-event.json"
+            mv "$coordinate_workspace/release-event.json" "$selected/event.json"
             version=$(jq -r '.version' "$selected/event.json")
             jq -e --arg version "$version" 'all(.requests[]; .version != $version)' \
                 "$coordinate_workspace/state.json" > /dev/null ||

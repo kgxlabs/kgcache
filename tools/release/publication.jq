@@ -1,5 +1,6 @@
 include "semver";
 include "policy";
+include "release-pr";
 
 def publication_statuses:
   ["queued", "admitted", "failed", "superseded", "qualified", "tagged", "image", "release", "complete"];
@@ -71,6 +72,10 @@ def validate_ledger($repository):
           "invalid durable request identity")
       | require(.status as $s | publication_statuses | index($s) != null;
           "invalid durable request status")
+      | . as $request
+      | require(.event.kind != "release" or
+          (.event.version == .version and (.branch | release_matches($request.version)));
+          "release request branch/version mismatch")
       | require(.status == "queued" or (.version | semver); "allocated request lacks a version")
       | require(.status == "queued" or (.proposal.source_sha == .source_sha and
           .proposal.version == .version and .proposal.request_key == .request_key);
@@ -81,8 +86,8 @@ def validate_ledger($repository):
       | require((.status | IN("queued", "admitted", "failed", "superseded", "qualified")) or
           (.tag_object_sha | sha); "tagged request lacks tag proof")))
   | require(all(.requests | to_entries[]; .key == .value.request_key); "request key mismatch")
-  | require([.requests[] | select(.status != "queued" and .status != "superseded") |
-      .branch + ":" + .version] | length == (unique | length); "duplicate allocated version");
+  | require([.requests[] | select(.version != null and .status != "superseded") |
+      .version] | length == (unique | length); "duplicate allocated version");
 
 # API responses must come from the trusted collector. Ruleset detail is needed
 # because effective branch rules alone do not expose bypass permissions.

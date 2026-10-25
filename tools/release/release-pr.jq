@@ -8,6 +8,23 @@ def release_version:
       "release branch must contain a complete SemVer without build metadata")
   | . as $version | docker_tag | $version;
 
+def rc_series:
+  semver and (semver_parts | .prerelease == ["rc"] and .metadata == null);
+
+def release_matches($version):
+  release_version as $target
+  | if $target | rc_series then
+      ($version | startswith($target + ".")) and
+      ($version[($target | length) + 1:] | test("\\A[1-9][0-9]*\\z"))
+    else $version == $target end;
+
+def release_request_version($ledger):
+  (.branch | release_version) as $target
+  | if $target | rc_series then
+      next_candidate($target[:-3]; "rc"; [$ledger.requests[] | select(.version != null)])
+    else $target end
+  | . as $version | docker_tag | $version;
+
 def release_event($repository; $source):
   require(.action == "closed" and .pull_request.merged == true and
       (.repository.full_name | ascii_downcase) == $repository;
