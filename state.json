@@ -77,7 +77,7 @@
         }
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "admitted",
+      "status": "qualified",
       "proposal": {
         "schema_version": 1,
         "mode": "release",
@@ -191,6 +191,18 @@
         "eligibility_limits": [
           "Native source and image qualification must pass before publication."
         ]
+      },
+      "candidate_sha256": "58197afb96224ba9c1abe87201c90e8ee0eb132ec6e218490a679d49560d4243",
+      "candidate": {
+        "image_id": "sha256:8cedbafd3e460ad35712ae59b09684fc69be1dcc2678f64a3cd464026aad381f",
+        "archive_sha256": "4d3face36cccaffe42f1eb559468fc8d61d5fbea39c549716f94604bcdfd9aee",
+        "run": {
+          "id": "40216187085",
+          "attempt": "1",
+          "workflow_ref": "kgxlabs/kgcache/.github/workflows/release.yml@refs/heads/main",
+          "workflow_sha": "d8a9ed3dfc7e64053cf6123d0853c404bd442335"
+        },
+        "artifact_id": "12607224024"
       }
     }
   },
