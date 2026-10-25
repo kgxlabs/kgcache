@@ -78,7 +78,7 @@ coordinate_fixture() {
 setup_publication_rules() {
     local branch encoded
 
-    jq -n '[{type: "deletion"}, {type: "non_fast_forward"}, {type: "required_linear_history"},
+    jq -n '[{type: "deletion"}, {type: "non_fast_forward"},
         {type: "pull_request", parameters: {required_approving_review_count: 1,
           dismiss_stale_reviews_on_push: true, required_review_thread_resolution: true,
           allowed_merge_methods: ["squash"]}},
@@ -355,6 +355,22 @@ check_publication_protections() {
     restore_api merge-ruleset.json
     mutate_api merge-rules.json 'map(select(.type != "required_status_checks"))'
     expect_github_failure missing-checks 'missing required status checks' coordinate_fixture enqueue \
+        --event "$github_test_workspace/create.json" --event-name push --source "$fixture_cut"
+    restore_api merge-rules.json
+    mutate_api merge-rules.json 'map(if .type == "pull_request" then .parameters.allowed_merge_methods = ["squash", "merge"] else . end)'
+    expect_github_failure merge-method 'missing required PR review protections' coordinate_fixture enqueue \
+        --event "$github_test_workspace/create.json" --event-name push --source "$fixture_cut"
+    restore_api merge-rules.json
+    mutate_api merge-rules.json 'map(select(.type != "pull_request"))'
+    expect_github_failure missing-pr 'missing required PR review protections' coordinate_fixture enqueue \
+        --event "$github_test_workspace/create.json" --event-name push --source "$fixture_cut"
+    restore_api merge-rules.json
+    mutate_api merge-rules.json 'map(select(.type != "deletion"))'
+    expect_github_failure deletable-branch 'missing branch history protections' coordinate_fixture enqueue \
+        --event "$github_test_workspace/create.json" --event-name push --source "$fixture_cut"
+    restore_api merge-rules.json
+    mutate_api merge-rules.json 'map(select(.type != "non_fast_forward"))'
+    expect_github_failure force-pushable-branch 'missing branch history protections' coordinate_fixture enqueue \
         --event "$github_test_workspace/create.json" --event-name push --source "$fixture_cut"
     restore_api merge-rules.json
     mutate_api state-ruleset.json '.bypass_actors = []'

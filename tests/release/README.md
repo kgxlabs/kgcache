@@ -18,6 +18,9 @@ The publication suite also covers merged PRs into RC series and exact-version
 release branches. It verifies automatic state creation without a source registry,
 main-first backports, increasing RC numbers, queued and failed reservations,
 exact versions, frozen PR notes, duplicate-version rejection, and candidate retries.
+Historical merge commits in the branch base are allowed. A release request with
+multiple parents is rejected. Missing PR rules, non-squash merge methods, bypass
+actors, and missing history protections are also rejected.
 The Docker option checks the same notes and prerelease assets through the
 stateful API fixture while preserving stable aliases.
 

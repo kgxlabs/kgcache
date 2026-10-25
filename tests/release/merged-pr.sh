@@ -44,7 +44,7 @@ check_merged_release_prs() {
     local fixture_repo="$publication_workspace/versioned-repo"
     local publication_remote="$publication_workspace/versioned-remote.git"
     local candidate_test_workspace="$publication_workspace/versioned-candidate"
-    local source key other_source saved_head actual_head
+    local source key other_source saved_head actual_head merge_source tree
 
     git clone --quiet "$original_repo" "$fixture_repo"
     git -C "$fixture_repo" config user.name 'Release fixture'
@@ -52,10 +52,25 @@ check_merged_release_prs() {
     git -C "$fixture_repo" config commit.gpgsign false
     git -C "$fixture_repo" config core.hooksPath /dev/null
     git -C "$fixture_repo" switch --quiet main
+    git -C "$fixture_repo" switch --quiet -c historical-docs
+    printf 'historical documentation\n' > "$fixture_repo/historical-docs.txt"
+    fixture_commit 'docs: add historical documentation' > /dev/null
+    git -C "$fixture_repo" switch --quiet main
+    printf 'historical main change\n' > "$fixture_repo/historical-main.txt"
+    fixture_commit 'chore: update historical main' > /dev/null
+    git -C "$fixture_repo" merge --quiet --no-ff -m 'Merge historical documentation' historical-docs
     git -C "$fixture_repo" rm --quiet .github/release-lines.json
     fixture_commit 'chore: remove the release registry' > /dev/null
     git clone --quiet --bare "$fixture_repo" "$publication_remote"
     source=$(merged_pr_fixture 21 release/0.3.0-rc.1 'chore(release): prepare candidate')
+    tree=$(git -C "$fixture_repo" rev-parse "$source^{tree}")
+    merge_source=$(git -C "$fixture_repo" commit-tree "$tree" -p "$source" -p "$fixture_fix" \
+        -m 'chore: synthetic release merge')
+    git -C "$fixture_repo" push --quiet "$publication_remote" "$merge_source:refs/heads/synthetic-merge"
+    jq --arg source "$merge_source" '.pull_request.merge_commit_sha = $source' \
+        "$publication_workspace/release-event-21.json" > "$publication_workspace/merge-source.json"
+    expect_github_failure release-merge-source 'must have exactly one parent' coordinate_fixture enqueue \
+        --event "$publication_workspace/merge-source.json" --event-name pull_request --source "$merge_source"
     jq '.action = "opened"' "$publication_workspace/release-event-21.json" > "$publication_workspace/opened.json"
     expect_github_failure opened-release 'requires a merged pull request' coordinate_fixture enqueue \
         --event "$publication_workspace/opened.json" --event-name pull_request --source "$source"
@@ -121,7 +136,7 @@ check_merged_release_prs() {
     jq -en -L "$RELEASE_ROOT/tools/release" --slurpfile request "$publication_workspace/next-allocated.json" \
         'include "publication"; {requests:{candidate:$request[0]}} | alias_plan("candidate") |
           .line == null and .latest == null' > /dev/null
-    printf 'Passed: merged versioned PRs, automatic state, frozen notes, exact versions, and immutable retry\n'
+    printf 'Passed: inherited merges, squash-only release PRs, automatic state, frozen notes, exact versions, and immutable retry\n'
 }
 
 check_rc_release_prs() {

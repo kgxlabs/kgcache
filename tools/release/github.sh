@@ -226,6 +226,8 @@ github_select_release_pr() {
 
     jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" --arg source "$source" \
         'include "release-pr"; release_event($repository; $source)' "$event" > "$github_output/event.json"
+    parent=$(git --no-replace-objects -C "$repo" show -s --format=%P "$source")
+    [[ "$parent" =~ ^[0-9a-f]{40}$ ]] || release_fail 'release PR merge must have exactly one parent'
     branch=$(jq -r '.branch' "$github_output/event.json")
     number=$(jq -r '.pr_number' "$github_output/event.json")
     github_rules "$repo" "$branch"
@@ -238,7 +240,6 @@ github_select_release_pr() {
         "$github_output/api/pr-$number.json" > /dev/null || release_fail 'merged release PR differs from delivery'
     if jq -en -L "$RELEASE_ROOT/tools/release" --arg branch "$branch" \
         'include "release-pr"; $branch | release_version | rc_series' > /dev/null; then
-        parent=$(git --no-replace-objects -C "$repo" rev-parse "$source^")
         github_list "/repos/$github_repository/commits/$parent/pulls?per_page=100" \
             "$github_output/api/associated-$parent.json"
         previous=$(jq -er --arg source "$parent" --arg branch "$branch" --arg repository "$github_repository" \

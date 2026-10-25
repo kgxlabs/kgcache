@@ -105,8 +105,7 @@ def validate_merge_rules($required; $bypass):
   | require(all(.effective[]; .ruleset_id as $id | any($proof.rulesets[]; .id == $id));
       "effective rule has no verified ruleset detail")
   | require(any(.effective[]; .type == "deletion") and
-      any(.effective[]; .type == "non_fast_forward") and
-      any(.effective[]; .type == "required_linear_history"); "missing branch history protections")
+      any(.effective[]; .type == "non_fast_forward"); "missing branch history protections")
   | require(any(.effective[]; .ruleset_id as $id |
       .type == "pull_request" and
       (.parameters.required_approving_review_count | type == "number") and
