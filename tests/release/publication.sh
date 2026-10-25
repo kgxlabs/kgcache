@@ -104,7 +104,7 @@ setup_publication_rules() {
     done
     route '/repos/fixture/kgcache/rules/branches/release-state?per_page=100' state-rules.json
     git -C "$fixture_repo" switch --quiet main
-    jq '.repository = "fixture/kgcache" | .enabled = true | .publisher_app_id = 42 | .tag_ruleset_id = 3 |
+    jq 'del(.review_bypass) | .repository = "fixture/kgcache" | .enabled = true | .publisher_app_id = 42 | .tag_ruleset_id = 3 |
         .enforcement_since = "2026-10-19T00:00:00Z" | .registry_repository = "docker.io/fixture/kgcache" |
         .required_checks = {main: [{context: "PR title", integration_id: 15368}], release: []}' \
         "$RELEASE_ROOT/.github/release-automation.json" > "$fixture_repo/.github/release-automation.json"
@@ -366,6 +366,37 @@ check_publication_protections() {
     printf 'Passed: missing protections and remote fixture escapes fail closed\n'
 }
 
+check_owner_review_rules() {
+    jq -n --slurpfile rules "$fixture_api/merge-rules.json" \
+        --slurpfile ruleset "$fixture_api/merge-ruleset.json" \
+        '{effective: (($rules[0] | map(if .type == "pull_request" then
+            .parameters.required_approving_review_count = 0 else . end)) +
+          [$rules[0][] | select(.type == "pull_request") | .ruleset_id = 4]),
+          rulesets: [$ruleset[0], {id: 4, target: "branch", enforcement: "active",
+            bypass_actors: [{actor_id: 101, actor_type: "User", bypass_mode: "pull_request"}]}]}' \
+        > "$publication_workspace/owner-rules.json"
+    jq -e -L "$RELEASE_ROOT/tools/release" 'include "publication";
+        {login: "maintainer", id: 101} as $owner |
+        [{context: "PR title", integration_id: 15368}] as $checks |
+        (validate_merge_rules($checks; $owner)) and
+        (try (validate_merge_rules($checks) | false) catch true) and
+        (try (.rulesets[1].bypass_actors[0].actor_id = 202 |
+          validate_merge_rules($checks; $owner) | false) catch true) and
+        (try (.rulesets[1].bypass_actors[0].bypass_mode = "always" |
+          validate_merge_rules($checks; $owner) | false) catch true) and
+        (try (.rulesets[1].bypass_actors += [{actor_id: 202, actor_type: "User", bypass_mode: "pull_request"}] |
+          validate_merge_rules($checks; $owner) | false) catch true) and
+        (try (.effective += [{type: "required_status_checks", ruleset_id: 4}] |
+          validate_merge_rules($checks; $owner) | false) catch true) and
+        (try (.effective |= map(select(.ruleset_id != 4)) |
+          validate_merge_rules($checks; $owner) | false) catch true) and
+        (try (.effective |= map(if .type == "pull_request" and .ruleset_id == 1 then
+            .parameters.required_review_thread_resolution = false else . end) |
+          validate_merge_rules($checks; $owner) | false) catch true)' \
+        "$publication_workspace/owner-rules.json" > /dev/null
+    printf 'Passed: owner review bypass cannot bypass CI or branch protections\n'
+}
+
 main() {
     local docker_checks=false
 
@@ -385,6 +416,7 @@ main() {
     setup_publication_rules
     check_publication_requests
     check_publication_protections
+    check_owner_review_rules
     check_alias_precedence
     if [[ "$docker_checks" == true ]]; then check_registry_and_api; fi
     printf 'Publication contracts passed with local Git fixtures. No external writes.\n'

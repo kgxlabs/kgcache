@@ -2,6 +2,7 @@
   "schema_version": 1,
   "repository": "kgxlabs/kgcache",
   "enabled": false,
+  "review_bypass": {"login": "Kaung-HtetKyaw", "id": 50027060},
   "publisher_app_id": 5454497,
   "tag_ruleset_id": 25780892,
   "enforcement_since": "2026-10-24T12:12:00Z",

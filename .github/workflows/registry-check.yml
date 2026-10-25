@@ -7,18 +7,117 @@ on:
   workflow_dispatch:
     inputs:
       candidate_run_id:
-        description: 'Successful manual preview run on main, already uploaded as ci-RUN_ID to the testing repository'
-        required: true
+        description: 'Optional preview run for image verification, already uploaded as ci-RUN_ID to the testing repository'
+        required: false
         type: string
+      credential_repository:
+        description: 'Check pull/push permission without uploading any image'
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+          - production
 
-# This workflow only reads GitHub artifacts and the public testing repository.
+# The image job is read-only. Only manual runs on main can check credentials.
 permissions:
   contents: read
   actions: read
 
 jobs:
+  credentials:
+    name: Verify publisher credentials without publishing
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out protected main configuration
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install pinned Node for the credential check
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: tests/integration/clients/node/node-redis/v6/.node-version
+          package-manager-cache: false
+
+      - name: Authenticate the repository-scoped publisher App
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+          permission-administration: read
+          permission-actions: read
+
+      - name: Check the configured App and protected version tags
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_ID: ${{ vars.RELEASE_APP_ID }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          [[ "$REPOSITORY" == kgxlabs/kgcache ]]
+          jq -e --arg app "$APP_ID" '.publisher_app_id == ($app | tonumber)' \
+            .github/release-automation.json
+          ruleset=$(jq -r .tag_ruleset_id .github/release-automation.json)
+          [[ "$ruleset" =~ ^[1-9][0-9]*$ ]]
+          curl --fail --silent --show-error --max-time 45 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPOSITORY/rulesets/$ruleset" \
+            > "$RUNNER_TEMP/tag-rules.json"
+          jq -e -L tools/release --argjson app "$APP_ID" \
+            'include "publication"; validate_tag_rules($app) | true' "$RUNNER_TEMP/tag-rules.json"
+          printf 'Publisher App authenticated and version-tag rules verified.\n\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify Docker Hub grants without pushing
+        env:
+          TARGET: ${{ inputs.credential_repository }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const config = JSON.parse(readFileSync('.github/release-automation.json', 'utf8'));
+          const target = process.env.TARGET;
+          if (!['testing', 'production'].includes(target)) throw new Error('Invalid credential target.');
+          const registry = target === 'testing' ? config.rehearsal_registry_repository : config.registry_repository;
+          if (!/^docker\.io\/kgxlabs\/[a-z0-9_-]+$/.test(registry)) throw new Error('Invalid owned registry.');
+          const username = process.env.DOCKERHUB_USERNAME;
+          const password = process.env.DOCKERHUB_TOKEN;
+          if (!username || !password) throw new Error('Docker Hub credentials are missing.');
+          const repository = registry.slice('docker.io/'.length);
+          const url = new URL('https://auth.docker.io/token');
+          url.searchParams.set('service', 'registry.docker.io');
+          url.searchParams.set('scope', `repository:${repository}:pull,push`);
+          const response = await fetch(url, {
+            headers: { Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}` },
+            signal: AbortSignal.timeout(45000),
+          });
+          if (!response.ok) throw new Error(`Docker Hub authentication failed (${response.status}).`);
+          const value = await response.json();
+          const token = value.token ?? value.access_token;
+          if (typeof token !== 'string' || token.split('.').length !== 3) throw new Error('Invalid registry token.');
+          const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+          const access = claims.access?.find((entry) => entry.type === 'repository' && entry.name === repository);
+          if (!['pull', 'push'].every((action) => access?.actions?.includes(action))) {
+            throw new Error(`Docker Hub did not grant pull and push access to ${repository}.`);
+          }
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `Docker Hub granted pull and push access to \`${registry}\`.\n\n` +
+            'No image upload, version allocation, Git tag, or GitHub Release was created.\n');
+          console.log(`Verified Docker Hub pull/push grants for ${repository}. No upload performed.`);
+          JS
+
   verify:
     name: Verify testing-registry image on native Linux amd64
+    if: github.event_name == 'push' || inputs.candidate_run_id != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -162,3 +261,30 @@ jobs:
           path: ${{ runner.temp }}/registry-check
           if-no-files-found: ignore
           retention-days: 30
+
+  result:
+    name: Verify requested readiness checks completed
+    needs: [credentials, verify]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          CANDIDATE_RUN: ${{ inputs.candidate_run_id }}
+        run: |
+          required=false
+          if [[ "$EVENT" == workflow_dispatch && "$REF" == refs/heads/main ]]; then
+            jq -e '.credentials.result == "success"' <<< "$RESULTS"
+            required=true
+          fi
+          if [[ "$EVENT" == push || -n "$CANDIDATE_RUN" ]]; then
+            jq -e '.verify.result == "success"' <<< "$RESULTS"
+            required=true
+          fi
+          [[ "$required" == true ]] || {
+            printf 'Select a candidate run, or run credential checks from main.\n' >&2
+            exit 1
+          }
