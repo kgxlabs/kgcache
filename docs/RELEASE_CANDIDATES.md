@@ -47,8 +47,8 @@ The candidate records the tooling revision, dirty state, and entrypoint checksum
 separately from the selected source. Its evidence also records checksums of
 the tooling files used for qualification.
 
-Branch proposals must run from their clean selected tooling commit and must
-still match pinned main policy. A request with an existing reserved tag must
+Merged release PR proposals run from their clean selected source commit.
+Their version and notes are fixed by the request. A request with an existing reserved tag must
 recover its retained candidate instead of rebuilding that version.
 
 CI passes `--request-evidence FILE` from the request collector. Its source,

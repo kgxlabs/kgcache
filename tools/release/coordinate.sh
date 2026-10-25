@@ -31,7 +31,7 @@ coordinate_export() {
     jq --arg key "$request" '.requests[$key].proposal' "$coordinate_workspace/state.json" > "$output/proposal.json"
     sha=$(release_sha256 "$output/proposal.json")
     jq -n --arg sha "$sha" --slurpfile proposal "$output/proposal.json" \
-        '{schema_version: 1, mode: "branch", repository: $proposal[0].repository,
+        '{schema_version: 1, mode: $proposal[0].mode, repository: $proposal[0].repository,
           source_sha: $proposal[0].source_sha, policy_sha: $proposal[0].policy_sha,
           proposal_sha256: $sha, publishable: false}' > "$output/github-evidence.json"
     jq --arg key "$request" '.requests[$key]' "$coordinate_workspace/state.json" > "$output/request.json"
@@ -101,11 +101,33 @@ coordinate_key() {
     release_sha256 "$coordinate_workspace/key"
 }
 
+coordinate_release_proposal() {
+    local key=$1 development source_key notes_sha original encoded
+
+    original=$(jq -r --arg key "$key" '.requests[$key].policy_sha' "$coordinate_workspace/state.json")
+    development=$(coordinate_git show "$source:build.zig.zon" |
+        sed -nE 's/^[[:space:]]*\.version = "([^"]+)".*/\1/p')
+    release_validate_version "$development" 'release development version'
+    encoded=$(jq -cn --arg source "$source" --arg version "$version" '[1,"source-version",$source,$version]')
+    source_key=$(printf '%s' "$encoded" | release_sha256 /dev/stdin)
+    jq -n -L "$RELEASE_ROOT/tools/release" --arg key "$key" --arg policy "$original" \
+        --arg development "$development" --arg source_key "$source_key" \
+        --slurpfile ledger "$coordinate_workspace/state.json" \
+        'include "release-pr"; release_proposal($ledger[0].requests[$key].event;
+          $policy; $development; $key; $source_key)' > "$coordinate_workspace/proposal.json"
+    jq -j '.release_notes.body' "$coordinate_workspace/proposal.json" > "$coordinate_workspace/release-notes"
+    notes_sha=$(release_sha256 "$coordinate_workspace/release-notes")
+    jq --arg sha "$notes_sha" '.release_notes.sha256 = $sha' \
+        "$coordinate_workspace/proposal.json" > "$coordinate_workspace/proposal.next.json"
+    mv "$coordinate_workspace/proposal.next.json" "$coordinate_workspace/proposal.json"
+    candidate_validate_proposal "$coordinate_workspace/proposal.json"
+}
+
 main() {
     local operation=${1:-} remote='' state_ref=refs/heads/release-state fixture=false
     local repository='' event='' event_name='' source='' output='' request='' candidate='' failure='' artifact='' checkpoint_file='' transfer=''
     local expected key branch line policy status version tag object candidate_sha now before earlier
-    local fixture_path selected
+    local fixture_path selected release_request=false
 
     [[ $# -gt 0 ]] || release_fail 'expected init, enqueue, allocate, qualify, tag, or status'
     shift
@@ -154,9 +176,9 @@ main() {
     else
         [[ "$remote" == "https://github.com/$repository.git" ]] || release_fail 'production remote must match repository'
         [[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_REPOSITORY:-}" == "$repository" &&
-            ("${GITHUB_EVENT_NAME:-}" == create || "${GITHUB_EVENT_NAME:-}" == push) &&
+            "${GITHUB_EVENT_NAME:-}" == pull_request &&
             "${GITHUB_REF:-}" == refs/heads/release/* ]] ||
-            release_fail 'production coordination requires an authenticated branch workflow'
+            release_fail 'production coordination requires an authenticated release PR workflow'
     fi
     trap cleanup_coordinate EXIT
     trap 'exit 130' INT
@@ -195,8 +217,15 @@ main() {
         coordinate_write "$remote" "$state_ref" '' 'chore(release): initialize durable state'
         return
     fi
-    [[ -n "$expected" ]] || release_fail 'missing durable state; explicit initialization is required'
-    if [[ "$fixture" == false ]]; then
+    if [[ -z "$expected" && "$operation" == enqueue && "$event_name" == pull_request ]]; then
+        jq -n --arg repository "$repository" \
+            '{schema_version:1,repository:$repository,lines:{},requests:{},aliases:{}}' \
+            > "$coordinate_workspace/state.json"
+    elif [[ -z "$expected" ]]; then
+        release_fail 'missing durable state; explicit initialization is required'
+    fi
+    if [[ "$fixture" == false && -n "$expected" ]] &&
+        jq -e '.state_root_sha != null' "$coordinate_workspace/config.json" > /dev/null; then
         selected=$(coordinate_git rev-list --max-parents=0 "$expected")
         jq -e --arg root "$selected" '.state_root_sha == $root and
             (.state_root_sha | test("^[0-9a-f]{40}$"))' "$coordinate_workspace/config.json" > /dev/null ||
@@ -228,12 +257,27 @@ main() {
         fi
         jq -e '[.requests[] | select(.status != "complete" and .status != "superseded")] | length < 100' \
             "$coordinate_workspace/state.json" > /dev/null || release_fail 'durable request queue is full'
-        jq --arg key "$key" --arg line "$line" --arg policy "$policy" \
-            --slurpfile event "$selected/event.json" --slurpfile record "$selected/line-record.json" \
-            '.lines[$line] = $record[0] |
-             .requests[$key] = {request_key: $key, source_sha: $event[0].source_sha,
-               branch: $event[0].branch, policy_sha: $policy, event: $event[0], status: "queued"}' \
-            "$coordinate_workspace/state.json" > "$coordinate_workspace/next.json"
+        if jq -e '.kind == "release"' "$selected/event.json" > /dev/null; then
+            version=$(jq -r '.version' "$selected/event.json")
+            jq -e --arg version "$version" 'all(.requests[]; .version != $version)' \
+                "$coordinate_workspace/state.json" > /dev/null ||
+                release_fail 'version already belongs to another release request; use a new version branch'
+            selected=$(cat "$selected/rules-sha256")
+            jq --arg key "$key" --arg policy "$policy" --arg fingerprint "$selected" \
+                --slurpfile event "$coordinate_workspace/selection/event.json" \
+                '.requests[$key] = {request_key:$key, source_sha:$event[0].source_sha,
+                  branch:$event[0].branch, version:$event[0].version, policy_sha:$policy,
+                  event:$event[0], enforcement_sha256:$fingerprint, status:"queued"}' \
+                "$coordinate_workspace/state.json" > "$coordinate_workspace/next.json"
+            selected="$coordinate_workspace/selection"
+        else
+            jq --arg key "$key" --arg line "$line" --arg policy "$policy" \
+                --slurpfile event "$selected/event.json" --slurpfile record "$selected/line-record.json" \
+                '.lines[$line] = $record[0] |
+                 .requests[$key] = {request_key: $key, source_sha: $event[0].source_sha,
+                   branch: $event[0].branch, policy_sha: $policy, event: $event[0], status: "queued"}' \
+                "$coordinate_workspace/state.json" > "$coordinate_workspace/next.json"
+        fi
         mv "$coordinate_workspace/next.json" "$coordinate_workspace/state.json"
         coordinate_write "$remote" "$state_ref" "$expected" 'chore(release): enqueue source' >&2
         if [[ -n "$output" ]]; then
@@ -253,14 +297,23 @@ main() {
     line=${branch#release/}
     status=$(jq -r --arg key "$request" '.requests[$key].status' "$coordinate_workspace/state.json")
     [[ "$status" != superseded ]] || release_fail 'request was superseded; use the accepted descendant'
-    coordinate_git show "$policy:.github/release-lines.json" > "$coordinate_workspace/policy.json"
-    jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$repository" \
-        --arg line "$line" 'include "policy"; validate_policy($repository) |
-        any(.lines[]; .line == $line and .status != "retired")' \
-        "$coordinate_workspace/policy.json" > /dev/null || release_fail 'line is not currently authorized'
+    if jq -e --arg key "$request" '.requests[$key].event.kind == "release"' \
+        "$coordinate_workspace/state.json" > /dev/null; then
+        release_request=true
+        version=$(jq -r --arg key "$request" '.requests[$key].version' "$coordinate_workspace/state.json")
+        coordinate_git show "$policy:.github/release-automation.json" > "$coordinate_workspace/config.json"
+        jq -e --arg version "$version" '(.blocked_versions // [] | index($version)) == null' \
+            "$coordinate_workspace/config.json" > /dev/null || release_fail 'version was blocked'
+    else
+        coordinate_git show "$policy:.github/release-lines.json" > "$coordinate_workspace/policy.json"
+        jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$repository" \
+            --arg line "$line" 'include "policy"; validate_policy($repository) |
+            any(.lines[]; .line == $line and .status != "retired")' \
+            "$coordinate_workspace/policy.json" > /dev/null || release_fail 'line is not currently authorized'
+    fi
     if [[ "$operation" == checkpoint ]]; then
         version=$(jq -r --arg key "$request" '.requests[$key].version' "$coordinate_workspace/state.json")
-        jq -e --arg line "$line" --arg version "$version" \
+        [[ "$release_request" == true ]] || jq -e --arg line "$line" --arg version "$version" \
             'any(.lines[]; .line == $line and (.blocked_versions | index($version)) == null)' \
             "$coordinate_workspace/policy.json" > /dev/null || release_fail 'version was blocked'
         tag="v$version"
@@ -294,13 +347,19 @@ main() {
                 "$coordinate_workspace/state.json")
             [[ -z "$earlier" ]] || release_fail 'an earlier source is unresolved; retry its original request'
         done < "$coordinate_workspace/ancestors"
-        jq -n -L "$RELEASE_ROOT/tools/release" --arg line "$line" \
-            --slurpfile ledger "$coordinate_workspace/state.json" \
-            'include "publication"; proposer_state($ledger[0]; $line)' > "$coordinate_workspace/proposer-state.json"
-        jq --arg key "$request" '.requests[$key].event' "$coordinate_workspace/state.json" > "$coordinate_workspace/event.json"
-        bash "$RELEASE_ROOT/tools/release/propose.sh" --repo "$coordinate_workspace/repo" \
-            --repository "$repository" --event "$coordinate_workspace/event.json" \
-            --state "$coordinate_workspace/proposer-state.json" > "$coordinate_workspace/proposal.json"
+        if [[ "$release_request" == true ]]; then
+            tag=$(coordinate_git ls-remote --refs "$remote" "refs/tags/v$version")
+            [[ -z "$tag" ]] || release_fail 'version tag already exists outside this request'
+            coordinate_release_proposal "$request"
+        else
+            jq -n -L "$RELEASE_ROOT/tools/release" --arg line "$line" \
+                --slurpfile ledger "$coordinate_workspace/state.json" \
+                'include "publication"; proposer_state($ledger[0]; $line)' > "$coordinate_workspace/proposer-state.json"
+            jq --arg key "$request" '.requests[$key].event' "$coordinate_workspace/state.json" > "$coordinate_workspace/event.json"
+            bash "$RELEASE_ROOT/tools/release/propose.sh" --repo "$coordinate_workspace/repo" \
+                --repository "$repository" --event "$coordinate_workspace/event.json" \
+                --state "$coordinate_workspace/proposer-state.json" > "$coordinate_workspace/proposal.json"
+        fi
         jq --arg key "$request" --slurpfile proposal "$coordinate_workspace/proposal.json" \
             'reduce $proposal[0].supersedes[] as $old (.; .requests[$old].status = "superseded") |
              .requests[$key] += {status: "admitted", version: $proposal[0].version,
@@ -322,7 +381,7 @@ main() {
         candidate_check_archive "$coordinate_workspace/candidate" "$coordinate_workspace/archive"
         jq -e --arg key "$request" --argjson fixture "$fixture" \
             --slurpfile ledger "$coordinate_workspace/state.json" \
-            '.mode == "branch" and .proposal == $ledger[0].requests[$key].proposal and
+            '(.mode == "branch" or .mode == "release") and .proposal == $ledger[0].requests[$key].proposal and
              ($fixture or (.qualification.qualified_amd64 == true and .tooling.dirty == false))' \
             "$coordinate_workspace/candidate/candidate.json" > /dev/null ||
             release_fail 'candidate does not qualify this admitted branch request'
@@ -371,13 +430,15 @@ main() {
                 release_fail 'retained artifact is missing, expired, or belongs to another source'
         fi
         # Re-run current policy and reservation checks before a tag mutation.
-        jq -n -L "$RELEASE_ROOT/tools/release" --arg line "$line" \
-            --slurpfile ledger "$coordinate_workspace/state.json" \
-            'include "publication"; proposer_state($ledger[0]; $line)' > "$coordinate_workspace/proposer-state.json"
-        jq --arg key "$request" '.requests[$key].event' "$coordinate_workspace/state.json" > "$coordinate_workspace/event.json"
-        bash "$RELEASE_ROOT/tools/release/propose.sh" --repo "$coordinate_workspace/repo" \
-            --repository "$repository" --event "$coordinate_workspace/event.json" \
-            --state "$coordinate_workspace/proposer-state.json" > "$coordinate_workspace/current-proposal.json"
+        if [[ "$release_request" == false ]]; then
+            jq -n -L "$RELEASE_ROOT/tools/release" --arg line "$line" \
+                --slurpfile ledger "$coordinate_workspace/state.json" \
+                'include "publication"; proposer_state($ledger[0]; $line)' > "$coordinate_workspace/proposer-state.json"
+            jq --arg key "$request" '.requests[$key].event' "$coordinate_workspace/state.json" > "$coordinate_workspace/event.json"
+            bash "$RELEASE_ROOT/tools/release/propose.sh" --repo "$coordinate_workspace/repo" \
+                --repository "$repository" --event "$coordinate_workspace/event.json" \
+                --state "$coordinate_workspace/proposer-state.json" > "$coordinate_workspace/current-proposal.json"
+        fi
         if [[ "$status" != qualified ]]; then
             jq -e --arg key "$request" '.requests[$key].tag_object_sha != null' \
                 "$coordinate_workspace/state.json" > /dev/null || release_fail 'request has no qualified candidate'
@@ -391,7 +452,7 @@ main() {
         fi
         version=$(jq -r --arg key "$request" '.requests[$key].version' "$coordinate_workspace/state.json")
         tag="v$version"
-        jq -e --arg line "$line" --arg version "$version" \
+        [[ "$release_request" == true ]] || jq -e --arg line "$line" --arg version "$version" \
             'any(.lines[]; .line == $line and (.blocked_versions | index($version)) == null)' \
             "$coordinate_workspace/policy.json" > /dev/null || release_fail 'version was blocked'
         jq -cn --arg key "$request" --slurpfile ledger "$coordinate_workspace/state.json" \

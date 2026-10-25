@@ -12,7 +12,7 @@ def candidate_path:
 
 def validate_candidate_proposal:
   candidate_require(type == "object" and .schema_version == 1; "proposal schema_version must be 1")
-  | candidate_require(.mode == "preview" or .mode == "branch"; "invalid proposal mode")
+  | candidate_require(.mode == "preview" or .mode == "branch" or .mode == "release"; "invalid proposal mode")
   | candidate_require(.publishable == false and .proposal_only == true and .qualification_required == true;
       "qualification requires a non-publishing proposal")
   | candidate_require(.repository | type == "string" and test("\\A[a-z0-9_.-]+/[a-z0-9_.-]+\\z");
@@ -32,13 +32,20 @@ def validate_candidate_proposal:
       candidate_require(.source_eligible == true and (.request_key | candidate_sha) and
         (.original_policy_sha | candidate_commit) and (.cut_sha | candidate_commit);
         "branch proposal is missing source eligibility")
-      | candidate_require(.branch == "release/" + .line and
+      | candidate_require((if .mode == "release" then .branch == "release/" + .version
+          else .branch == "release/" + .line end) and
           (.version | semver_parts | .major + "." + .minor) == .line;
           "branch proposal line/version mismatch")
       | candidate_require(.event.source_sha == .source_sha and .event.branch == .branch and
           .state_request.source_sha == .source_sha and .state_request.version == .version and
           .state_request.request_key == .request_key and .state_request.policy_sha == .original_policy_sha;
           "branch proposal identities disagree")
+      | if .mode == "release" then
+          candidate_require(.event.kind == "release" and .event.version == .version and
+            .release_notes.pr_number == .event.pr_number and
+            (.release_notes.body | type == "string" and length > 0) and
+            (.release_notes.sha256 | candidate_sha); "release proposal lacks frozen PR notes")
+        else . end
     end;
 
 def candidate_phases:

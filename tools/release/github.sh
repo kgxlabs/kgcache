@@ -219,12 +219,65 @@ github_rules() {
     release_sha256 "$github_output/rules-proof.json" > "$github_output/rules-sha256"
 }
 
+github_select_release_pr() {
+    local repo=$1 event=$2 source=$3 ledger=$4 branch number policy fingerprint key revision encoded
+    local github_review_bypass=null
+
+    jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" --arg source "$source" \
+        'include "release-pr"; release_event($repository; $source)' "$event" > "$github_output/event.json"
+    branch=$(jq -r '.branch' "$github_output/event.json")
+    number=$(jq -r '.pr_number' "$github_output/event.json")
+    github_rules "$repo" "$branch"
+    fingerprint=$(cat "$github_output/rules-sha256")
+    github_review_bypass=$(jq -c -L "$RELEASE_ROOT/tools/release" \
+        'include "publication"; review_bypass' "$github_workspace/automation.json")
+    github_reviewed_pr "$number" "$branch" "$source"
+    jq -e --slurpfile event "$github_output/event.json" \
+        '.head.sha == $event[0].head_sha and .merged_at == $event[0].merged_at' \
+        "$github_output/api/pr-$number.json" > /dev/null || release_fail 'merged release PR differs from delivery'
+    git --no-replace-objects -C "$repo" merge-base --is-ancestor "$source" "refs/remotes/origin/$branch"
+    policy=$(git --no-replace-objects -C "$repo" rev-parse refs/remotes/origin/main)
+    jq -e --slurpfile config "$github_workspace/automation.json" \
+        '.merged_at >= $config[0].enforcement_since' "$github_output/event.json" > /dev/null ||
+        release_fail 'release merge predates enforced publication'
+    git --no-replace-objects -C "$repo" show -s --format=%B "$source" > "$github_workspace/message"
+    release_validate_maintenance < "$github_workspace/message"
+    jq -r '.title + "\n" + .notes' "$github_output/event.json" > "$github_workspace/pr-message"
+    release_validate_maintenance < "$github_workspace/pr-message"
+    release_backport_commits < "$github_workspace/pr-message" > "$github_workspace/main-commits"
+    release_backport_commits < "$github_workspace/message" >> "$github_workspace/main-commits"
+    if jq -e -L "$RELEASE_ROOT/tools/release" --rawfile message "$github_workspace/message" \
+        'include "policy"; fix_request($message; .title)' "$github_output/event.json" > /dev/null; then
+        [[ -s "$github_workspace/main-commits" ]] || release_fail 'release fix requires a main cherry-pick reference'
+    fi
+    while IFS= read -r revision; do
+        release_validate_main_commit "$repo" "$revision" "$policy"
+        github_commit_pr "$revision" main true
+        jq -e --slurpfile release "$github_output/event.json" \
+            '.merged_at <= $release[0].merged_at' "$github_workspace/selected-pr.json" > /dev/null ||
+            release_fail 'release fix was not merged on main first'
+    done < "$github_workspace/main-commits"
+    encoded=$(jq -cn --arg repository "$github_repository" --arg branch "$branch" --arg source "$source" \
+        '[1,"request",$repository,$branch,$source]')
+    key=$(printf '%s' "$encoded" | release_sha256 /dev/stdin)
+    jq -e --arg key "$key" --arg fingerprint "$fingerprint" \
+        '.requests[$key] == null or .requests[$key].enforcement_sha256 == $fingerprint' \
+        "$ledger" > /dev/null || release_fail 'release protection rules changed; review before retrying'
+    if jq -e --arg key "$key" '.requests[$key] != null' "$ledger" > /dev/null; then
+        jq --arg key "$key" '.requests[$key].event' "$ledger" > "$github_output/event.json"
+    fi
+}
+
 github_select_durable() {
     local repo=$1 event=$2 name=$3 source=$4 ledger=$5 branch line fingerprint last number
     local main_sha parents kind policy
 
     jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" \
         'include "publication"; validate_ledger($repository)' "$ledger" > /dev/null
+    if [[ "$name" == pull_request ]]; then
+        github_select_release_pr "$repo" "$event" "$source" "$ledger"
+        return
+    fi
     jq -e -L "$RELEASE_ROOT/tools/release" --arg name "$name" \
         --arg repository "$github_repository" --arg source "$source" \
         'include "github"; workflow_event($name; $repository; $source)' "$event" \
@@ -523,7 +576,8 @@ main() {
     : > "$github_output/api-inventory.jsonl"
     if [[ -n "$check_rules" ]]; then
         jq -en -L "$RELEASE_ROOT/tools/release" --arg branch "$check_rules" \
-            'include "policy"; $branch | startswith("release/") and (.[8:] | line_name)' > /dev/null
+            'include "semver"; include "policy"; $branch | startswith("release/") and
+              (.[8:] | line_name or (semver and (semver_parts | .metadata == null)))' > /dev/null
         github_rules "$repo" "$check_rules"
         return
     fi
