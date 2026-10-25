@@ -54,7 +54,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: read
-          permission-administration: read
+          permission-administration: write
           permission-actions: read
 
       - name: Check the configured App and protected version tags
