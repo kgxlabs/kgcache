@@ -251,6 +251,10 @@ github_select_release_pr() {
             jq -e --arg source "$parent" --arg branch "$branch" --argjson number "$previous" \
                 'any(.requests[]; .source_sha == $source and .branch == $branch and .event.pr_number == $number)' \
                 "$ledger" > /dev/null || release_fail 'previous RC merge has no stored request; retry its original workflow first'
+        else
+            jq -e --arg source "$parent" --arg branch "$branch" \
+                'any(.requests[]; .source_sha == $source and .branch == $branch)' "$ledger" > /dev/null ||
+                release_fail 'initial RC request is missing; retry branch creation or recover the initial request from main'
         fi
     fi
     git --no-replace-objects -C "$repo" merge-base --is-ancestor "$source" "refs/remotes/origin/$branch"
@@ -286,12 +290,100 @@ github_select_release_pr() {
     fi
 }
 
+github_select_dispatch() {
+    local repo=$1 event=$2 source=$3 ledger=$4 trigger=$5 branch run key parent actor permission creation_run encoded
+
+    run=${GITHUB_RUN_ID:-}
+    jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" \
+        --arg source "$source" --arg run "$run" --arg trigger "$trigger" \
+        'include "release-pr"; if $trigger == "repository_dispatch" then creation_dispatch_event($repository; $source; $run)
+         else dispatch_event($repository; $source; $run) end' "$event" > "$github_output/event.json"
+    branch=$(jq -r .branch "$github_output/event.json")
+    github_rules "$repo" "$branch"
+    github_get "/repos/$github_repository/actions/runs/$run" "$github_output/api/dispatch-run.json"
+    jq -e --arg repository "$github_repository" --arg run "$run" --arg workflow "${GITHUB_SHA:-}" --arg trigger "$trigger" \
+        --slurpfile event "$github_output/event.json" \
+        '.event == $trigger and .head_branch == "main" and .head_sha == $workflow and
+          .path == ".github/workflows/release.yml" and (.id | tostring) == $run and
+          (.repository.full_name | ascii_downcase) == $repository and
+          .actor.login == $event[0].actor.login and .actor.id == $event[0].actor.id and
+          (.triggering_actor.login | type == "string" and length > 0)' \
+        "$github_output/api/dispatch-run.json" > /dev/null || release_fail 'dispatch run differs from authenticated main workflow'
+    jq -r '.actor.login, .triggering_actor.login' "$github_output/api/dispatch-run.json" > "$github_workspace/dispatch-actors"
+    if [[ "$trigger" == repository_dispatch ]]; then
+        creation_run=$(jq -r .creation_run_id "$github_output/event.json")
+        github_get "/repos/$github_repository/actions/runs/$creation_run" "$github_output/api/creation-run.json"
+        jq -e --arg repository "$github_repository" --arg branch "$branch" --arg source "$source" --arg run "$creation_run" \
+            '.event == "create" and .head_branch == $branch and .head_sha == $source and
+              .path == ".github/workflows/initial-rc.yml" and (.id | tostring) == $run and
+              (.repository.full_name | ascii_downcase) == $repository and
+              (.actor.login | type == "string" and length > 0) and (.actor.id | type == "number" and . > 0) and
+              (.triggering_actor.login | type == "string" and length > 0)' \
+            "$github_output/api/creation-run.json" > /dev/null || release_fail 'creation run differs from the original RC branch source'
+        jq -r '.actor.login, .triggering_actor.login' "$github_output/api/creation-run.json" > "$github_workspace/dispatch-actors"
+        jq --slurpfile creation "$github_output/api/creation-run.json" '.actor = $creation[0].actor' \
+            "$github_output/event.json" > "$github_workspace/creation-event.json"
+        mv "$github_workspace/creation-event.json" "$github_output/event.json"
+    fi
+    while IFS= read -r actor; do
+        github_permission "$actor"
+        permission=$(cat "$github_workspace/can-write")
+        [[ "$permission" == true ]] || release_fail 'publication actor requires current maintainer write access'
+    done < "$github_workspace/dispatch-actors"
+    git --no-replace-objects -C "$repo" merge-base --is-ancestor "$source" "refs/remotes/origin/$branch"
+    git --no-replace-objects -C "$repo" merge-base --is-ancestor "$source" refs/remotes/origin/main ||
+        release_fail 'manual publication source must be a reviewed main commit'
+    parent=$(git --no-replace-objects -C "$repo" show -s --format=%P "$source")
+    [[ "$parent" =~ ^[0-9a-f]{40}$ ]] || release_fail 'manual publication source must have exactly one parent'
+    github_commit_pr "$source" main true
+    jq -e --slurpfile config "$github_workspace/automation.json" \
+        --slurpfile run "$github_output/api/dispatch-run.json" \
+        '.merged_at >= $config[0].enforcement_since and .merged_at <= $run[0].created_at' \
+        "$github_workspace/selected-pr.json" > /dev/null || release_fail 'manual source predates enforced review or was merged after dispatch'
+    github_activities "$branch" "$github_output/branch-activity.json"
+    jq -e --arg source "$source" --slurpfile config "$github_workspace/automation.json" \
+        --slurpfile run "$github_output/api/dispatch-run.json" \
+        '[.[] | select(.activity_type == "branch_creation")] | length == 1 and
+          .[0].after == $source and .[0].timestamp >= $config[0].enforcement_since and .[0].timestamp <= $run[0].created_at' \
+        "$github_output/branch-activity.json" > /dev/null ||
+        release_fail 'source must be the original RC branch creation commit; recreated branches are not eligible'
+    jq -e 'all(.[]; .activity_type != "force_push" and .activity_type != "branch_deletion")' \
+        "$github_output/branch-activity.json" > /dev/null || release_fail 'RC branch history was rewritten'
+    encoded=$(jq -cn --arg repository "$github_repository" --arg branch "$branch" --arg source "$source" \
+        '[1,"request",$repository,$branch,$source]')
+    key=$(printf '%s' "$encoded" | release_sha256 /dev/stdin)
+    if jq -e --arg key "$key" '.requests[$key] != null' "$ledger" > /dev/null; then
+        jq -e --arg key "$key" --arg run "$run" --rawfile fingerprint "$github_output/rules-sha256" \
+            '(.requests[$key].event.trigger | IN("workflow_dispatch", "repository_dispatch")) and .requests[$key].event.run_id == $run and
+              .requests[$key].enforcement_sha256 == ($fingerprint | rtrimstr("\n"))' "$ledger" > /dev/null ||
+            release_fail 'source already has a release request or protections changed; retry its original workflow'
+        jq --arg key "$key" '.requests[$key].event' "$ledger" > "$github_output/event.json"
+    else
+        jq --slurpfile run "$github_output/api/dispatch-run.json" \
+            --slurpfile reviewed "$github_workspace/selected-pr.json" --slurpfile activity "$github_output/branch-activity.json" \
+            '.workflow_sha = $run[0].head_sha | .requested_at = $run[0].created_at |
+              .creation = ($activity[0][] | select(.activity_type == "branch_creation")) |
+              if .trigger == "repository_dispatch" then
+                .notes = ("Initial release candidate for " + (.version | rtrimstr("-rc")) + ".\n\n" +
+                  "Cut from reviewed main commit [" + .source_sha[:12] + "](https://github.com/" + .repository + "/commit/" + .source_sha + ").\n\n" +
+                  "Main pull request: [#" + ($reviewed[0].number | tostring) + "](https://github.com/" + .repository + "/pull/" + ($reviewed[0].number | tostring) + ").\n\n" +
+                  "[Source and compatibility notes](https://github.com/" + .repository + "/blob/" + .source_sha + "/README.md#current-status-and-compatibility).")
+              else . end' \
+            "$github_output/event.json" > "$github_workspace/dispatch-event.json"
+        mv "$github_workspace/dispatch-event.json" "$github_output/event.json"
+    fi
+}
+
 github_select_durable() {
     local repo=$1 event=$2 name=$3 source=$4 ledger=$5 branch line fingerprint last number
     local main_sha parents kind policy
 
     jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" \
         'include "publication"; validate_ledger($repository)' "$ledger" > /dev/null
+    if [[ "$name" == workflow_dispatch || "$name" == repository_dispatch ]]; then
+        github_select_dispatch "$repo" "$event_file" "$source" "$ledger" "$name"
+        return
+    fi
     if [[ "$name" == pull_request ]]; then
         github_select_release_pr "$repo" "$event" "$source" "$ledger"
         return
@@ -600,13 +692,14 @@ main() {
         return
     fi
     if [[ -n "$ledger" ]]; then
-        [[ "$event_name" != workflow_dispatch && -z "$version" && -z "$line" ]] ||
-            release_fail 'durable admission requires an unmodified branch event'
+        [[ -z "$version" && -z "$line" ]] || release_fail 'durable admission cannot override the assigned version'
         github_select_durable "$repo" "$event_file" "$event_name" "$source" "$ledger"
         jq -s . "$github_output/api-inventory.jsonl" > "$github_output/api-inventory.json"
         return
     fi
     if [[ "$event_name" == workflow_dispatch ]]; then
+        jq -e '.inputs.operation != "Publish RC"' "$event_file" > /dev/null ||
+            release_fail 'Publish RC requires durable admission; it cannot run as a preview'
         jq -e --arg repository "$github_repository" \
             '(.repository.full_name | ascii_downcase) == $repository' "$event_file" > /dev/null
         sha=$(github_preview_source "$repo" "$source_ref")

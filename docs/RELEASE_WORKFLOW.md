@@ -1,63 +1,86 @@
 # Release workflow
 
-A merged PR into `release/MAJOR.MINOR.PATCH-rc` requests the next numbered
-release candidate. For example, the first merge into `release/0.1.0-rc`
-requests `0.1.0-rc.1`. The next merge into that same branch requests
-`0.1.0-rc.2`.
-Main remains the development branch. Release branches are not merged into main
-as the release trigger.
+Creating a remote `release/MAJOR.MINOR.PATCH-rc` branch requests the first
+release candidate. For example, creating `release/0.1.0-rc` from reviewed main
+requests `0.1.0-rc.1`. No preparation commit or PR is needed for that candidate.
 
-The target branch supplies the version and RC series. Protected release state
-assigns each merged PR its number. Exact-version branches remain available:
-a merge into `release/0.1.0` requests `0.1.0`, and a merge into
-`release/0.1.0-rc.1` requests exactly `0.1.0-rc.1`.
-Release notes come from the PR body captured at merge time. There is no
-release-line registry or release-note file to update for each version.
+Later, merge fixes into main first. Cherry-pick them into a working branch and
+open a PR against the same RC branch. Squash merging that PR requests the next
+candidate, such as `0.1.0-rc.2`.
 
-## Prepare a release
+Branch creation requests qualification. Publication happens only after the
+source, image, transfer, and clean-pull checks pass. Local branch creation alone
+has no effect until the branch is pushed to GitHub.
 
-1. Choose an RC series, such as `0.1.0-rc`, or an exact version such as `0.1.0`.
-2. Create its `release/` branch from the intended tested source. The first release
-   branch must include the current release tooling from main.
-3. Create a working branch from that release branch. Put final preparation or
-   compatible backports there. Fixes land on main first and retain the full
-   cherry-pick reference.
-4. Open a PR with that release branch as its base. Use its body for release notes.
-   An empty body falls back to the PR title and link.
-5. Wait for the required server, client, build, shell, and maintenance checks.
-6. Squash merge the PR into the release branch to request publication.
+## Start an RC series
 
-For a fix after `0.1.0-rc.1`, merge the fix into main first. Create a working
-branch from `release/0.1.0-rc`, cherry-pick the main commit with
-`git cherry-pick -x`, and open a PR back to `release/0.1.0-rc`. Retain the full
-cherry-pick reference in the PR body or squash message. Its merge requests
-`0.1.0-rc.2`. Each merged PR requests a candidate, including preparation PRs.
+1. Merge the release automation into main before creating the RC branch.
+2. Choose a target version, such as `0.1.0`, and a reviewed main commit.
+3. Create `release/0.1.0-rc` from that commit and push it to GitHub. Creating the
+   branch in GitHub's UI with main as its source works too.
+4. Watch Request initial RC in Actions. It forwards the request to Release
+   candidates on main. The publisher verifies the original branch creation,
+   source review, actor access, and effective protections before reserving a number.
+5. Watch Release candidates complete qualification and publication.
 
-Branch creation, direct pushes, opened PRs, and closed unmerged PRs do not
-publish. Ordinary PRs into main do not publish. Release requests use branches
-within this repository.
+For example, from a clean checkout:
 
-The target branch needs a complete version or RC series without a leading `v` or build
-metadata. `release/0.1` is not a versioned release request. The tag gets the
-leading `v` automatically. A prerelease version becomes a GitHub prerelease and
-does not advance stable Docker line or `latest` aliases.
+```sh
+git fetch origin main
+git switch --no-track -c release/0.1.0-rc origin/main
+git push -u origin release/0.1.0-rc
+```
 
-Each version belongs to one merged PR. Keep the same RC branch for later
-candidates. Numbering starts at one and advances past all stored requests for
-that version and RC series, including queued, failed, and exact-version requests.
-A failed request keeps its number. Another PR receives a new number and cannot
-replace the content of an already requested or published version. An unrelated
-existing tag stops publication rather than being overwritten or skipped.
-Retry a failed request from its original workflow run.
+The branch name is an intent to publish. Reserve `release/*-rc` names for real
+candidate series. The source must be the original branch cut and a main commit
+merged through an enforced PR. Initial notes link that source, its main PR, and
+its documented compatibility limits. The publisher freezes those notes.
 
-RC requests enter state in branch history order. If a later merge reaches the
-workflow first, retry the earlier merge's workflow before retrying the later one.
-This keeps candidate numbers in merge order. Publication also waits for earlier
-requests on the branch to finish, except for untagged qualification failures.
+## Publish later candidates
 
-Once a candidate is approved, request the final release with a PR into
-`release/0.1.0` based on the approved source. Later bug fixes target `0.1.1`,
-with `release/0.1.1-rc` available if another candidate cycle is needed.
+1. Merge the fix into main.
+2. Create a working branch from the latest `release/0.1.0-rc`.
+3. Cherry-pick the main commit with `git cherry-pick -x`.
+4. Open a PR into `release/0.1.0-rc`. Use its body for release notes. Retain the
+   full cherry-pick reference in the PR body or squash message.
+5. Wait for the required checks, then squash merge to request `0.1.0-rc.2`.
+
+An initial request must be stored before later RC PRs are admitted. If GitHub
+runs them out of order, retry the PR workflow after the initial request is stored.
+Publication waits for earlier requests on the branch to finish, except for
+untagged qualification failures.
+
+Direct pushes, opened PRs, and closed unmerged PRs do not publish later candidates.
+Ordinary main PRs do not publish. Branches for exact versions, such as
+`release/0.1.0`, still publish that version through a merged PR.
+
+Each version belongs to one stored request. RC numbering starts at one and
+advances past all reserved numbers, including queued, failed, and exact-version
+requests. Retrying a failed request keeps its number and notes. Another request
+cannot replace an existing version. Existing unrelated tags stop publication.
+A prerelease does not advance stable Docker line tags or `latest`.
+
+Do not delete and recreate an RC branch to retry a release. Recreated and
+force-updated branches fail the creation audit. Retry the original Release
+candidates run instead. If forwarding failed, check for an existing publisher
+run before rerunning Request initial RC.
+
+## Recover an existing RC branch
+
+A branch created before this automation was installed has no new creation event
+to trigger it. Use the explicit initial-publication action once:
+
+1. Open Actions, then Release candidates, and run the workflow from main.
+2. Set `operation` to Publish RC.
+3. Set `source_ref` to the existing RC branch, such as `release/0.1.0-rc`.
+4. Set `source_sha` to its original branch creation commit. For a branch without
+   backports, `git rev-parse origin/release/0.1.0-rc` gives that commit.
+5. Provide `release_notes` and leave `version` empty.
+
+This path verifies the same original creation and main review. It cannot
+publish an arbitrary branch commit or override a reserved version. Retry the
+original workflow run after a failure. A new dispatch for an already requested
+source points back to its original request.
 
 ## Automatic publication
 
@@ -124,8 +147,8 @@ A blocked version stops further publication writes.
 
 ## Read-only previews
 
-Open Actions, then Release candidate qualification. Run it from main with the
-chosen `source_ref` and an optional explicit `version`. Manual dispatch remains
+Open Actions, then Release candidates. Choose Preview and run it from main
+with the chosen `source_ref` and an optional explicit `version`. Preview remains
 read-only even when publication is enabled. It builds and qualifies the chosen
 source/version pair, verifies saved-image transfer, and retains artifacts. It
 creates no release request, Git tag, registry upload, or GitHub Release.
@@ -167,8 +190,8 @@ different content, changed protection rules, and unexplained tags stop progress.
 ## Validate automation changes
 
 Run the release proposal, candidate, GitHub, and publication fixtures. The
-publication suite includes repeated merges into one RC branch, main-first
-backports, automatic state creation, frozen notes, exact version selection,
+publication suite includes automatic initial requests, existing-branch recovery,
+main-first backports, automatic state creation, frozen notes, exact version selection,
 duplicate rejection, and retry recovery.
 
 ```sh

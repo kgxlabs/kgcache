@@ -1,0 +1,31 @@
+name: Request initial RC
+
+on: create
+
+# This workflow forwards a request. Publisher credentials are used only on main.
+permissions:
+  contents: write
+
+jobs:
+  request:
+    if: github.event.ref_type == 'branch' && startsWith(github.event.ref, 'release/') && endsWith(github.event.ref, '-rc')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Request publication from the trusted main workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ github.event.ref }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          [[ "$BRANCH" =~ ^release/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc$ ]] || exit 0
+          jq -n --arg branch "$BRANCH" --arg source "$SOURCE_SHA" --arg run "$GITHUB_RUN_ID" \
+            '{event_type:"initial-rc",client_payload:{branch:$branch,source_sha:$source,creation_run_id:$run}}' \
+            > "$RUNNER_TEMP/initial-rc.json"
+          curl --fail --silent --show-error --max-time 60 --connect-timeout 10 \
+            --request POST --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Content-Type: application/json' --data-binary "@$RUNNER_TEMP/initial-rc.json" \
+            "https://api.github.com/repos/$REPOSITORY/dispatches"

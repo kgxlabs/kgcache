@@ -41,6 +41,38 @@ def release_event($repository; $source):
       head_sha: $pr.head.sha, merged_at: $pr.merged_at, title: $pr.title,
       notes: ($pr.body // ""), decision_ref: ("https://github.com/" + $repository + "/pull/" + ($pr.number | tostring))};
 
+def dispatch_event($repository; $source; $run):
+  require((.repository.full_name | ascii_downcase) == $repository and
+      (.ref == "main" or .ref == "refs/heads/main") and .inputs.operation == "Publish RC";
+      "RC publication requires an explicit Publish RC dispatch from main")
+  | require((.inputs.source_sha | sha) and .inputs.source_sha == $source and
+      (.inputs.version // "") == ""; "publication requires the exact source SHA and automatic version selection")
+  | require(($run | type == "string" and test("\\A[1-9][0-9]*\\z")) and
+      (.sender.login | reference) and (.sender.id | type == "number" and . > 0 and floor == .);
+      "publication requires a dispatch run and actor identity")
+  | (.inputs.source_ref | release_version) as $target
+  | require($target | rc_series; "manual publication requires release/MAJOR.MINOR.PATCH-rc")
+  | require(.inputs.release_notes | type == "string" and length <= 32768 and
+      (gsub("(?s)<!--.*?-->"; "") | gsub("^\\s+|\\s+$"; "") | length > 0);
+      "manual publication requires nonempty release notes")
+  | {schema_version: 1, repository: $repository, kind: "release", trigger: "workflow_dispatch",
+      branch: .inputs.source_ref, source_sha: $source, version: $target, pr_number: null,
+      run_id: $run, actor: .sender, title: ("Publish " + $target), notes: .inputs.release_notes,
+      decision_ref: ("https://github.com/" + $repository + "/actions/runs/" + $run)};
+
+def creation_dispatch_event($repository; $source; $run):
+  require(.action == "initial-rc" and (.repository.full_name | ascii_downcase) == $repository and
+      .sender.login == "github-actions[bot]"; "expected an automatic initial RC request")
+  | require((.client_payload.source_sha | sha) and .client_payload.source_sha == $source and
+      (.client_payload.creation_run_id | type == "string" and test("\\A[1-9][0-9]*\\z")) and
+      ($run | type == "string" and test("\\A[1-9][0-9]*\\z")); "invalid branch creation request identity")
+  | (.client_payload.branch | release_version) as $target
+  | require($target | rc_series; "automatic publication requires release/MAJOR.MINOR.PATCH-rc")
+  | {schema_version:1,repository:$repository,kind:"release",trigger:"repository_dispatch",origin:"branch_creation",
+      branch:.client_payload.branch,source_sha:$source,version:$target,pr_number:null,
+      run_id:$run,creation_run_id:.client_payload.creation_run_id,actor:.sender,title:("Publish " + $target),notes:"",
+      decision_ref:("https://github.com/" + $repository + "/actions/runs/" + $run)};
+
 def release_proposal($event; $policy; $development; $key; $source_key):
   ($event.notes | gsub("(?s)<!--.*?-->"; "") | gsub("^\\s+|\\s+$"; "")) as $notes
   | {schema_version: 1, mode: "release", repository: $event.repository,

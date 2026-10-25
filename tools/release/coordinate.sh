@@ -175,10 +175,7 @@ main() {
         remote=$fixture_path
     else
         [[ "$remote" == "https://github.com/$repository.git" ]] || release_fail 'production remote must match repository'
-        [[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_REPOSITORY:-}" == "$repository" &&
-            "${GITHUB_EVENT_NAME:-}" == pull_request &&
-            "${GITHUB_REF:-}" == refs/heads/release/* ]] ||
-            release_fail 'production coordination requires an authenticated release PR workflow'
+        branch=$(release_workflow_branch "$repository")
     fi
     trap cleanup_coordinate EXIT
     trap 'exit 130' INT
@@ -204,7 +201,6 @@ main() {
             'include "publication"; validate_automation($repository) | .enabled == true' \
             "$coordinate_workspace/config.json" > /dev/null ||
             release_fail 'production release automation is not activated'
-        branch=${GITHUB_REF#refs/heads/}
         bash "$RELEASE_ROOT/tools/release/github.sh" --repo "$coordinate_workspace/repo" \
             --repository "$repository" --check-rules "$branch" --output "$coordinate_workspace/rules"
     fi
@@ -217,7 +213,8 @@ main() {
         coordinate_write "$remote" "$state_ref" '' 'chore(release): initialize durable state'
         return
     fi
-    if [[ -z "$expected" && "$operation" == enqueue && "$event_name" == pull_request ]]; then
+    if [[ -z "$expected" && "$operation" == enqueue &&
+        ("$event_name" == pull_request || "$event_name" == workflow_dispatch || "$event_name" == repository_dispatch) ]]; then
         jq -n --arg repository "$repository" \
             '{schema_version:1,repository:$repository,lines:{},requests:{},aliases:{}}' \
             > "$coordinate_workspace/state.json"
@@ -248,9 +245,10 @@ main() {
         branch=$(jq -r '.branch' "$selected/event.json")
         line=${branch#release/}
         key=$(coordinate_key "$repository" "$branch" "$source")
-        [[ "$fixture" == true || ("$source" == "${GITHUB_SHA:-}" &&
-            "$event_name" == "${GITHUB_EVENT_NAME:-}" && "refs/heads/$branch" == "${GITHUB_REF:-}") ]] ||
-            release_fail 'request differs from authenticated workflow source'
+        if [[ "$fixture" == false ]]; then
+            [[ "$event_name" == "$GITHUB_EVENT_NAME" ]] || release_fail 'request differs from authenticated workflow event'
+            release_require_workflow_source "$repository" "$branch" "$source"
+        fi
         if jq -e --arg key "$key" '.requests[$key] != null' "$coordinate_workspace/state.json" > /dev/null; then
             jq --arg key "$key" '.requests[$key]' "$coordinate_workspace/state.json"
             return
@@ -296,8 +294,12 @@ main() {
         release_fail 'unknown durable request; do not allocate a replacement'
     branch=$(jq -r --arg key "$request" '.requests[$key].branch' "$coordinate_workspace/state.json")
     source=$(jq -r --arg key "$request" '.requests[$key].source_sha' "$coordinate_workspace/state.json")
-    [[ "$fixture" == true || ("$source" == "${GITHUB_SHA:-}" &&
-        "refs/heads/$branch" == "${GITHUB_REF:-}") ]] || release_fail 'retry the original source workflow'
+    if [[ "$fixture" == false ]]; then
+        release_require_workflow_source "$repository" "$branch" "$source"
+        jq -e --arg key "$request" --arg run "${GITHUB_RUN_ID:-}" \
+            '(.requests[$key].event.trigger | IN("workflow_dispatch", "repository_dispatch") | not) or .requests[$key].event.run_id == $run' \
+            "$coordinate_workspace/state.json" > /dev/null || release_fail 'retry the original manual publication workflow'
+    fi
     line=${branch#release/}
     status=$(jq -r --arg key "$request" '.requests[$key].status' "$coordinate_workspace/state.json")
     [[ "$status" != superseded ]] || release_fail 'request was superseded; use the accepted descendant'
@@ -426,11 +428,11 @@ main() {
                 --proto '=https' --header "Authorization: Bearer ${GH_TOKEN:?}" \
                 --output "$coordinate_workspace/artifact.json" \
                 "https://api.github.com/repos/$repository/actions/artifacts/$artifact"
-            jq -e --arg id "$artifact" --arg source "$source" \
+            jq -e -L "$RELEASE_ROOT/tools/release" --arg id "$artifact" \
                 --slurpfile candidate "$coordinate_workspace/candidate/candidate.json" \
-                '(.id | tostring) == $id and .expired == false and
-                 (.workflow_run.id | tostring) == $candidate[0].run.id and
-                 .workflow_run.head_sha == $source' "$coordinate_workspace/artifact.json" > /dev/null ||
+                --slurpfile request "$coordinate_workspace/state.json" --arg key "$request" \
+                'include "candidate"; candidate_artifact_matches($candidate[0]; $request[0].requests[$key].event; $id)' \
+                "$coordinate_workspace/artifact.json" > /dev/null ||
                 release_fail 'retained artifact is missing, expired, or belongs to another source'
         fi
         # Re-run current policy and reservation checks before a tag mutation.

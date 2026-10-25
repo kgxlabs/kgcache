@@ -3,11 +3,11 @@
 `tools/release/propose.sh` makes read-only source/version previews. It does not
 build, reserve a version, change Git refs, upload an image, or create a release.
 
-For actual publication, merge a preparation or backport PR into
-`release/MAJOR.MINOR.PATCH-rc` for the next numbered candidate, or into
-`release/VERSION` for an exact version. The workflow derives the version from
-the PR target and protected request history. It captures notes from the PR body.
-See the [release workflow](RELEASE_WORKFLOW.md).
+For an initial candidate, create a remote `release/MAJOR.MINOR.PATCH-rc` branch
+from reviewed main. Later backport PRs into that branch request the next number.
+The protected state freezes each source, version, and notes before qualification.
+The explicit Publish RC action can recover branches created before automation
+was installed. See the [release workflow](RELEASE_WORKFLOW.md).
 There is no checked-in release-line registry to maintain.
 
 ## Preview a committed source
@@ -30,8 +30,10 @@ request, even if its version looks like an intended public release.
 
 ## Automatic request proposals
 
-A merged release PR produces a mode `release` proposal with its exact merge
-commit, assigned version, PR reference, and frozen notes. The protected state
+An initial branch request or merged release PR produces a mode `release`
+proposal with its exact source commit, assigned version, request reference, and
+frozen notes. Initial notes are generated from the reviewed cut. Later notes
+come from the backport PR body. The protected state
 reserves the next number for RC series branches when it records the request.
 Queued and failed requests retain their numbers. A retry recovers that same
 proposal. A second PR cannot claim the same version.

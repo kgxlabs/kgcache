@@ -4,6 +4,7 @@ set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/candidates.sh"
 source "${BASH_SOURCE[0]%/*}/github.sh"
 source "${BASH_SOURCE[0]%/*}/merged-pr.sh"
+source "${BASH_SOURCE[0]%/*}/manual.sh"
 
 publication_workspace=
 publication_remote=
@@ -345,7 +346,8 @@ check_registry_and_api() {
     expect_github_failure superseded-retry 'request was superseded' coordinate_fixture allocate --request "$prior_key"
     printf 'Passed: failed qualification retry and reviewed descendant reuse without another tag\n'
     check_merged_release_publication
-    check_merged_release_publication rc v0.1.0-rc.2
+    check_merged_release_publication manual v0.4.0-rc.1 'Manual candidate notes.'
+    check_merged_release_publication automatic v0.5.0-rc.1 'Initial release candidate for 0.5.0.'
 }
 
 check_publication_protections() {
@@ -437,7 +439,8 @@ main() {
     check_publication_protections
     check_owner_review_rules
     check_merged_release_prs
-    check_rc_release_prs
+    check_initial_release manual
+    check_initial_release automatic
     check_alias_precedence
     if [[ "$docker_checks" == true ]]; then check_registry_and_api; fi
     printf 'Publication contracts passed with local Git fixtures. No external writes.\n'
