@@ -77,7 +77,121 @@
         }
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "queued"
+      "status": "admitted",
+      "proposal": {
+        "schema_version": 1,
+        "mode": "release",
+        "repository": "kgxlabs/kgcache",
+        "publishable": false,
+        "proposal_only": true,
+        "qualification_required": true,
+        "source_sha": "2f3b23fd21ea8d6b8ab298747047d18dae56c77a",
+        "development_version": "0.0.0",
+        "policy_sha": "d8a9ed3dfc7e64053cf6123d0853c404bd442335",
+        "original_policy_sha": "d8a9ed3dfc7e64053cf6123d0853c404bd442335",
+        "reservation": null,
+        "line": "0.1",
+        "branch": "release/0.1.0-rc",
+        "cut_sha": "2f3b23fd21ea8d6b8ab298747047d18dae56c77a",
+        "version": "0.1.0-rc.1",
+        "intended_tag": "v0.1.0-rc.1",
+        "channel": "prerelease",
+        "image": {
+          "version_tag": "0.1.0-rc.1",
+          "source_version_key": "a3e42c662783e5c9519547b3f48f4ac61b0586cd77f545f58a043a82ff02a2b6",
+          "source_tag": "src-a3e42c662783e5c9519547b3f48f4ac61b0586cd77f545f58a043a82ff02a2b6"
+        },
+        "request_key": "7e6c0742e99bdff138ea540da01c4d189c2515ef2e0b4cd6d6c334247bcde183",
+        "event": {
+          "schema_version": 1,
+          "repository": "kgxlabs/kgcache",
+          "kind": "release",
+          "trigger": "workflow_dispatch",
+          "branch": "release/0.1.0-rc",
+          "source_sha": "2f3b23fd21ea8d6b8ab298747047d18dae56c77a",
+          "version": "0.1.0-rc.1",
+          "pr_number": null,
+          "run_id": "40216187085",
+          "actor": {
+            "login": "Kaung-HtetKyaw",
+            "id": 50027060,
+            "node_id": "MDQ6VXNlcjUwMDI3MDYw",
+            "avatar_url": "https://avatars.githubusercontent.com/u/50027060?v=4",
+            "gravatar_id": "",
+            "url": "https://api.github.com/users/Kaung-HtetKyaw",
+            "html_url": "https://github.com/Kaung-HtetKyaw",
+            "followers_url": "https://api.github.com/users/Kaung-HtetKyaw/followers",
+            "following_url": "https://api.github.com/users/Kaung-HtetKyaw/following{/other_user}",
+            "gists_url": "https://api.github.com/users/Kaung-HtetKyaw/gists{/gist_id}",
+            "starred_url": "https://api.github.com/users/Kaung-HtetKyaw/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/Kaung-HtetKyaw/subscriptions",
+            "organizations_url": "https://api.github.com/users/Kaung-HtetKyaw/orgs",
+            "repos_url": "https://api.github.com/users/Kaung-HtetKyaw/repos",
+            "events_url": "https://api.github.com/users/Kaung-HtetKyaw/events{/privacy}",
+            "received_events_url": "https://api.github.com/users/Kaung-HtetKyaw/received_events",
+            "type": "User",
+            "user_view_type": "public",
+            "site_admin": false
+          },
+          "title": "Publish 0.1.0-rc",
+          "notes": "First release candidate for kgcache 0.1.0.  Includes string storage, expiration, snapshots, and optional AOF persistence.  Experimental release with partial Redis compatibility. Values are strings only. Active expiration has a known locking issue.",
+          "decision_ref": "https://github.com/kgxlabs/kgcache/actions/runs/40216187085",
+          "workflow_sha": "d8a9ed3dfc7e64053cf6123d0853c404bd442335",
+          "requested_at": "2026-10-25T17:22:53Z",
+          "creation": {
+            "id": 47728160750,
+            "node_id": "PSH_kwLOTGuGD88AAAALHNHv7g",
+            "before": "0000000000000000000000000000000000000000",
+            "after": "2f3b23fd21ea8d6b8ab298747047d18dae56c77a",
+            "ref": "refs/heads/release/0.1.0-rc",
+            "timestamp": "2026-10-25T15:45:29Z",
+            "activity_type": "branch_creation",
+            "actor": {
+              "login": "Kaung-HtetKyaw",
+              "id": 50027060,
+              "node_id": "MDQ6VXNlcjUwMDI3MDYw",
+              "avatar_url": "https://avatars.githubusercontent.com/u/50027060?v=4",
+              "gravatar_id": "",
+              "url": "https://api.github.com/users/Kaung-HtetKyaw",
+              "html_url": "https://github.com/Kaung-HtetKyaw",
+              "followers_url": "https://api.github.com/users/Kaung-HtetKyaw/followers",
+              "following_url": "https://api.github.com/users/Kaung-HtetKyaw/following{/other_user}",
+              "gists_url": "https://api.github.com/users/Kaung-HtetKyaw/gists{/gist_id}",
+              "starred_url": "https://api.github.com/users/Kaung-HtetKyaw/starred{/owner}{/repo}",
+              "subscriptions_url": "https://api.github.com/users/Kaung-HtetKyaw/subscriptions",
+              "organizations_url": "https://api.github.com/users/Kaung-HtetKyaw/orgs",
+              "repos_url": "https://api.github.com/users/Kaung-HtetKyaw/repos",
+              "events_url": "https://api.github.com/users/Kaung-HtetKyaw/events{/privacy}",
+              "received_events_url": "https://api.github.com/users/Kaung-HtetKyaw/received_events",
+              "type": "User",
+              "user_view_type": "public",
+              "site_admin": false
+            }
+          }
+        },
+        "source_eligible": true,
+        "reused": false,
+        "supersedes": [],
+        "decision_ref": "https://github.com/kgxlabs/kgcache/actions/runs/40216187085",
+        "release_notes": {
+          "pr_number": null,
+          "body": "First release candidate for kgcache 0.1.0.  Includes string storage, expiration, snapshots, and optional AOF persistence.  Experimental release with partial Redis compatibility. Values are strings only. Active expiration has a known locking issue.",
+          "sha256": "167d926f24b4fc835fa211e5f8e441ee13c21c66cc164893edc7fb68cf4017c7"
+        },
+        "state_request": {
+          "mode": "release",
+          "repository": "kgxlabs/kgcache",
+          "branch": "release/0.1.0-rc",
+          "source_sha": "2f3b23fd21ea8d6b8ab298747047d18dae56c77a",
+          "policy_sha": "d8a9ed3dfc7e64053cf6123d0853c404bd442335",
+          "request_key": "7e6c0742e99bdff138ea540da01c4d189c2515ef2e0b4cd6d6c334247bcde183",
+          "version": "0.1.0-rc.1",
+          "status": "proposed"
+        },
+        "eligibility_limits": [
+          "Native source and image qualification must pass before publication."
+        ]
+      }
     }
   },
   "aliases": {}
