@@ -40,6 +40,46 @@ release_require_value() {
     fi
 }
 
+release_workflow_branch() {
+    local repository=$1
+
+    [[ "${GITHUB_ACTIONS:-}" == true && "${GITHUB_REPOSITORY:-}" == "$repository" ]] ||
+        release_fail 'publication requires an authenticated repository workflow'
+    case "${GITHUB_EVENT_NAME:-}" in
+        pull_request)
+            [[ "${GITHUB_REF:-}" == refs/heads/release/* ]] || release_fail 'expected a release PR workflow'
+            printf '%s\n' "${GITHUB_REF#refs/heads/}"
+            ;;
+        workflow_dispatch | repository_dispatch)
+            [[ "${GITHUB_REF:-}" == refs/heads/main &&
+                "${GITHUB_WORKFLOW_REF:-}" == "$repository/.github/workflows/release.yml@refs/heads/main" &&
+                "${GITHUB_WORKFLOW_SHA:-}" == "${GITHUB_SHA:-}" ]] ||
+                release_fail 'manual publication must use the release workflow from main'
+            jq -er -L "$RELEASE_ROOT/tools/release" --arg repository "$repository" \
+                --arg run "${GITHUB_RUN_ID:-}" \
+                --arg trigger "$GITHUB_EVENT_NAME" \
+                'include "release-pr"; if $trigger == "repository_dispatch" then
+                   creation_dispatch_event($repository; .client_payload.source_sha; $run)
+                 else dispatch_event($repository; .inputs.source_sha; $run) end | .branch' \
+                "${GITHUB_EVENT_PATH:?}"
+            ;;
+        *) release_fail 'expected a release PR or explicit Publish RC workflow' ;;
+    esac
+}
+
+release_require_workflow_source() {
+    local repository=$1 branch=$2 source=$3 selected
+
+    selected=$(release_workflow_branch "$repository") || return 1
+    [[ "$selected" == "$branch" ]] || release_fail 'request differs from authenticated workflow branch'
+    if [[ "$GITHUB_EVENT_NAME" == repository_dispatch ]]; then
+        selected=$(jq -er '.client_payload.source_sha' "$GITHUB_EVENT_PATH") || return 1
+    elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+        selected=$(jq -er '.inputs.source_sha' "$GITHUB_EVENT_PATH") || return 1
+    else selected=${GITHUB_SHA:-}; fi
+    [[ "$source" == "$selected" ]] || release_fail 'request differs from authenticated workflow source'
+}
+
 release_sha256() {
     local output
 

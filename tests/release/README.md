@@ -14,9 +14,10 @@ fixture seeds transport through the registry API to test upload recovery.
 Native Linux also tests the Docker push path. No Docker Hub upload or
 real GitHub release is part of these checks.
 
-The publication suite also covers merged PRs into RC series and exact-version
-release branches. It verifies automatic state creation without a source registry,
-main-first backports, increasing RC numbers, queued and failed reservations,
+The publication suite also covers automatic initial RC requests, explicit
+recovery of existing branches, and merged PRs into exact-version release branches. It verifies automatic state creation without a source registry,
+reviewed main cuts, original branch creation, actor access, main-first backports,
+increasing RC numbers, queued and failed reservations,
 exact versions, frozen PR notes, duplicate-version rejection, and candidate retries.
 Historical merge commits in the branch base are allowed. A release request with
 multiple parents is rejected. Missing PR rules, non-squash merge methods, bypass

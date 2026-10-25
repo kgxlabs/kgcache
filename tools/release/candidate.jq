@@ -55,6 +55,15 @@ def candidate_phases:
    "source-shell", "client-prepare", "client-quality", "image-build", "image-artifact",
    "image-runtime", "image-service", "client-go", "client-node"];
 
+def candidate_artifact_matches($candidate; $event; $id):
+  (.id | tostring) == $id and .expired == false and
+  (.workflow_run.id | tostring) == $candidate.run.id and
+  (if $event.trigger | IN("workflow_dispatch", "repository_dispatch") then
+     .workflow_run.head_sha == $event.workflow_sha and
+     $candidate.run.workflow_sha == .workflow_run.head_sha and $candidate.run.id == $event.run_id and
+     $candidate.run.workflow_ref == $event.repository + "/.github/workflows/release.yml@refs/heads/main"
+   else .workflow_run.head_sha == $candidate.source_sha end);
+
 def validate_candidate:
   candidate_require(type == "object" and .schema_version == 1 and .kind == "release-candidate";
       "candidate schema_version must be 1")

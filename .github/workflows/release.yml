@@ -1,12 +1,22 @@
-name: Release candidate qualification
+name: Release candidates
 
 on:
+  repository_dispatch:
+    types: [initial-rc]
   pull_request:
     types: [closed]
     branches:
       - 'release/**'
   workflow_dispatch:
     inputs:
+      operation:
+        description: 'Preview only, or explicitly publish the first RC from a reviewed main commit'
+        required: true
+        default: Preview
+        type: choice
+        options:
+          - Preview
+          - Publish RC
       source_ref:
         description: 'Source branch, tag, or full commit SHA'
         required: true
@@ -16,14 +26,22 @@ on:
         description: 'Optional complete SemVer version for a repeatable preview'
         required: false
         type: string
+      source_sha:
+        description: 'Exact full commit SHA to publish (Publish RC only)'
+        required: false
+        type: string
+      release_notes:
+        description: 'Release notes (required for Publish RC)'
+        required: false
+        type: string
 
-# Manual dispatch stays read-only. Only merged release PRs request publication.
+# Preview is read-only. Publish RC and merged release PRs share publication.
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('release-read-only-{0}', github.run_id) || 'release-publication' }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.operation != 'Publish RC' && format('release-read-only-{0}', github.run_id) || 'release-publication' }}
   cancel-in-progress: false
   queue: max
 
@@ -32,6 +50,7 @@ jobs:
     name: Read publication activation from main
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'repository_dispatch' ||
       (github.event_name == 'pull_request' && github.event.pull_request.merged == true &&
         github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
@@ -40,6 +59,7 @@ jobs:
       publish: ${{ steps.policy.outputs.publish }}
       tooling_sha: ${{ steps.policy.outputs.tooling_sha }}
       registry: ${{ steps.policy.outputs.registry }}
+      source_sha: ${{ steps.policy.outputs.source_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,8 +74,25 @@ jobs:
           jq -e -L tools/release --arg repository "$REPOSITORY" \
             'include "publication"; validate_automation($repository)' .github/release-automation.json
           enabled=$(jq -r .enabled .github/release-automation.json)
-          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
-            enabled=false
+          source_sha=$EVENT_SHA
+          if [[ "$EVENT_NAME" == repository_dispatch ]]; then
+            source tools/release/common.sh
+            release_workflow_branch "$REPOSITORY" > /dev/null
+            source_sha=$(jq -er .client_payload.source_sha "$GITHUB_EVENT_PATH")
+            [[ "$enabled" == true ]] || { printf 'Release publication is disabled.\n' >&2; exit 1; }
+          elif [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            operation=$(jq -r '.inputs.operation // "Preview"' "$GITHUB_EVENT_PATH")
+            if [[ "$operation" == 'Publish RC' ]]; then
+              source tools/release/common.sh
+              release_workflow_branch "$REPOSITORY" > /dev/null
+              source_sha=$(jq -er .inputs.source_sha "$GITHUB_EVENT_PATH")
+              [[ "$enabled" == true ]] || { printf 'Release publication is disabled.\n' >&2; exit 1; }
+            elif [[ "$operation" == Preview ]]; then
+              enabled=false
+            else
+              printf 'Unknown release operation.\n' >&2
+              exit 1
+            fi
           else
             jq -e -L tools/release --arg repository "$REPOSITORY" --arg source "$EVENT_SHA" \
               'include "release-pr"; release_event($repository; $source)' "$GITHUB_EVENT_PATH"
@@ -64,6 +101,7 @@ jobs:
           {
             printf 'publish=%s\n' "$enabled"
             printf 'tooling_sha=%s\n' "$(git rev-parse HEAD)"
+            printf 'source_sha=%s\n' "$source_sha"
             jq -r '"registry=\(.registry_repository // "")"' .github/release-automation.json
           } >> "$GITHUB_OUTPUT"
 
@@ -128,7 +166,7 @@ jobs:
           retention-days: 30
 
   admit:
-    name: Admit the merged release PR
+    name: Admit the release publication request
     needs: route
     if: needs.route.outputs.publish == 'true'
     environment: release
@@ -164,7 +202,7 @@ jobs:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_SHA: ${{ github.sha }}
+          EVENT_SHA: ${{ needs.route.outputs.source_sha }}
         run: |
           remote="https://github.com/$REPOSITORY.git"
           bash tools/release/coordinate.sh enqueue --remote "$remote" --repository "$REPOSITORY" \
