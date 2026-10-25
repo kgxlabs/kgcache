@@ -93,10 +93,14 @@ and `SHA256SUMS` as release evidence.
 2. In the `release` Actions environment, store `RELEASE_APP_PRIVATE_KEY` and
    `DOCKERHUB_TOKEN`. Set `RELEASE_APP_ID` and `DOCKERHUB_USERNAME` as variables.
    Allow `release/*` branches and main. Main is used for manual credential checks.
-3. Protect main and `release/*` with PRs, resolved review threads, squash merges,
-   linear history, deletion and force-push restrictions, and strict CI checks.
+3. Protect main and `release/*` with PRs, resolved review threads, squash-only
+   merges, deletion and force-push restrictions, and strict CI checks.
    Use the exact check names and integration IDs in the automation settings.
    Release targets also require Maintenance compatibility.
+   Leave the separate Require linear history rule off. GitHub can reject a new
+   release branch because it inherits old merge commits from main. Required,
+   squash-only PRs keep future updates linear. The publisher checks those rules
+   and requires the release merge commit to have exactly one parent.
 4. Keep a base PR rule with zero approvals and no bypass actors. A separate
    review ruleset requires one approval and permits only the account in
    `review_bypass` to bypass it, using For pull requests only. Classic review
