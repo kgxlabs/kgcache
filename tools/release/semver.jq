@@ -54,6 +54,16 @@ def numeric_increment:
     | (if .carry == 1 then .digits + [49] else .digits end) | reverse | implode
   end;
 
+def next_candidate($target; $prefix; $releases):
+  ("0.0.0-" + $prefix + ".1" | semver_parts | .prerelease[:-1]) as $prefix_parts
+  | ($releases | map(.version | semver_parts | select(.prerelease != null)
+       | select((.major + "." + .minor + "." + .patch) == $target)
+       | select(.prerelease[:-1] == $prefix_parts)
+       | .prerelease[-1] | select(test("\\A(0|[1-9][0-9]*)\\z")))) as $counters
+  | (reduce $counters[] as $counter ("0";
+       if numeric_compare($counter; .) > 0 then $counter else . end) | numeric_increment) as $next
+  | $target + "-" + $prefix + "." + $next;
+
 def docker_tag:
   if semver then sub("\\+"; "_")
   else error("version must be SemVer 2.0.0") end

@@ -4,8 +4,10 @@
 build, reserve a version, change Git refs, upload an image, or create a release.
 
 For actual publication, merge a preparation or backport PR into
-`release/VERSION`. The workflow derives the version from the PR target and
-captures notes from its body. See the [release workflow](RELEASE_WORKFLOW.md).
+`release/MAJOR.MINOR.PATCH-rc` for the next numbered candidate, or into
+`release/VERSION` for an exact version. The workflow derives the version from
+the PR target and protected request history. It captures notes from the PR body.
+See the [release workflow](RELEASE_WORKFLOW.md).
 There is no checked-in release-line registry to maintain.
 
 ## Preview a committed source
@@ -28,17 +30,19 @@ request, even if its version looks like an intended public release.
 
 ## Automatic request proposals
 
-A merged versioned PR produces a mode `release` proposal with its exact merge
-commit, explicit version, PR reference, and frozen notes. The protected state
-records the request before qualification. A retry recovers that same proposal.
-A second PR cannot claim the same version.
+A merged release PR produces a mode `release` proposal with its exact merge
+commit, assigned version, PR reference, and frozen notes. The protected state
+reserves the next number for RC series branches when it records the request.
+Queued and failed requests retain their numbers. A retry recovers that same
+proposal. A second PR cannot claim the same version.
 
 Every candidate remains non-publishing until native qualification, transfer,
 and publication admission checks have passed. The publisher creates the tag
 only for the retained qualified image. It does not commit a source version bump.
 
-Version syntax follows SemVer. The target branch suffix supplies the complete
-version, including any prerelease suffix. Docker tags use the shared validated
+Version syntax follows SemVer. An RC series branch such as `release/0.1.0-rc`
+supplies the target version and receives an automatic numeric suffix. Other
+release branches supply the exact version. Docker tags use the shared validated
 mapping. Release notes and version history live in GitHub and the automation's
 protected state, rather than per-version source files.
 

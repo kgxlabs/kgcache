@@ -40,6 +40,11 @@ jobs:
             '.pull_request.head.repo.full_name == $repository' "$GITHUB_EVENT_PATH"
           version=$(jq -er -L base/tools/release \
             'include "release-pr"; .pull_request.base.ref | release_version' "$GITHUB_EVENT_PATH")
+          if jq -en -L base/tools/release --arg version "$version" \
+            'include "release-pr"; $version | rc_series' > /dev/null; then
+            printf 'The next RC number is reserved after merge.\n'
+            exit 0
+          fi
           status=$(curl --silent --show-error --max-time 45 \
             --header "Authorization: Bearer $GH_TOKEN" \
             --output "$RUNNER_TEMP/release-tag.json" --write-out '%{http_code}' \

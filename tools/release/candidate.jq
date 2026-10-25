@@ -1,4 +1,5 @@
 include "semver";
+include "release-pr";
 
 def candidate_require($condition; $message):
   if $condition then . else error($message) end;
@@ -32,7 +33,8 @@ def validate_candidate_proposal:
       candidate_require(.source_eligible == true and (.request_key | candidate_sha) and
         (.original_policy_sha | candidate_commit) and (.cut_sha | candidate_commit);
         "branch proposal is missing source eligibility")
-      | candidate_require((if .mode == "release" then .branch == "release/" + .version
+      | . as $proposal
+      | candidate_require((if .mode == "release" then .branch | release_matches($proposal.version)
           else .branch == "release/" + .line end) and
           (.version | semver_parts | .major + "." + .minor) == .line;
           "branch proposal line/version mismatch")
