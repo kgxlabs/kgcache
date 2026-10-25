@@ -203,6 +203,10 @@
           "workflow_sha": "d8a9ed3dfc7e64053cf6123d0853c404bd442335"
         },
         "artifact_id": "12607224024"
+      },
+      "tag_intent": {
+        "object_sha": "870a1c5e12a2193862b301ab027f89d9a8494e10",
+        "epoch": "1792949886"
       }
     }
   },
