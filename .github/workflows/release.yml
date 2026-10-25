@@ -156,7 +156,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: read
-          permission-administration: read
+          permission-administration: write
           permission-actions: read
       - name: Recover the original request before allocating a version
         id: request
@@ -419,7 +419,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: read
-          permission-administration: read
+          permission-administration: write
           permission-actions: read
       - name: Log in to the owned image repository
         env:
@@ -486,7 +486,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: read
-          permission-administration: read
+          permission-administration: write
           permission-actions: read
       - name: Preserve the failed request for retry or reviewed supersession
         env:
@@ -606,7 +606,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
           permission-pull-requests: read
-          permission-administration: read
+          permission-administration: write
           permission-actions: read
       - name: Log in to the owned image repository
         env:

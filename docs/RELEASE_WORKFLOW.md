@@ -59,6 +59,10 @@ credentials through the `release` environment. The App must authenticate with
 the configured permissions. Docker Hub must issue pull and push grants for the
 chosen repository. No image upload or release operation is attempted.
 
+After changing App permissions, approve the update for its installation. Merge
+the matching workflow changes, then start a new manual run from main. Rerunning
+an older run uses its original workflow permissions.
+
 After replacing the Docker PAT, choose `production` to verify the replacement.
 Leave `candidate_run_id` empty to check credentials alone. This is separate
 from proving registry image transport. The final job rejects missing requested
@@ -76,8 +80,11 @@ Do not cut a production branch or create a GitHub version to test local changes.
 The local fixtures below cover tags, registry writes, and release API recovery.
 
 1. Install a dedicated GitHub App on this repository. Grant Contents write,
-   Pull requests read, Administration read, and Actions read. Give it no
-   administration write permission. Restrict its installation to this repository.
+   Pull requests read, Administration write, and Actions read. Administration
+   write is needed to inspect ruleset bypass lists. It also lets the App change
+   protections, although the release tooling only reads these settings. Restrict
+   its installation to this repository. Approve permission updates on the
+   installation before running workflows that request them.
 2. Create the `release` Actions environment. Store `RELEASE_APP_PRIVATE_KEY` and
    `DOCKERHUB_TOKEN` as secrets. Set `RELEASE_APP_ID` and `DOCKERHUB_USERNAME` as
    variables. Keep publisher credentials out of qualification jobs.
