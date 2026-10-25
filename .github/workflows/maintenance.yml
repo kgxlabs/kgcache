@@ -31,5 +31,23 @@ jobs:
           path: pr-source
           persist-credentials: false
 
+      - name: Check the requested release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          jq -e --arg repository "$REPOSITORY" \
+            '.pull_request.head.repo.full_name == $repository' "$GITHUB_EVENT_PATH"
+          version=$(jq -er -L base/tools/release \
+            'include "release-pr"; .pull_request.base.ref | release_version' "$GITHUB_EVENT_PATH")
+          status=$(curl --silent --show-error --max-time 45 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --output "$RUNNER_TEMP/release-tag.json" --write-out '%{http_code}' \
+            "https://api.github.com/repos/$REPOSITORY/git/ref/tags/v$version")
+          [[ "$status" == 404 ]] || {
+            printf 'Release version must be unused; tag lookup returned HTTP %s.\n' "$status" >&2
+            exit 1
+          }
+
       - name: Check declarations and main-first backport references
         run: bash base/tools/release/check-maintenance.sh --event "$GITHUB_EVENT_PATH" --repo pr-source

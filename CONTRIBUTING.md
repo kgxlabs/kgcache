@@ -196,20 +196,21 @@ and tests because older code can have different behavior or dependencies.
 ## Backport a compatible fix
 
 Fix and merge the issue on `main` first. A maintainer decides which supported
-release lines need the fix. A branch such as `release/0.2` holds maintenance
-work for that line. A tag such as `v0.2.1` identifies one exact released commit.
+versions need the fix. A branch such as `release/0.2.1` prepares that exact
+version. Its first merged preparation or backport PR requests publication as
+`v0.2.1`. Use a new version branch for another release.
 
 For an approved backport, create a temporary branch from the target release
 branch and cherry-pick the resulting `main` commit with `-x`:
 
 ```sh
 git fetch origin
-git switch -c backport/0.2-describe-the-fix origin/release/0.2
+git switch -c backport/0.2.1-describe-the-fix origin/release/0.2.1
 git cherry-pick -x MAIN_SQUASH_COMMIT_SHA
 ```
 
 Replace `MAIN_SQUASH_COMMIT_SHA` with the full commit SHA. The `-x` option records
-where the change came from. Open a PR against `release/0.2` and include the
+where the change came from. Open a PR against `release/0.2.1` and include the
 original PR, full source SHA, and any conflict resolutions or extra changes.
 Run the relevant checks on the target code.
 
@@ -226,7 +227,7 @@ message when needed.
 
 Release branches accept compatible fixes and necessary maintenance approved by
 a maintainer. New features and breaking changes belong on `main` for a future
-release line. An exception to fixing `main` first needs a maintainer's review.
+version. An exception to fixing `main` first needs a maintainer's review.
 
 ## Release ownership
 

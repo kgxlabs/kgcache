@@ -144,10 +144,10 @@ main() {
     tooling_sha=$(release_sha256 "$RELEASE_ROOT/tools/release/qualify.sh")
     tooling_status=$(git -C "$RELEASE_ROOT" status --porcelain --untracked-files=normal)
     [[ -z "$tooling_status" ]] || tooling_dirty=true
-    if [[ "$mode" == branch ]]; then
+    if [[ "$mode" == branch || "$mode" == release ]]; then
         current_policy=$(git --no-replace-objects -C "$repo" rev-parse refs/remotes/origin/main)
         expected=$(release_read_field "$proposal" .policy_sha)
-        [[ "$current_policy" == "$expected" ]] ||
+        [[ "$mode" == release || "$current_policy" == "$expected" ]] ||
             release_fail 'main policy changed; refresh the proposal before qualification'
         [[ "$tooling_revision" == "$source_sha" && "$tooling_dirty" == false ]] ||
             release_fail 'branch qualification must run from the clean selected tooling commit'

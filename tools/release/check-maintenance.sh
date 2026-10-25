@@ -46,10 +46,11 @@ main() {
     fi
     release_require_commands git mktemp
     [[ -f "$event" ]] || release_fail 'PR event file is required'
-    jq -e -L "$RELEASE_ROOT/tools/release" 'include "policy";
+    jq -e -L "$RELEASE_ROOT/tools/release" 'include "semver"; include "policy";
         .pull_request | (.base.ref | startswith("release/")) and
-        (.base.ref[8:] | line_name) and (.base.sha | sha) and (.head.sha | sha)' "$event" > /dev/null ||
-        release_fail 'expected a PR targeting canonical release/MAJOR.MINOR'
+        (.base.ref[8:] | line_name or (semver and (semver_parts | .metadata == null))) and
+        (.base.sha | sha) and (.head.sha | sha)' "$event" > /dev/null ||
+        release_fail 'expected a PR targeting release/VERSION'
     base=$(jq -r '.pull_request.base.sha' "$event")
     head=$(jq -r '.pull_request.head.sha' "$event")
     trap cleanup_maintenance EXIT

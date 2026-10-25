@@ -105,7 +105,7 @@ candidate_validate_proposal() {
     actual=$(release_read_field "$proposal" .image.source_version_key)
     [[ "$expected" == "$actual" ]] || release_fail 'proposal source/version key differs'
     mode=$(release_read_field "$proposal" .mode)
-    if [[ "$mode" == branch ]]; then
+    if [[ "$mode" == branch || "$mode" == release ]]; then
         expected=$(candidate_identity_key request "$proposal")
         actual=$(release_read_field "$proposal" .request_key)
         [[ "$expected" == "$actual" ]] || release_fail 'proposal branch request key differs'

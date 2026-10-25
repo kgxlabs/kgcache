@@ -51,16 +51,23 @@ publish_assets() {
     local path policy checksum bytes file
 
     mkdir -p "$publish_workspace/assets"
-    policy=$(jq -r '.proposal.policy_sha' "$publish_workspace/request.json")
-    path=$(jq -r '.proposal.notes_ref' "$publish_workspace/request.json")
-    [[ "$path" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ && "$path" != /* &&
-        "$path" != *..* && "$path" != -* ]] || release_fail 'notes_ref must be a reviewed repository file path'
-    publish_api_call GET "/repos/$publish_repository/contents/$path?ref=$policy" "$publish_workspace/notes.json"
-    [[ "$publish_http_code" == 200 ]] || release_fail 'reviewed release notes are unavailable'
-    jq -je 'if .type == "file" and .encoding == "base64" then .content | @base64d
+    if jq -e '.proposal.mode == "release"' "$publish_workspace/request.json" > /dev/null; then
+        jq -j '.proposal.release_notes.body' "$publish_workspace/request.json" > "$publish_workspace/notes.md"
+        checksum=$(release_sha256 "$publish_workspace/notes.md")
+        jq -e --arg sha "$checksum" '.proposal.release_notes.sha256 == $sha' \
+            "$publish_workspace/request.json" > /dev/null || release_fail 'frozen PR notes differ'
+    else
+        policy=$(jq -r '.proposal.policy_sha' "$publish_workspace/request.json")
+        path=$(jq -r '.proposal.notes_ref' "$publish_workspace/request.json")
+        [[ "$path" =~ ^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*$ && "$path" != /* &&
+            "$path" != *..* && "$path" != -* ]] || release_fail 'notes_ref must be a reviewed repository file path'
+        publish_api_call GET "/repos/$publish_repository/contents/$path?ref=$policy" "$publish_workspace/notes.json"
+        [[ "$publish_http_code" == 200 ]] || release_fail 'reviewed release notes are unavailable'
+        jq -je 'if .type == "file" and .encoding == "base64" then .content | @base64d
         else error("expected reviewed note file") end' "$publish_workspace/notes.json" > "$publish_workspace/notes.md"
-    checksum=$(git hash-object "$publish_workspace/notes.md")
-    jq -e --arg sha "$checksum" '.sha == $sha' "$publish_workspace/notes.json" > /dev/null || release_fail 'reviewed note bytes differ'
+        checksum=$(git hash-object "$publish_workspace/notes.md")
+        jq -e --arg sha "$checksum" '.sha == $sha' "$publish_workspace/notes.json" > /dev/null || release_fail 'reviewed note bytes differ'
+    fi
     [[ -s "$publish_workspace/notes.md" ]] || release_fail 'reviewed release notes are empty'
     cp "$publish_workspace/bundle/build-info.json" "$publish_workspace/assets/build-info.json"
     jq -n --slurpfile request "$publish_workspace/request.json" \

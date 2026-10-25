@@ -14,6 +14,9 @@ def validate_automation($repository):
     (.enabled | type == "boolean") and .state_ref == "refs/heads/release-state";
     "invalid release automation settings")
   | require(review_bypass | . == null or type == "object"; "invalid review bypass")
+  | require((if has("blocked_versions") then .blocked_versions else [] end) |
+      type == "array" and all(.[]; semver) and length == (unique | length);
+      "invalid blocked versions")
   | require(.enabled == false or
     ((.publisher_app_id | type == "number" and . > 0 and floor == .) and
      (.tag_ruleset_id | type == "number" and . > 0 and floor == .) and

@@ -1,8 +1,8 @@
 name: Release candidate qualification
 
 on:
-  create:
-  push:
+  pull_request:
+    types: [closed]
     branches:
       - 'release/**'
   workflow_dispatch:
@@ -12,22 +12,18 @@ on:
         required: true
         default: main
         type: string
-      release_line:
-        description: 'Optional MAJOR.MINOR line for a read-only version proposal'
-        required: false
-        type: string
       version:
         description: 'Optional complete SemVer version for a repeatable preview'
         required: false
         type: string
 
-# Manual dispatch stays read-only. Branch publication requires main activation.
+# Manual dispatch stays read-only. Only merged release PRs request publication.
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'create' && !startsWith(github.event.ref, 'release/'))) && format('release-read-only-{0}', github.run_id) || 'release-publication' }}
+  group: ${{ github.event_name == 'workflow_dispatch' && format('release-read-only-{0}', github.run_id) || 'release-publication' }}
   cancel-in-progress: false
   queue: max
 
@@ -36,9 +32,8 @@ jobs:
     name: Read publication activation from main
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.event.created == false) ||
-      (github.event_name == 'create' && github.event.ref_type == 'branch' &&
-        startsWith(github.event.ref, 'release/'))
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true &&
+        github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -54,11 +49,18 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           REPOSITORY: ${{ github.repository }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
           jq -e -L tools/release --arg repository "$REPOSITORY" \
             'include "publication"; validate_automation($repository)' .github/release-automation.json
           enabled=$(jq -r .enabled .github/release-automation.json)
-          [[ "$EVENT_NAME" != workflow_dispatch ]] || enabled=false
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            enabled=false
+          else
+            jq -e -L tools/release --arg repository "$REPOSITORY" --arg source "$EVENT_SHA" \
+              'include "release-pr"; release_event($repository; $source)' "$GITHUB_EVENT_PATH"
+            [[ "$enabled" == true ]] || { printf 'Release publication is disabled.\n' >&2; exit 1; }
+          fi
           {
             printf 'publish=%s\n' "$enabled"
             printf 'tooling_sha=%s\n' "$(git rev-parse HEAD)"
@@ -96,7 +98,6 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
           SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          RELEASE_LINE: ${{ inputs.release_line }}
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           args=(
@@ -106,7 +107,6 @@ jobs:
           )
           if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
             args+=(--source-ref "$SOURCE_REF")
-            [[ -z "$RELEASE_LINE" ]] || args+=(--line "$RELEASE_LINE")
             [[ -z "$RELEASE_VERSION" ]] || args+=(--version "$RELEASE_VERSION")
           fi
           bash tools/release/github.sh "${args[@]}"
@@ -128,7 +128,7 @@ jobs:
           retention-days: 30
 
   admit:
-    name: Admit and allocate the branch request
+    name: Admit the merged release PR
     needs: route
     if: needs.route.outputs.publish == 'true'
     environment: release
@@ -137,7 +137,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.request.outputs.source_sha }}
       version_tag: ${{ steps.request.outputs.version_tag }}
-      mode: branch
+      mode: release
       artifact_id: ${{ steps.request.outputs.artifact_id }}
       artifact_run_id: ${{ steps.request.outputs.artifact_run_id }}
       selection_artifact: selection-${{ github.run_id }}-${{ github.run_attempt }}
@@ -167,12 +167,6 @@ jobs:
           EVENT_SHA: ${{ github.sha }}
         run: |
           remote="https://github.com/$REPOSITORY.git"
-          existing=$(git ls-remote --refs "$remote" refs/heads/release-state)
-          if [[ -z "$existing" ]]; then
-            bash tools/release/coordinate.sh init --remote "$remote" --repository "$REPOSITORY"
-            printf 'Review the new state root, pin state_root_sha on main, and rerun this original workflow.\n' >&2
-            exit 1
-          fi
           bash tools/release/coordinate.sh enqueue --remote "$remote" --repository "$REPOSITORY" \
             --event "$GITHUB_EVENT_PATH" --event-name "$EVENT_NAME" --source "$EVENT_SHA" \
             --output "$RUNNER_TEMP/admission" > "$RUNNER_TEMP/enqueued.json"
