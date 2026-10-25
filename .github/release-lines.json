@@ -1,5 +1,20 @@
 {
   "schema_version": 1,
   "repository": "kgxlabs/kgcache",
-  "lines": []
+  "lines": [
+    {
+      "line": "0.1",
+      "branch": "release/0.1",
+      "cut_sha": "b1a3abc06957d785d713a68b0b20809cd8355fcf",
+      "status": "preparing",
+      "channel": "prerelease",
+      "prerelease_prefix": "rc",
+      "target_version": "0.1.0",
+      "decision_ref": "https://github.com/kgxlabs/kgcache/pull/253",
+      "notes_ref": "docs/releases/0.1.0-rc.1.md",
+      "baseline": null,
+      "activation": null,
+      "blocked_versions": []
+    }
+  ]
 }
