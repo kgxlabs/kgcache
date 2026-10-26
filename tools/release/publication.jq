@@ -162,7 +162,11 @@ def checkpoint($key; $phase; $value):
       ($request.registry.uploaded.digest == $value.digest and $value.passed == true and
        $value.image_id == $request.candidate.image_id and
        $value.candidate_sha256 == $request.candidate_sha256 and
-       $value.engine_id != $request.registry.intent.engine_id); "invalid clean-pull verification")
+       ($value.engine_id | reference) and
+       (if $value | has("image_absent_before_pull") then $value.image_absent_before_pull == true
+        # Preserve receipts created before the explicit absence check was recorded.
+        else ($request.registry.intent.engine_id | reference) and
+          $value.engine_id != $request.registry.intent.engine_id end)); "invalid clean-pull verification")
   | require($phase != "fixed" or
       ($request.registry.verified.passed == true and $value.digest == $request.registry.uploaded.digest);
       "fixed references require verified uploaded content")
