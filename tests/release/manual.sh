@@ -11,6 +11,52 @@ reject_manual_event() {
         --event "$result-invalid.json" --event-name "$GITHUB_EVENT_NAME" --source "$selected"
 }
 
+check_resume_release() {
+    local original_run=$GITHUB_RUN_ID
+    local GITHUB_RUN_ID=$((GITHUB_RUN_ID + 20)) GITHUB_EVENT_NAME=workflow_dispatch
+    local GITHUB_EVENT_PATH="$result-resume-event.json"
+    local saved_head actual_head
+
+    export GITHUB_RUN_ID GITHUB_EVENT_NAME GITHUB_EVENT_PATH
+    jq -n --arg source "$source" --arg branch "$branch" --arg resume "$original_run" \
+        '{ref:"main",repository:{full_name:"fixture/kgcache"},sender:{login:"maintainer",id:101},
+          inputs:{operation:"Publish RC",source_ref:$branch,source_sha:$source,version:"",
+            release_notes:"Recovery must keep the frozen notes.",resume_run_id:$resume}}' > "$GITHUB_EVENT_PATH"
+    jq -n --arg workflow "$workflow" --argjson run "$GITHUB_RUN_ID" \
+        --slurpfile event "$GITHUB_EVENT_PATH" '{id:$run,event:"workflow_dispatch",head_branch:"main",head_sha:$workflow,
+          path:".github/workflows/release.yml",repository:{full_name:"fixture/kgcache"},
+          actor:$event[0].sender,triggering_actor:$event[0].sender,created_at:"2026-10-20T00:00:10Z"}' \
+        > "$fixture_api/resume-run.json"
+    route "/repos/fixture/kgcache/actions/runs/$GITHUB_RUN_ID" resume-run.json
+    saved_head=$(git -C "$publication_remote" rev-parse refs/heads/release-state)
+    coordinate_fixture enqueue --event "$GITHUB_EVENT_PATH" --event-name workflow_dispatch --source "$source" \
+        > "$result-resumed.json"
+    cmp "$result-tagged.json" "$result-resumed.json"
+    coordinate_fixture allocate --request "$key" --output "$result-resumed-selection" > "$result-resumed-allocated.json"
+    cmp "$result-tagged.json" "$result-resumed-allocated.json"
+    actual_head=$(git -C "$publication_remote" rev-parse refs/heads/release-state)
+    [[ "$saved_head" == "$actual_head" ]] || release_fail 'resuming changed the frozen request'
+    jq --arg wrong "$((original_run + 1))" '.inputs.resume_run_id = $wrong' "$GITHUB_EVENT_PATH" > "$result-wrong-resume.json"
+    expect_github_failure resume-wrong-run 'retry its original workflow' coordinate_fixture enqueue \
+        --event "$result-wrong-resume.json" --event-name workflow_dispatch --source "$source"
+    mutate_api permission.json '.permission = "read"'
+    expect_github_failure resume-read-only-actor 'maintainer write access' coordinate_fixture enqueue \
+        --event "$GITHUB_EVENT_PATH" --event-name workflow_dispatch --source "$source"
+    restore_api permission.json
+    jq -en -L "$RELEASE_ROOT/tools/release" --slurpfile request "$result-tagged.json" \
+        --arg run "$GITHUB_RUN_ID" --arg original "$original_run" 'include "publication";
+        $request[0] as $request |
+        ($request | publication_run_matches($original; "")) and
+        ($request | publication_run_matches($run; $original)) and
+        ($request | publication_run_matches($run; "") | not) and
+        ($request | .status = "qualified" | publication_run_matches($run; $original) | not) and
+        ($request | del(.tag_object_sha) | publication_run_matches($run; $original) | not) and
+        ($request | del(.candidate.artifact_id) | publication_run_matches($run; $original) | not) and
+        ($request | .candidate.run.id = $run | publication_run_matches($run; $original) | not) and
+        ($request | .candidate.run.workflow_sha = ("f" * 40) | publication_run_matches($run; $original) | not)' > /dev/null
+    printf 'Passed: %s tagged recovery preserves the request, artifact, version, tag, and notes\n' "$fixture_name"
+}
+
 check_initial_release() {
     local fixture_name=${1:-manual}
     local result="$publication_workspace/$fixture_name"
@@ -81,6 +127,7 @@ check_initial_release() {
         reject_manual_event manual-empty-notes 'nonempty release notes' '.inputs.release_notes = "<!-- empty -->"'
         reject_manual_event manual-explicit-version 'automatic version selection' '.inputs.version = "0.4.0-rc.99"'
         reject_manual_event manual-stable-branch 'manual publication requires' '.inputs.source_ref = "release/0.4.0"'
+        reject_manual_event manual-invalid-resume 'invalid original publication run ID' '.inputs.resume_run_id = "invalid"'
         # shellcheck disable=SC2016
         reject_manual_event manual-old-source 'original RC branch creation commit' '.inputs.source_sha = $old'
     else
@@ -129,6 +176,11 @@ check_initial_release() {
     next_source=$(merged_pr_fixture 43 "$branch" 'fix: correct candidate behavior' "$main_fix")
     expect_github_failure initial-request-order 'initial RC request is missing' coordinate_fixture enqueue \
         --event "$publication_workspace/release-event-43.json" --event-name pull_request --source "$next_source"
+    if [[ "$fixture_name" == manual ]]; then
+        jq --arg run "$GITHUB_RUN_ID" '.inputs.resume_run_id = $run' "$manual_event" > "$result-no-request-resume.json"
+        expect_github_failure resume-no-request 'existing tagged candidate request' coordinate_fixture enqueue \
+            --event "$result-no-request-resume.json" --event-name workflow_dispatch --source "$source"
+    fi
     coordinate_fixture enqueue --event "$manual_event" --event-name "$GITHUB_EVENT_NAME" --source "$source" \
         > "$result-request.json"
     key=$(jq -r .request_key "$result-request.json")
@@ -157,6 +209,12 @@ check_initial_release() {
     expect_github_failure manual-new-run 'retry its original workflow' env GITHUB_RUN_ID="$other_run" \
         bash "$RELEASE_ROOT/tools/release/coordinate.sh" enqueue --fixture --remote "$publication_remote" \
         --repository fixture/kgcache --event "$manual_event" --event-name "$GITHUB_EVENT_NAME" --source "$source"
+    if [[ "$fixture_name" == manual ]]; then
+        jq --arg run "$GITHUB_RUN_ID" '.inputs.resume_run_id = $run' "$manual_event" > "$result-untagged-resume.json"
+        expect_github_failure resume-untagged 'retry its original workflow' env GITHUB_RUN_ID="$other_run" \
+            bash "$RELEASE_ROOT/tools/release/coordinate.sh" enqueue --fixture --remote "$publication_remote" \
+            --repository fixture/kgcache --event "$result-untagged-resume.json" --event-name workflow_dispatch --source "$source"
+    fi
 
     mkdir -p "$candidate_test_workspace"
     create_fixture "$result-selection/proposal.json"
@@ -172,12 +230,13 @@ check_initial_release() {
         ($artifact | .workflow_run.head_sha = $candidate[0].source_sha |
           candidate_artifact_matches($candidate[0]; $request[0].event; "77") | not) and
         ($artifact | .expired = true | candidate_artifact_matches($candidate[0]; $request[0].event; "77") | not)' > /dev/null
-    coordinate_fixture qualify --request "$key" --candidate "$candidate_test_workspace/good" > /dev/null
+    coordinate_fixture qualify --request "$key" --candidate "$candidate_test_workspace/good" --artifact-id 77 > /dev/null
     coordinate_fixture tag --request "$key" --candidate "$candidate_test_workspace/good" > "$result-tagged.json"
     actual=$(git -C "$publication_remote" rev-parse "refs/tags/v$target-rc.1^{commit}")
     [[ "$actual" == "$source" ]]
     coordinate_fixture tag --request "$key" --candidate "$candidate_test_workspace/good" > "$result-tagged-retry.json"
     cmp "$result-tagged.json" "$result-tagged-retry.json"
+    check_resume_release
 
     coordinate_fixture enqueue --event "$publication_workspace/release-event-43.json" --event-name pull_request --source "$next_source" \
         > "$result-backport.json"

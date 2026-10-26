@@ -34,6 +34,10 @@ on:
         description: 'Release notes (required for Publish RC)'
         required: false
         type: string
+      resume_run_id:
+        description: 'Original publication run ID to resume a tagged candidate with current tooling'
+        required: false
+        type: string
 
 # Preview is read-only. Publish RC and merged release PRs share publication.
 permissions:
@@ -560,6 +564,12 @@ jobs:
         with:
           ref: ${{ needs.selection.outputs.source_sha }}
           persist-credentials: false
+      - name: Check out the trusted publication verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.selection.outputs.tooling_sha }}
+          path: release-tooling
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ needs.qualify.outputs.artifact_id }}
@@ -589,7 +599,7 @@ jobs:
             exit 0
           fi
           request=$(jq -r .request_key "$RUNNER_TEMP/upload-record/request.json")
-          bash tools/release/publish.sh verify --request "$request" --registry "$REGISTRY" \
+          bash release-tooling/tools/release/publish.sh verify --request "$request" --registry "$REGISTRY" \
             --candidate "$RUNNER_TEMP/candidate" --record "$RUNNER_TEMP/upload-record/request.json" \
             --output "$RUNNER_TEMP/registry-verification"
       - name: Retain clean-pull verification

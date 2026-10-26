@@ -79,8 +79,10 @@ to trigger it. Use the explicit initial-publication action once:
 
 This path verifies the same original creation and main review. It cannot
 publish an arbitrary branch commit or override a reserved version. Retry the
-original workflow run after a failure. A new dispatch for an already requested
-source points back to its original request.
+original workflow run after a failure. To recover a tagged candidate with
+updated verification tooling, use the same inputs and set `resume_run_id` to
+the original publication run ID. Recovery reuses its retained artifact,
+version, tag, and notes. It cannot create another request or replace its bytes.
 
 ## Automatic publication
 
@@ -115,7 +117,8 @@ and `SHA256SUMS` as release evidence.
    protections. The release tooling reads those settings.
 2. In the `release` Actions environment, store `RELEASE_APP_PRIVATE_KEY` and
    `DOCKERHUB_TOKEN`. Set `RELEASE_APP_ID` and `DOCKERHUB_USERNAME` as variables.
-   Allow `release/*` branches and main. Main is used for manual credential checks.
+   Allow `release/*`, main, and `refs/pull/*/merge`. The PR merge ref is needed
+   by merged release PR workflows. Main also runs manual publication and recovery.
 3. Protect main and `release/*` with PRs, resolved review threads, squash-only
    merges, deletion and force-push restrictions, and strict CI checks.
    Use the exact check names and integration IDs in the automation settings.

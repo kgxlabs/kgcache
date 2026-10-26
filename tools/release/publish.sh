@@ -191,9 +191,12 @@ publish_verify() {
     cp "$summary" "$output/service.json"
     actual=$(release_sha256 "$output/service.json")
     jq -n --arg digest "$digest" --arg image "$image" --arg engine "$engine" --arg summary "$actual" \
+        --arg run "${GITHUB_RUN_ID:-}" --arg attempt "${GITHUB_RUN_ATTEMPT:-}" \
+        --arg workflow_ref "${GITHUB_WORKFLOW_REF:-}" --arg workflow_sha "${GITHUB_WORKFLOW_SHA:-}" \
         --slurpfile request "$publish_workspace/request.json" \
         '{passed: true, digest: $digest, image_id: $image, engine_id: $engine,
           image_absent_before_pull: true, native_amd64: true, synthetic: false,
+          verification_run: {id: $run, attempt: $attempt, workflow_ref: $workflow_ref, workflow_sha: $workflow_sha},
           candidate_sha256: $request[0].candidate_sha256, service_sha256: $summary,
           request_key: $request[0].request_key}' > "$output/verification.json"
 }

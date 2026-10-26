@@ -127,7 +127,7 @@ main() {
     local operation=${1:-} remote='' state_ref=refs/heads/release-state fixture=false
     local repository='' event='' event_name='' source='' output='' request='' candidate='' failure='' artifact='' checkpoint_file='' transfer=''
     local expected key branch line policy status version tag object candidate_sha now before earlier
-    local fixture_path selected release_request=false
+    local fixture_path selected resume='' release_request=false
 
     [[ $# -gt 0 ]] || release_fail 'expected init, enqueue, allocate, qualify, tag, or status'
     shift
@@ -296,8 +296,11 @@ main() {
     source=$(jq -r --arg key "$request" '.requests[$key].source_sha' "$coordinate_workspace/state.json")
     if [[ "$fixture" == false ]]; then
         release_require_workflow_source "$repository" "$branch" "$source"
-        jq -e --arg key "$request" --arg run "${GITHUB_RUN_ID:-}" \
-            '(.requests[$key].event.trigger | IN("workflow_dispatch", "repository_dispatch") | not) or .requests[$key].event.run_id == $run' \
+        if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            resume=$(jq -r '.inputs.resume_run_id // ""' "$GITHUB_EVENT_PATH")
+        fi
+        jq -e -L "$RELEASE_ROOT/tools/release" --arg key "$request" --arg run "${GITHUB_RUN_ID:-}" --arg resume "$resume" \
+            'include "publication"; .requests[$key] | publication_run_matches($run; $resume)' \
             "$coordinate_workspace/state.json" > /dev/null || release_fail 'retry the original manual publication workflow'
     fi
     line=${branch#release/}

@@ -292,8 +292,12 @@ github_select_release_pr() {
 
 github_select_dispatch() {
     local repo=$1 event=$2 source=$3 ledger=$4 trigger=$5 branch run key parent actor permission creation_run encoded
+    local resume=''
 
     run=${GITHUB_RUN_ID:-}
+    if [[ "$trigger" == workflow_dispatch ]]; then
+        resume=$(jq -r '.inputs.resume_run_id // ""' "$event")
+    fi
     jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" \
         --arg source "$source" --arg run "$run" --arg trigger "$trigger" \
         'include "release-pr"; if $trigger == "repository_dispatch" then creation_dispatch_event($repository; $source; $run)
@@ -353,12 +357,15 @@ github_select_dispatch() {
         '[1,"request",$repository,$branch,$source]')
     key=$(printf '%s' "$encoded" | release_sha256 /dev/stdin)
     if jq -e --arg key "$key" '.requests[$key] != null' "$ledger" > /dev/null; then
-        jq -e --arg key "$key" --arg run "$run" --rawfile fingerprint "$github_output/rules-sha256" \
-            '(.requests[$key].event.trigger | IN("workflow_dispatch", "repository_dispatch")) and .requests[$key].event.run_id == $run and
-              .requests[$key].enforcement_sha256 == ($fingerprint | rtrimstr("\n"))' "$ledger" > /dev/null ||
+        jq -e -L "$RELEASE_ROOT/tools/release" --arg key "$key" --arg run "$run" --arg resume "$resume" \
+            --rawfile fingerprint "$github_output/rules-sha256" \
+            'include "publication"; .requests[$key] | publication_run_matches($run; $resume) and
+              (.event.trigger | IN("workflow_dispatch", "repository_dispatch")) and
+              .enforcement_sha256 == ($fingerprint | rtrimstr("\n"))' "$ledger" > /dev/null ||
             release_fail 'source already has a release request or protections changed; retry its original workflow'
         jq --arg key "$key" '.requests[$key].event' "$ledger" > "$github_output/event.json"
     else
+        [[ -z "$resume" ]] || release_fail 'recovery requires an existing tagged candidate request'
         jq --slurpfile run "$github_output/api/dispatch-run.json" \
             --slurpfile reviewed "$github_workspace/selected-pr.json" --slurpfile activity "$github_output/branch-activity.json" \
             '.workflow_sha = $run[0].head_sha | .requested_at = $run[0].created_at |
