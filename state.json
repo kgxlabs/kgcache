@@ -589,6 +589,24 @@
           "digest": "sha256:78fc428e6c0926d75c74c5ddc063970ebf4904b70b59bd045bc627bb5bcaa4b1",
           "media_type": "application/vnd.docker.distribution.manifest.v2+json",
           "config_digest": "sha256:aaf4c152a871707a0ba36f80729729475a86e7c4d362a77c7163b0309cfcd2eb"
+        },
+        "verified": {
+          "passed": true,
+          "digest": "sha256:78fc428e6c0926d75c74c5ddc063970ebf4904b70b59bd045bc627bb5bcaa4b1",
+          "image_id": "sha256:aaf4c152a871707a0ba36f80729729475a86e7c4d362a77c7163b0309cfcd2eb",
+          "engine_id": "6134b6ae-8eb1-4f62-889e-a360c80bcfbf",
+          "image_absent_before_pull": true,
+          "native_amd64": true,
+          "synthetic": false,
+          "verification_run": {
+            "id": "40332825737",
+            "attempt": "1",
+            "workflow_ref": "kgxlabs/kgcache/.github/workflows/release.yml@refs/heads/release/0.1.0",
+            "workflow_sha": "4256d1f878f92328cd55fb0dd1d87228bed0cd0a"
+          },
+          "candidate_sha256": "8ab2a1b44f23503d39b3c795bf05e827fa99073a8cfc54e9f2ddc6744b8e8a3b",
+          "service_sha256": "fac48cdd0c00b98c957dfd74bdcbdb46c0ff63e08b959f3fbe8958e90b2731c5",
+          "request_key": "1b75564fb92fa562a14afcdb66dd10163108e607d363b22d270d091f1598f07b"
         }
       }
     }
