@@ -3,6 +3,24 @@
 # The parent harness owns the shared fixture paths.
 # shellcheck disable=SC2154
 
+check_release_artifact_identity() {
+    jq -en -L "$RELEASE_ROOT/tools/release" 'include "candidate";
+        {kind:"release",source_sha:("a" * 40),head_sha:("b" * 40)} as $event |
+        {source_sha:$event.source_sha,run:{id:"9001"}} as $candidate |
+        {id:77,expired:false,workflow_run:{id:9001,head_sha:$event.head_sha}} as $artifact |
+        ($artifact | candidate_artifact_matches($candidate; $event; "77")) and
+        ($artifact | .workflow_run.head_sha = $event.source_sha |
+          candidate_artifact_matches($candidate; $event; "77") | not) and
+        ($artifact | candidate_artifact_matches($candidate | .source_sha = ("c" * 40); $event; "77") | not) and
+        ($artifact | .workflow_run.id = 9002 | candidate_artifact_matches($candidate; $event; "77") | not) and
+        ($artifact | .expired = true | candidate_artifact_matches($candidate; $event; "77") | not) and
+        ($artifact | candidate_artifact_matches($candidate; $event; "78") | not) and
+        ($artifact | candidate_artifact_matches($candidate; $event | .head_sha = "invalid"; "77") | not) and
+        ($artifact | .workflow_run.head_sha = $candidate.source_sha |
+          candidate_artifact_matches($candidate; {kind:"update"}; "77"))' > /dev/null
+    printf 'Passed: merged PR artifact head, selected source, run identity, expiration, and artifact ID\n'
+}
+
 merged_pr_fixture() {
     local number=$1 branch=$2 version_message=$3 main_fix=${4:-} source parent
 
