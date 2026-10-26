@@ -498,7 +498,7 @@
         "decision_ref": "https://github.com/kgxlabs/kgcache/pull/266"
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "admitted",
+      "status": "qualified",
       "proposal": {
         "schema_version": 1,
         "mode": "release",
@@ -559,6 +559,18 @@
         "eligibility_limits": [
           "Native source and image qualification must pass before publication."
         ]
+      },
+      "candidate_sha256": "8ab2a1b44f23503d39b3c795bf05e827fa99073a8cfc54e9f2ddc6744b8e8a3b",
+      "candidate": {
+        "image_id": "sha256:aaf4c152a871707a0ba36f80729729475a86e7c4d362a77c7163b0309cfcd2eb",
+        "archive_sha256": "770f7ab4ff3df57a455e1b2887120fc15135f6374331e584b5d84a6c1f175819",
+        "run": {
+          "id": "40332825737",
+          "attempt": "1",
+          "workflow_ref": "kgxlabs/kgcache/.github/workflows/release.yml@refs/heads/release/0.1.0",
+          "workflow_sha": "4256d1f878f92328cd55fb0dd1d87228bed0cd0a"
+        },
+        "artifact_id": "12655882420"
       }
     }
   },
