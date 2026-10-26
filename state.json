@@ -295,6 +295,29 @@
           "verified": true
         }
       }
+    },
+    "9aefd1a9df29cdeb5f6b4972d9340cb2fb4fc9970a72c9353e64b8091eedaf42": {
+      "request_key": "9aefd1a9df29cdeb5f6b4972d9340cb2fb4fc9970a72c9353e64b8091eedaf42",
+      "source_sha": "3eb0df5bfd7eca520f56a3e6cf7974568d2f57bf",
+      "branch": "release/0.1.0-rc",
+      "version": "0.1.0-rc.2",
+      "policy_sha": "c720717206c3d038051092790be71a606c1c4080",
+      "event": {
+        "schema_version": 1,
+        "repository": "kgxlabs/kgcache",
+        "kind": "release",
+        "branch": "release/0.1.0-rc",
+        "source_sha": "3eb0df5bfd7eca520f56a3e6cf7974568d2f57bf",
+        "version": "0.1.0-rc.2",
+        "pr_number": 259,
+        "head_sha": "539dea29e1bca4f2e9c09ac807d3af527fab8771",
+        "merged_at": "2026-10-26T03:30:44Z",
+        "title": "fix(release): backport clean-pull verification to 0.1.0 RC",
+        "notes": "## Summary\n\nFresh runners can share a Docker daemon ID, which stopped release image verification before the registry pull. Check that the candidate image is absent before pulling it, then record that evidence for publication. Keep existing verification receipts compatible.\n\nBackport of #258 to `release/0.1.0-rc`.\n\n(cherry picked from commit 2705d387c0ce6f35b004cd94412fdf35991c0da7)\n\n## Testing\n\n- `bash tests/release/publication.sh --docker`\n- `make check-shell`\n- `bash tools/release/check-maintenance.sh --event <pr-event.json> --repo .`\n- `git diff origin/release/0.1.0-rc --check`\n\nThe Docker suite uses a local registry and synthetic release fixtures. Native Linux amd64 qualification runs in CI.\n\n## Compatibility\n\nNo breaking changes. Existing verification receipts remain valid.\n",
+        "decision_ref": "https://github.com/kgxlabs/kgcache/pull/259"
+      },
+      "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
+      "status": "queued"
     }
   },
   "aliases": {}
