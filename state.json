@@ -317,7 +317,7 @@
         "decision_ref": "https://github.com/kgxlabs/kgcache/pull/259"
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "tagged",
+      "status": "image",
       "proposal": {
         "schema_version": 1,
         "mode": "release",
@@ -420,6 +420,13 @@
           "candidate_sha256": "8faf3b275216643573ff852991e5a6a00b1f728e8898f2c16fe3b1e00a6220fd",
           "service_sha256": "cd42791c79b59053cd5857af6ad2f43764420008f1a903a4ee66dc051a86dcca",
           "request_key": "9aefd1a9df29cdeb5f6b4972d9340cb2fb4fc9970a72c9353e64b8091eedaf42"
+        },
+        "fixed": {
+          "digest": "sha256:ad03c326e621d5325ab57bad76b8d0e6746dc32af567f866fde5af7a2bc4b75a",
+          "tags": [
+            "0.1.0-rc.2",
+            "src-c215cdf4d74f6f82894c147f78be922d5840637f3cb669cf80ec11aacaacc61c"
+          ]
         }
       }
     }
