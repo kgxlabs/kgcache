@@ -152,17 +152,25 @@ publish_upload() {
 # This command has no write credential and makes no ledger or registry writes.
 # Run it on a fresh native runner, before importing any saved archive.
 publish_verify() {
-    local output=$1 image engine digest old_engine actual summary
+    local output=$1 image engine digest actual summary exit_status
 
     image=$(jq -r '.candidate.image_id' "$publish_workspace/request.json")
     digest=$(jq -r '.registry.uploaded.digest' "$publish_workspace/request.json")
-    old_engine=$(jq -r '.registry.intent.engine_id' "$publish_workspace/request.json")
     engine=$(publish_docker info --format '{{.ID}}')
-    [[ "$engine" != "$old_engine" && -n "$engine" ]] || release_fail 'clean pull requires a different Docker engine'
+    [[ -n "$engine" ]] || release_fail 'cannot identify the Docker engine'
+    # Fresh VMs can inherit the same daemon ID from their base image.
+    # Require an explicit missing-image response before pulling the candidate.
     # This is an intentional absence check around the single Docker command.
     # shellcheck disable=SC2310
-    if publish_docker image inspect "$image" > /dev/null 2>&1; then
+    if publish_docker image inspect "$image" > /dev/null 2> "$publish_workspace/pre-pull.log"; then
         release_fail 'qualified image is already present; use a fresh image store'
+    else
+        exit_status=$?
+    fi
+    if [[ "$exit_status" != 1 ]] ||
+        ! grep -Fxq "Error response from daemon: No such image: $image" "$publish_workspace/pre-pull.log"; then
+        cat "$publish_workspace/pre-pull.log" >&2
+        release_fail 'cannot confirm the qualified image is absent'
     fi
     actual=$(candidate_engine)
     [[ "$actual" == linux/amd64 ]] || release_fail 'registry qualification requires native Linux amd64'
@@ -185,7 +193,7 @@ publish_verify() {
     jq -n --arg digest "$digest" --arg image "$image" --arg engine "$engine" --arg summary "$actual" \
         --slurpfile request "$publish_workspace/request.json" \
         '{passed: true, digest: $digest, image_id: $image, engine_id: $engine,
-          native_amd64: true, synthetic: false,
+          image_absent_before_pull: true, native_amd64: true, synthetic: false,
           candidate_sha256: $request[0].candidate_sha256, service_sha256: $summary,
           request_key: $request[0].request_key}' > "$output/verification.json"
 }
