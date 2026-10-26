@@ -1,159 +1,134 @@
-# Container image checks
+# Qualify a container image
 
-Requires Bash 3.2 or newer, Docker with Linux containers, GNU `timeout`, jq,
-Make, and standard Unix tools. Compose must support `config --format json`,
-`up --wait --wait-timeout`, and `port`. Source builds also need BuildKit.
-Prepare the Go, Node, and npm versions in the
+[Contributor guide](../../docs/contribute/testing.md) / Container checks
+
+Run the container suite after changing the image, deployment, health command,
+persistence lifecycle, or endpoint smoke tests. It builds or accepts one image,
+then tests that exact image through isolated Docker and Compose resources.
+For service use, read [Run with Docker](../../docs/operate/docker.md).
+
+## Prepare the host
+
+Use macOS or Linux with Bash 3.2 or newer, Linux containers, Docker Buildx,
+GNU `timeout`, jq, Make, and standard Unix tools. Source builds need BuildKit.
+Compose must support `config --format json`, `up --wait --wait-timeout`, and
+`port`.
+
+Prepare the Go, Node, and npm pins in the
 [client registry](../integration/clients/matrix.json). The runner prefers
-`.client-tools/go/bin` and `.client-tools/node/bin` when present. It checks
-these prerequisites before creating resources. Dependency preparation can
-use the network; dependencies remain locked in isolated profile workspaces.
+`.client-tools/go/bin` and `.client-tools/node/bin` when available. It checks
+prerequisites before creating resources. Locked dependency setup can use the
+network, in isolated profile workspaces.
 
-For operator instructions, see [Docker Compose](../../docs/user/service.md).
-Build and qualify from the repository root:
+Native qualification requires a Linux amd64 Docker engine. On an arm64
+machine with amd64 emulation, add `--allow-emulation`. The result records the
+actual engine and cannot qualify native execution through emulation.
+
+## Build and test the source image
+
+From the repository root:
 
 ```sh
 bash tests/container/run.sh --build --artifacts test-artifacts/container
 ```
 
-The source path derives a deployment from `docker-compose.yml`, builds under
-a unique tag, and resolves its image ID once. Builds have a separate
-10-minute deadline. To qualify an already loaded image without rebuilding
-or pulling it implicitly:
+The runner derives its deployment from [docker-compose.yml](../../docker-compose.yml),
+builds a unique local tag with a separate 10-minute build deadline, and resolves
+the image ID once. Compose services then use that ID.
+
+Local builds use the package version and default source metadata
+`SOURCE_REVISION=unknown`, `SOURCE_DIRTY=true`. Their version label is empty
+unless `VERSION` is supplied. An explicit version changes the binary, record,
+and label; `development_version` still records the package default.
+
+A clean image requires an explicit valid SemVer and full source revision with
+`SOURCE_DIRTY=false`. Build checks reject invalid metadata or a runtime base
+that differs from [release settings](../../tools/release/settings.sh).
+Development metadata cannot qualify a clean release image. See
+[build versions](../../docs/contribute/building.md).
+
+## Test an existing image
+
+Import or pull the intended image first, then supply its local reference:
 
 ```sh
 bash tests/container/run.sh --image IMAGE \
   --artifacts test-artifacts/container
 ```
 
-Replace `IMAGE` with a local tag, image ID, or already pulled digest reference.
-Every Compose service must use the resolved image ID. Registry manifest
-digests and local image IDs are recorded separately. The Dockerfile supplies
-the pinned base and checks it against the release
-settings. Local builds read the package version from `build.zig.zon`. They
-record `SOURCE_REVISION=unknown` and `SOURCE_DIRTY=true` by default. The image
-version label stays empty unless `VERSION` is supplied. An explicit `VERSION`
-overrides the binary and build record too. The record keeps the package default
-as `development_version`. See the shared [build-version contract](../../docs/development/building.md)
-for the accepted SemVer format and local build examples.
+`IMAGE` can be a local tag, ID, or already pulled digest reference. The runner
+neither rebuilds it nor pulls a replacement implicitly. It records registry
+manifest digests separately from local image IDs and never publishes an image.
+Use this path after [candidate import](../../docs/contribute/release-candidates.md)
+or a clean registry pull.
 
-Release CI verifies a clean checkout, then supplies `SOURCE_REVISION`,
-`SOURCE_DIRTY=false`, and `VERSION`. Clean builds require a full Git revision
-and an explicit valid SemVer version. Invalid metadata and a base that differs
-from the release settings fail the build. Development images cannot qualify
-as clean release candidates. CI checks both build paths.
+## Test the literal guide commands
 
-The layout check runs `kgcache --version` and compares it with the build record
-and OCI label. It saves the output as `version.log`. A development image may
-have an empty label only when its executable and record use the package default.
+In an isolated environment with host port 6379 free:
 
-An arm64 Docker engine needs `--allow-emulation` on the runner. Emulated
-results do not qualify native amd64 execution. The runner records the resolved
-image ID and build record. It never publishes an image.
-
-The image starts directly as UID/GID 10001 with `/data` as its working
-directory. Mount storage at `/data`. Its config enables AOF with
-`appendfsync everysec`. No anonymous volume is declared.
-
-## Health check
-
-The image declares this exec-form health command:
-
-```dockerfile
-HEALTHCHECK --interval=30s --timeout=2s --start-period=60s --retries=3 CMD ["/usr/local/bin/kgcache", "healthcheck", "/etc/kgcache/kgcache.conf"]
+```sh
+bash tests/container/run.sh --build --guide --artifacts test-artifacts/container
 ```
 
-The command sends RESP2 PING with one 1000 ms network deadline. Exact PONG
-exits 0 silently. Failures exit 1 with one short diagnostic. It needs no
-redis-cli, curl, netcat, or shell probe. PONG checks basic response; it does
-not verify fsync, disk durability, free capacity, or data integrity.
+This mode additionally needs host `redis-cli`. It refuses an existing
+`kgcache:local` tag and builds that tag through the checked-in Compose file.
+A unique project name scopes its containers, networks, and volumes. Ordinary
+qualification uses unique tags and Docker-assigned loopback host ports.
 
-Docker starts health status at `starting`. A successful probe makes it
-`healthy`. Before the first success, failures during the 60-second start
-period do not count toward the three failures needed for `unhealthy`.
-After a success, later failures count even during that period. Increase the
-start period for larger replay workloads. Keep the outer timeout above the internal network
-deadline; it also covers process startup and config loading. See
-[Docker health timing](https://docs.docker.com/reference/dockerfile/#healthcheck).
+## Understand the checks
 
-Prefer a read-only config mount at `/etc/kgcache/kgcache.conf` when changing
-the bind or port. Both processes then read the same endpoint. Wildcard bind
-`0.0.0.0` probes `127.0.0.1`. Use a concrete internal port even when Docker
-publishes an ephemeral host port.
+| Area | Required observations |
+| --- | --- |
+| Layout and identity | Executable version, build record, OCI label, platform, and resolved image agree |
+| Isolation | UID/GID 10001, `/data`, read-only root, mounted storage, and inherited security/resource settings |
+| Persistence | Replacement/restart, fresh volume, bind ownership, snapshot/AOF recovery, and stop-time errors |
+| Process lifecycle | PID 1, idle and slow clients, repeated BGSAVE/rewrite, child reaping, and active-child SIGTERM |
+| Health | Declared command/timing, startup allowance, healthy/unhealthy transitions, and endpoint overrides |
+| Compose | Peer DNS, host access, config mounts, stop/start/replacement, parallel projects, and occupied ports |
+| Clients | Baseline Go and Node smoke checks against the prepared endpoint |
 
-Changing CMD does not change the health command. If the server uses another
-config path or endpoint overrides, update the health command to match. For
-example, this Compose fragment pairs both port overrides:
+The image uses AOF `everysec`, runs directly without a startup shell, and
+declares no anonymous volume. The layout check saves `version.log` after
+comparing the executable and record. An empty development OCI label is valid
+only when the binary and record use the package default.
 
-```yaml
-services:
-  kgcache:
-    image: kgcache:local
-    command: ["/etc/kgcache/kgcache.conf", "--port", "7000"]
-    volumes:
-      - data:/data
-    healthcheck:
-      test: ["CMD", "/usr/local/bin/kgcache", "healthcheck", "/etc/kgcache/kgcache.conf", "--port", "7000"]
-      interval: 30s
-      timeout: 2s
-      start_period: 60s
-      retries: 3
-volumes:
-  data:
-```
+Recovery includes AOF `always`, an established `everysec` durable prefix,
+and a saved snapshot. Abrupt-stop cases do not simulate host power loss.
+Repeated persistence operations must leave only PID 1 after completion.
+Active-child tests pause a real child with SIGSTOP, signal PID 1 with SIGTERM,
+then resume the child while connected clients remain open.
 
-See [Compose health overrides](https://docs.docker.com/reference/compose-file/services/#healthcheck).
-The probe does not discover another process's CLI settings. A mismatched
-port fails when no service responds there. Health status alone does not
-identify the intended server if another service responds on that endpoint.
+The bounded workload uses 4096 keys with 4 KiB values, one CPU, and a 256 MiB
+container limit. It records image size, startup/replay time, mean time for
+64 sequential PING round trips, and cgroup v2 memory peaks. Timing includes
+Bash client startup. These are workload measurements, not a general performance
+or memory-eviction guarantee.
 
-## Runner coverage
+### Health behavior
 
-The runner uses Docker-assigned loopback ports, a read-only root, and mounted
-storage. Binary RESP data stays in files and is compared with `cmp`.
-Resources carry a unique run label. Docker commands and network operations
-have deadlines. A full run has a 30-minute deadline plus cleanup time.
-The runner collects bounded logs and state before removing
-its resources, including after interruption. `--artifacts` preserves evidence.
+The image's exec probe runs the built-in health command. It requires exact
+PONG within a shared 1000 ms network deadline, exits 0 silently on success,
+and exits 1 with one short diagnostic on failure. No redis-cli or shell probe
+is installed for normal health checking.
 
-The suite covers replacement, fresh volumes, bind ownership, read-only storage,
-invalid config, storage errors during stop, and abrupt recovery with AOF
-`always`, an established `everysec` durable prefix, and a saved snapshot.
-It repeats BGSAVE and AOF rewrite and checks that only PID 1 remains after
-completion. Active-child stop cases briefly pause a real child with SIGSTOP,
-send SIGTERM to PID 1, then resume the child. Idle and slow clients stay connected.
+The declared Docker timing is 30-second intervals, a 2-second outer timeout,
+a 60-second start period, and 3 retries. The suite checks `starting` and
+`healthy`, delayed startup replay, later `unhealthy`, and recovery after a
+paused PID 1 resumes. It also checks a failed bounded probe during shutdown.
 
-Health cases inspect the exact command and timing, observe `starting` and
-`healthy`, and check a mounted config with a different port. A gated replay
-fixture proves startup failures stay within the allowance before loading
-existing AOF data. A stopped PID 1 leaves a TCP listener open while probes
-time out, become `unhealthy`, and recover after SIGCONT. The Compose test
-fixture checks paired and mismatched command/health overrides. Shutdown
-checks also require a bounded failed probe while a persistence child settles.
-Fixture gates and signal controls are only in the test runner.
+Paired command/health endpoint changes must succeed; mismatched changes must
+fail when no service answers there. The probe does not discover another
+process's CLI overrides. PONG proves protocol response, not durable writes or
+the identity of a service sharing the endpoint. See
+[monitoring](../../docs/operate/monitoring.md) for operator use.
 
-The bounded workload uses 4,096 keys with 4 KiB values, one CPU, and a 256 MiB
-container limit. Results record image size, startup and replay wall time,
-mean time for 64 sequential PING round trips, and cgroup v2 memory peaks.
-Timing includes the Bash client startup. These are workload measurements.
-The container limit does not add application memory accounting or eviction.
+### Client endpoints
 
-Build `--target diagnostic` to add ELF and process inspection tools. The final
-runtime has no compiler or test server. Normal startup does not use a shell.
+The runner's baseline clients test default, RESP2, and RESP3 handshakes, binary
+values, nontransactional pipelines, and command-error recovery. The caller owns
+the server. The full version matrix remains in native client CI.
 
-## Compose and client coverage
-
-The same command runs the existing image/health suite and Compose checks
-against one image. Compose variants come from the checked-in model. Tests
-cover service-name DNS from a peer, inherited security and resource settings,
-host access, both baseline real clients, config mounts, paired port overrides,
-stop/start, replacement, snapshot-only and disposable modes, missing/invalid
-config, parallel projects, and occupied host ports.
-
-Go and Node check default, RESP2, and RESP3 handshakes, binary values, ordered
-nontransactional pipelines, and command-error recovery on the same connection.
-Their caller owns the server process. The full native version matrix stays
-in its existing workflow. To check a separate endpoint:
+To test another caller-owned endpoint:
 
 ```sh
 export KGCACHE_SMOKE_HOST=127.0.0.1
@@ -162,31 +137,24 @@ make smoke-go CLIENT_PROFILE=go-redis-v9.22.0
 make smoke-node CLIENT_PROFILE=node-redis-6.2.1
 ```
 
-Each program uses unique keys and closes its clients. Programs have bounded
-network deadlines; profile installation and compilation have separate runner
-deadlines. The full qualification has a 30-minute deadline plus cleanup time.
-Cleanup checks resource ownership and removes only this run's resources,
-including its test volumes. User volumes remain untouched. Failure artifacts
-include resolved deployments, image/platform and Docker versions, client logs,
-health history, exit/OOM state, and relevant persistence evidence.
+Programs use unique keys, close their clients, and bound network work. Profile
+installation and compilation have separate runner deadlines.
 
-## Exact guide check and CI handoff
+## Read evidence and cleanup results
 
-In an isolated environment, also exercise the literal `docker-compose.yml`
-and guide commands with fixed host port 6379:
+Use `--artifacts DIR` to preserve each run's deployments, image/platform and
+Docker versions, client logs, health history, exit/OOM state, and useful
+persistence evidence. Binary RESP values remain files and are compared with
+`cmp`, rather than being stored in shell variables.
 
-```sh
-bash tests/container/run.sh --build --guide --artifacts test-artifacts/container
-```
+The full suite has a 30-minute deadline plus cleanup time. Docker and network
+commands are also bounded. Resources have a unique run label. The runner
+collects state before removing only its own containers, networks, and test
+volumes, including after interruption. User volumes remain untouched.
 
-This mode requires host `redis-cli` and refuses an existing `kgcache:local`
-tag. It builds that tag through the checked-in file. A unique project name
-keeps containers, networks, and volumes scoped to the check. Ordinary local
-qualification uses unique tags and engine-assigned loopback host ports.
+For ELF/process inspection, build the `diagnostic` target. The runtime target
+has no compiler or test server. The required **Native Linux amd64 release on
+Bookworm** job runs both guide and prepared-image paths.
 
-The `Native Linux amd64 release on Bookworm` CI job runs the guide and
-prepared-image paths. Use `--image` after importing a candidate or pulling
-a registry digest. The qualification command never publishes an image.
-
-Follow the [shell style](../../tools/shell/README.md). Run `make fmt-shell`
-and `make check-shell` after editing scripts.
+For script edits, follow [shell conventions](../../tools/shell/README.md),
+then run `make fmt-shell` and `make check-shell`.

@@ -1,43 +1,46 @@
-# Linux release checks
+# Check release artifacts and automation
 
-The [release workflow](../../docs/development/release-workflow.md) runs qualification and
-manual previews in CI. Publication requires explicit activation. Test its GitHub evidence collector
-locally with `bash tests/release/github.sh`. The fixtures use a GET-only API
-stub and temporary Git history. They need no GitHub token or network access.
+[Contributor guide](../../docs/contribute/testing.md) / Release checks
 
-Run `bash tests/release/publication.sh` for durable request, tag, ordering, and
-protection checks. Add `--docker` for real registry transport and a stateful
-GitHub API fixture. That option needs Docker, Buildx, and Node.js. All Git tags
-stay in temporary repositories. API releases exist only in the loopback server.
-The registry contains synthetic images and is removed on exit. On macOS, the
-fixture seeds transport through the registry API to test upload recovery.
-Native Linux also tests the Docker push path. No Docker Hub upload or
-real GitHub release is part of these checks.
+Choose a local contract test, artifact check, or native runtime check below.
+These commands test release tooling. The operational procedure is in
+[Release and backport kgcache](../../docs/contribute/release-workflow.md).
 
-The publication suite also covers automatic initial RC requests, explicit
-recovery of existing branches, and merged PRs into exact-version release branches. It verifies automatic state creation without a source registry,
-reviewed main cuts, original branch creation, actor access, main-first backports,
-increasing RC numbers, queued and failed reservations,
-exact versions, frozen PR notes, duplicate-version rejection, and candidate retries.
-Historical merge commits in the branch base are allowed. A release request with
-multiple parents is rejected. Missing PR rules, non-squash merge methods, bypass
-actors, and missing history protections are also rejected.
-The Docker option checks the same notes and prerelease assets through the
-stateful API fixture while preserving stable aliases.
+## Run contract fixtures
 
-For a complete source/image qualification and saved-image handoff, see
-[release candidates](../../docs/development/release-candidates.md). The runner uses the
-checks below and the existing prepared-image service checks. It never publishes.
+From the repository root:
 
-For read-only version and source proposals, see
-[release proposals](../../docs/development/release-proposals.md). Run their isolated Git
-fixtures with `bash tests/release/proposals.sh`. Those checks need no compiler,
-Docker, credentials, or published versions.
+| Command | What it tests |
+| --- | --- |
+| `bash tests/release/proposals.sh` | Source/version proposals using temporary Git history |
+| `bash tests/release/candidates.sh` | Candidate metadata and archive rejection with synthetic bundles |
+| `bash tests/release/github.sh` | GitHub evidence collection through a GET-only stub |
+| `bash tests/release/publication.sh` | Stored requests, tags, ordering, protection, and retry policy |
+| `bash tests/release/publication.sh --docker` | Registry transport and stateful GitHub API behavior |
+| `bash tests/release/failures.sh` | Error status, explanations, and previous-artifact preservation |
 
-Use Bash 3.2 or later on macOS or Linux. Install Git, curl, tar with xz support,
-jq, `file`, GNU `timeout`, and a SHA-256 tool (`sha256sum` or `shasum`). Scripts
-check their dependencies before building or creating release output.
-Run from a clean checkout:
+Proposal fixtures need no compiler, Docker, credentials, or published versions.
+GitHub fixtures need no token or network connection to GitHub.
+
+The publication suite checks initial RC requests, recovery of existing branches,
+exact-version merged PRs, state creation, reviewed main cuts, branch creation,
+actor access, main-first backports, reserved numbering, frozen notes, duplicate
+versions, and candidate retries. Historical merge commits in a branch base are
+allowed, while a release-request commit with multiple parents is rejected.
+Missing PR/history rules, non-squash methods, or extra bypass actors fail.
+
+The Docker publication option needs Docker, Buildx, and Node. It uses temporary
+Git repos, a local registry with synthetic images, and a loopback GitHub API.
+It tests prerelease assets and notes while preserving stable aliases. Native
+Linux tests Docker push; macOS seeds transport through the registry API for
+upload recovery. No fixture uploads to Docker Hub or creates a real GitHub
+release. Owned registry resources are removed on exit.
+
+## Build and verify an artifact
+
+Use macOS or Linux with Bash 3.2 or newer, Git, curl, tar with xz, jq, `file`,
+GNU `timeout`, and `sha256sum` or `shasum`. Dependency checks run before building
+or creating release output. Start with a clean checkout:
 
 ```sh
 bash tools/release/build.sh
@@ -45,48 +48,42 @@ bash tools/release/verify.sh
 bash tests/release/artifact.sh zig-out/release/linux-amd64
 ```
 
-The build downloads Zig 0.16.0 for the build host, verifies its pinned official
-archive checksum, and caches it under `.zig-cache/toolchains`. The output target
-is Linux amd64 with baseline CPU features, glibc 2.36, and ReleaseSafe.
-
-Output lives under `zig-out/release/linux-amd64/`:
+The builder downloads Zig 0.16.0 for the host, verifies the pinned official
+archive checksum, and caches it under `.zig-cache/toolchains`. The output uses
+Linux amd64, baseline CPU features, glibc 2.36, and ReleaseSafe.
 
 ```text
-bin/kgcache
-build-info.json
+zig-out/release/linux-amd64/
+  bin/kgcache
+  build-info.json
 ```
 
-The build record includes the effective version, development default, source commit, clean/dirty state,
-platform, target, mode, compiler version and archive checksum, runtime base,
-and executable checksum. It contains no build-host paths or timestamps.
-Persistence test controls are disabled in the release server.
+Schema `2` build metadata contains the effective and development versions,
+source/dirty identity, platform, target, mode, compiler/checksum, runtime base,
+and executable checksum. It includes no host paths or timestamps. Persistence
+test controls are disabled in the release server.
 
-Use `--version SEMVER` to select an explicit version without changing
-`build.zig.zon`. `verify.sh --version SEMVER` also checks the expected record
-version. See the shared [build-version contract](../../docs/development/building.md) for
-accepted inputs, schema version `2`, and executable version inspection.
+Supply `--version SEMVER` to the builder for an override and to `verify.sh` for
+an expected record value. The [build guide](../../docs/contribute/building.md)
+defines its syntax. `--prefix DIR` selects isolated output. Ordinary native
+`zig-out/bin` output does not replace it.
 
-Use `--prefix DIR` for an isolated output location. The ordinary `zig-out/bin`
-development build does not replace this release output. `--allow-dirty` creates
-a marked development artifact; verification rejects it unless that option is
-also supplied. Do not use that option for release qualification.
+`--allow-dirty` creates a marked development artifact. Verification also needs
+that flag to accept it. Use a clean artifact for release qualification.
 
-The builder compiles into a temporary directory beside the requested prefix.
-It validates the executable and build record before publishing that directory.
-Failed builds keep the previous artifact. A lock prevents two builders from
-replacing the same output at once. Wait for the build to finish before consuming
-the output. A lock left by a forcibly killed build can be removed after checking
-that no builder is still using it.
+The builder compiles beside the final prefix in a temporary directory, verifies
+the executable and metadata, then publishes the directory. Failures retain the
+previous artifact. A lock prevents simultaneous replacement. Consume output
+only after completion. Before removing a stale lock from a killed builder,
+confirm that no builder still uses it.
 
-`tools/release/settings.sh` holds the compiler version, glibc baseline, CPU
-policy, optimization mode, and pinned Bookworm base. Platform helpers return
-values without changing shared variables. Server and helper builds use the
-same compile function. JSON creation and validation are in named `.jq` files;
-validation errors identify the failing field. ELF parsing runs with `LC_ALL=C`.
+## Inspect target requirements
 
-Run `bash tests/build/run.sh` with Zig 0.16.0 to check native defaults, the
-shared SemVer fixtures, versioned server/test-tool builds, and foreign run
-guards. It uses local build outputs and creates no releases.
+The shared [settings](../../tools/release/settings.sh) pin compiler, glibc,
+CPU, optimization, and Bookworm base. Server and helper builds use the same
+compile function. Platform helpers return values without mutating shared
+variables. Named jq files create and validate JSON, with errors identifying
+the failing field. ELF inspection uses `LC_ALL=C`.
 
 Build the arm64 candidate separately:
 
@@ -95,77 +92,73 @@ bash tools/release/build.sh --platform linux/arm64
 bash tools/release/verify.sh --prefix zig-out/release/linux-arm64
 ```
 
-An arm64 build is not a runtime support claim. Build success and runtime
-qualification are separate checks.
-
-With GNU readelf available, inspect a clean artifact's loader, dependencies,
-and glibc symbol requirements:
+This is compile coverage, not native arm64 support. With GNU readelf available:
 
 ```sh
 bash tools/release/inspect.sh zig-out/release/linux-amd64
 ```
 
-Set `READELF` to select a compatible reader. This check rejects runtime library
-search paths and glibc requirements newer than the selected baseline. Runtime
-library resolution must also be checked in the selected Debian filesystem.
+Set `READELF` to select a compatible reader. Inspection rejects runtime search
+paths and glibc symbols newer than the baseline. It does not replace library
+resolution checks inside the intended Debian filesystem.
 
-Run the Bookworm checks with Docker and GNU `timeout` available:
+Run `bash tests/build/run.sh` with Zig 0.16.0 for native defaults, SemVer cases,
+versioned server/test-tool builds, and foreign execution guards. It creates no
+release.
+
+## Test on Bookworm
+
+With Docker and GNU `timeout` available:
 
 ```sh
 bash tests/release/run.sh
 ```
 
-The Docker engine must run Linux amd64. The runner rejects other engine
-architectures by default. On an arm64 development machine with amd64 emulation
-enabled, use:
+The engine must be Linux amd64 by default. Development emulation needs:
 
 ```sh
 bash tests/release/run.sh --allow-emulation
 ```
 
-Emulation provides a smoke check. Its result records `native_execution: false`
-and `initial_amd64_qualified: false`. Native amd64 qualification runs in the
-`Native Linux amd64 release on Bookworm` CI job. Arm64 remains a build candidate.
+Emulated results report `native_execution: false` and
+`initial_amd64_qualified: false`. The required **Native Linux amd64 release on
+Bookworm** job provides native evidence. Arm64 remains a compile candidate.
 
-The runner requires a clean checkout at the artifact's recorded commit. It builds
-the existing Zig process test tools for that target with the pinned compiler.
-The `integration-tools` build step exports those tools only when requested.
-It never adds them to an ordinary release install.
+The runner requires a clean checkout at the artifact's recorded commit. It
+builds process test tools with the pinned compiler and target. The
+`integration-tools` step exports them only when requested; normal release
+installation never includes them.
 
-The test-only Dockerfile has three stages. The runtime stage contains the pinned
-Bookworm filesystem and the exact release server. It has no compiler or test
-servers. A small shell probe checks library resolution and the binary checksum
-in this stage. The inspection
-stage adds diagnostic packages for ELF checks. The tests stage adds process
-test tools without installing extra runtime libraries. These temporary images
-are removed after the run. This Dockerfile is a test fixture for release checks.
+[Dockerfile](Dockerfile) has runtime, inspection, and test stages. Runtime
+contains the exact artifact and pinned Bookworm filesystem without a compiler
+or test server. A small probe checks binary checksum and resolved libraries.
+The inspection stage adds ELF tools. The test stage adds process fixtures,
+without adding runtime libraries that could hide a missing dependency.
 
-The process tests cover raw RESP PING, binary SET/GET, ordered pipelines,
-SIGTERM, snapshot reload, AOF reload, and the existing persistence failure cases.
-They run the supplied release server. Only cases that need persistence controls
-use a separate controlled server. An invalid test-control setting also checks
-that the ordinary release server ignores those controls.
+Process cases run the supplied release server for raw PING, binary SET/GET,
+pipelines, SIGTERM, snapshot/AOF reload, and persistence failures. Only cases
+needing persistence controls use a controlled server. An invalid-control case
+also verifies that the ordinary release ignores test-only settings.
 
-Each run saves evidence in a new directory under
-`test-artifacts/release/linux-amd64/`. It includes the
-build record, ELF report, resolved libraries, process log, and result record.
-Failed process cases also save their harness evidence. Use `--prefix DIR` to
-select another artifact and `--artifacts DIR` to select an evidence directory.
-Compiler objects and verified downloads are cached; test persistence state is
-temporary. Each build, inspection, and process phase has a deadline.
+## Read failure evidence
 
-All three probe containers have owned names before Docker starts them. Cleanup
-removes those containers even when a Docker client times out. Cleanup commands
-also have deadlines. Evidence collection and cleanup failures are reported;
-the original test failure status is preserved.
+Each run creates a directory under `test-artifacts/release/linux-amd64` with
+its build record, ELF report, resolved libraries, process log, and result.
+Failed process cases keep their harness evidence. `--prefix DIR` chooses an
+artifact; `--artifacts DIR` chooses an evidence parent. Objects and verified
+downloads are cached, while persistence fixtures stay temporary.
 
-Check error handling with `bash tests/release/failures.sh`. Add `--docker` to
-also check that a container which ignores TERM is removed after the Docker
-client times out. The checks require the intended error status and explanation,
-and keep separate logs under `test-artifacts/release/failures/`.
-Artifact checks also simulate a metadata writer failure after compilation and
-confirm that the previous executable and build record are unchanged.
+Build, inspection, and process phases have deadlines. Probe containers receive
+owned names before startup, so cleanup can remove them even after a Docker
+client times out. Cleanup is bounded too. Evidence/cleanup failures are
+reported while preserving the original test failure status.
 
-Run `make check-shell` before submitting script changes. Use `make fmt-shell`
-to apply the shared formatting rules. See `tools/shell/README.md` for the pinned
-tools and supported hosts.
+Add `--docker` to the failure suite to prove that a TERM-ignoring container is
+removed after its client times out. It keeps separate logs under
+`test-artifacts/release/failures`. Artifact cases inject metadata-writer failure
+after compilation and require unchanged previous executable and record.
+
+For complete source/image qualification and saved transfer, use
+[candidate tools](../../docs/contribute/release-candidates.md). Before submitting
+script changes, follow [shell conventions](../../tools/shell/README.md), then
+run `make fmt-shell` and `make check-shell`.

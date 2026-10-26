@@ -1,7 +1,13 @@
-# Build checks
+# Check build targets and versions
 
-Run these checks from a macOS or Linux development host with Bash 3.2 or later, Zig 0.16.0,
-and `file`:
+[Contributor guide](../../docs/contribute/testing.md) / Build checks
+
+Run this suite after changing `build.zig`, version input, or target handling.
+Use macOS or Linux with Bash 3.2 or newer, Zig 0.16.0, and `file`.
+
+## Run
+
+From the repository root:
 
 ```sh
 bash tests/build/run.sh
@@ -9,17 +15,20 @@ zig build test
 zig build test-integration
 ```
 
-The build check verifies native output, cross-compilation to a different Linux
-target, and early rejection of foreign `run`, `test`, and `test-integration`
-requests. Set `ZIG=/absolute/path/to/zig` to select a compiler.
+Set `ZIG=/absolute/path/to/zig` to select a compiler. The script checks native
+output, cross-compilation, SemVer fixtures, versioned server/test-tool builds,
+and early rejection of foreign `run`, `test`, and `test-integration` steps.
 
-Ordinary builds use the native target. Select a target for a build without
-executing it:
+## Build without execution
 
 ```sh
-zig build -Dtarget=x86_64-linux-gnu.2.36 -Doptimize=ReleaseSafe --prefix zig-out/linux-amd64
+zig build -Dtarget=x86_64-linux-gnu.2.36 -Doptimize=ReleaseSafe \
+  --prefix zig-out/linux-amd64
 ```
 
-Executable run steps require a target that the build host can run natively.
-Run process tests on the selected platform. Cross-compilation by itself does not
-establish runtime compatibility.
+The normal build target is native. Execution steps require a target that the
+build host can run natively. Test runtime behavior on that platform separately;
+a successful cross-compile proves only that the artifact builds.
+
+See [build versions](../../docs/contribute/building.md) for SemVer rules and
+[release checks](../release/README.md) for Linux artifact qualification.

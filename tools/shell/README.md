@@ -1,45 +1,55 @@
-# Shell checks
+# Check and format shell scripts
 
-Use Bash 3.2 or later on macOS or Linux, with Git, Docker, and GNU `timeout`.
-Run from the repository root:
+[Contributor guide](../../docs/contribute/testing.md) / Shell tooling
+
+Use the same ShellCheck and shfmt checks locally and in CI. The scripts run
+pinned tool images through Docker, without installing host copies.
+
+## Run
+
+Use macOS or Linux with Bash 3.2 or newer, Git, Docker, and GNU `timeout`.
+From the repository root:
 
 ```sh
 make check-shell
-make fmt-shell
 ```
 
-`check-shell` runs ShellCheck 0.11.0 and checks formatting with shfmt 3.12.0.
-`fmt-shell` applies the formatter. The tool images are pinned by version and
-digest in `check.sh`. Docker selects the image for its engine architecture.
-No tools are installed on the host.
+Apply formatting, then check again:
 
-The checks include tracked scripts and new scripts that Git does not ignore.
-They skip deleted files, ignored dependencies, and generated output. File names
-are passed as separate arguments, including names that contain spaces. Checks mount the
-repository read-only; formatting mounts it writable and uses the caller's UID
-and GID. Each Docker phase has a deadline and owned containers are removed on
-exit.
+```sh
+make fmt-shell
+make check-shell
+```
 
-`.editorconfig` defines four-space indentation and case indentation.
-`.shellcheckrc` enables source following and the optional checks for masked
-command failures and suppressed `errexit`. Exceptions must be local and explain
-why the flagged behavior is intentional.
+[check.sh](check.sh) pins ShellCheck 0.11.0 and shfmt 3.12.0 by version and
+digest. Docker selects its engine architecture. Each phase has a deadline and
+removes its owned containers on exit.
 
-Follow the [Google Shell Style Guide's formatting rules](https://google.github.io/styleguide/shellguide.html#s5-formatting),
-with the repository's four-space indentation:
+The file inventory includes tracked scripts and new, non-ignored scripts.
+Deleted files, ignored dependencies, and generated output are excluded. Names
+are passed as separate arguments, including paths with spaces. Checks mount
+the repository read-only. Formatting mounts it writable as the caller's UID/GID.
 
-- Put one blank line between logical steps, such as setup, execution, and checks.
-  Keep related assignments and their checks together.
-- Separate local declarations from the function's commands with one blank line.
-- Put `if` bodies and closing `fi` statements on separate lines. Keep short case
-  alternatives on one line only when they are easy to read.
-- Aim for 80 columns. Wrap long commands at argument boundaries. Use one option
-  and its value per line for long option lists. Keep literal strings, URLs, and
-  digests intact when splitting them would make them harder to read or change
-  their value.
-- Split long pipelines at pipe boundaries. Use the repository's shfmt layout,
-  with `|`, `&&`, and `||` at the end of the continued line.
+## Write code the tools can check
 
-Add logical blank lines and command wrapping when writing or reviewing scripts.
-shfmt preserves that grouping. It does not choose logical groups or wrap commands
-to a line-length limit. Run `make fmt-shell`, then `make check-shell`.
+[.editorconfig](../../.editorconfig) defines four-space and case indentation.
+[.shellcheckrc](../../.shellcheckrc) follows sourced files and enables checks
+for masked failures and suppressed `errexit`. Keep an exception local and
+explain why the flagged behavior is needed.
+
+Follow the [Google shell formatting guide](https://google.github.io/styleguide/shellguide.html#s5-formatting)
+with this repository's indentation:
+
+- Separate setup, execution, and checking with logical blank lines.
+- Keep related assignments and assertions together. Leave one blank line
+  between local declarations and the function's commands.
+- Put an `if` body and its `fi` on separate lines. Keep short case alternatives
+  on one line only when that is easy to read.
+- Aim for 80 columns. Break long commands at argument boundaries, keeping an
+  option beside its value. Do not split a literal, URL, or digest if that changes
+  its value or makes it harder to read.
+- Follow shfmt's pipeline layout, with `|`, `&&`, or `||` at the continued
+  line's end.
+
+shfmt preserves logical grouping. It does not choose the groups or enforce a
+line-length limit, so review both after applying the formatter.
