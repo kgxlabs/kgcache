@@ -390,6 +390,10 @@
           "workflow_sha": "3eb0df5bfd7eca520f56a3e6cf7974568d2f57bf"
         },
         "artifact_id": "12628129972"
+      },
+      "tag_intent": {
+        "object_sha": "1e0a2722f1f529a413114e579b900098c8904e17",
+        "epoch": "1792991578"
       }
     }
   },
