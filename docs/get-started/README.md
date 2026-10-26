@@ -12,7 +12,7 @@ then continue at **Write and read a value** below.
 ```sh
 docker run --detach --rm --name kgcache --platform linux/amd64 \
   --publish 127.0.0.1:6379:6379 --volume kgcache-data:/data \
-  --stop-timeout 30 kgxlabs/kgcache:0.1.0
+  --stop-timeout 30 kgxlabs/kgcache
 ```
 
 This starts the Linux amd64 release in the background. It exposes
