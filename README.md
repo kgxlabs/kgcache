@@ -12,12 +12,12 @@ an existing Redis application.
 
 ## Quick start
 
-Start the published Linux amd64 release candidate with Docker:
+Start the Linux amd64 release with Docker:
 
 ```sh
 docker run --detach --rm --name kgcache --platform linux/amd64 \
   --publish 127.0.0.1:6379:6379 --volume kgcache-data:/data \
-  --stop-timeout 30 kgxlabs/kgcache:0.1.0-rc.2
+  --stop-timeout 30 kgxlabs/kgcache:0.1.0
 ```
 
 Use an installed `redis-cli` to write and read a value:
@@ -51,7 +51,7 @@ current contract. kgcache has no authentication, TLS, eviction, replication,
 or clustering. Keep the service on a trusted network.
 
 These docs describe `main`. The image above contains the source recorded in
-[v0.1.0-rc.2](https://github.com/kgxlabs/kgcache/releases/tag/v0.1.0-rc.2).
+[v0.1.0](https://github.com/kgxlabs/kgcache/releases/tag/v0.1.0).
 
 ## Contributing
 
