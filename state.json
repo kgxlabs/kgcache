@@ -77,7 +77,7 @@
         }
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "tagged",
+      "status": "image",
       "proposal": {
         "schema_version": 1,
         "mode": "release",
@@ -239,6 +239,13 @@
           "candidate_sha256": "58197afb96224ba9c1abe87201c90e8ee0eb132ec6e218490a679d49560d4243",
           "service_sha256": "4a5bcf64785431dd7f03361cb818fad26b6c1457a218915a048febc8a88dc009",
           "request_key": "7e6c0742e99bdff138ea540da01c4d189c2515ef2e0b4cd6d6c334247bcde183"
+        },
+        "fixed": {
+          "digest": "sha256:fe29c448a6afb4d43c903cd99ae3e79f41ac52c44edf2200dee9266f13eacaeb",
+          "tags": [
+            "0.1.0-rc.1",
+            "src-a3e42c662783e5c9519547b3f48f4ac61b0586cd77f545f58a043a82ff02a2b6"
+          ]
         }
       }
     }
