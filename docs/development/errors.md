@@ -1,5 +1,7 @@
 # Errors and logging
 
+[Developer documentation](README.md)
+
 kgcache keeps the error returned by the operation that failed. Storage, Store,
 command, snapshot, and journal code return that source to their caller. They
 do not log it on the way up. A catch either recovers, cleans up, or passes the
@@ -32,7 +34,7 @@ or sync fails. Publication itself cannot return an error. The connection
 handler reports the flush or sync failure with a generic client error, which
 does not mean that the write was rolled back. If AOF writing becomes blocked,
 later writes return `JournalWriteBlocked` until the server recovers or restarts.
-See [AOF](AOF.md#write-failures) for persistence behavior.
+See [AOF](aof.md#write-failures) for persistence behavior.
 
 ## Logger and traces
 

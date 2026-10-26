@@ -1,94 +1,10 @@
-# Append-only file (AOF)
+# AOF internals
 
-The append-only file keeps a record of each write. On restart, kgcache
-replays that record to rebuild the data in memory.
+[Developer documentation](README.md) / AOF
 
-Use AOF when losing all writes since the last snapshot would be a problem.
-Snapshots and AOF can both be enabled, but they have different jobs:
-
-| Method | What it stores | Main trade-off |
-| --- | --- | --- |
-| Snapshot | A full copy of the data at one point in time | Simple and compact, but newer writes are not in it |
-| AOF | Each write command, in order | Keeps newer writes, but the log grows until it is rewritten |
-
-When `appendonly yes` is set, startup loads AOF and skips the snapshot.
-`SAVE` and `BGSAVE` still write snapshots using the directory configured
-by `dir` and the filename configured by `dbfilename`.
-
-## Turn AOF on
-
-Add this to `kgcache.conf`:
-
-```conf
-dir ./data
-appenddirname appendonlydir
-appendfilename appendonly.aof
-appendonly yes
-appendfsync everysec
-```
-
-Create `./data` before starting kgcache, and give the user running the
-server read and write access. A relative `dir` uses the process working
-directory as its base. kgcache creates the AOF subdirectory when AOF is
-enabled. This example writes AOF files under `./data/appendonlydir`.
-
-Changing `dir`, `appenddirname`, or `appendfilename` does not move, rename,
-or convert existing files. See [Persistence paths](CONFIGURATION.md#persistence-paths)
-and [Redis config compatibility](CONFIGURATION.md#redis-config-compatibility)
-for the supported names and remaining differences.
-
-`everysec` is the default and is the best choice for most uses. See
-[AOF settings](CONFIGURATION.md#aof-settings) for every AOF option.
-
-## Write and fsync are different
-
-AOF data moves through two stages:
-
-```text
-kgcache buffer
-      |
-      | write
-      v
-OS memory
-      |
-      | fsync, or a later OS write
-      v
-storage device
-```
-
-`write` moves data out of kgcache and into OS memory. That data usually
-survives a kgcache process crash, but it may be lost if the machine loses
-power.
-
-`fsync` asks the OS to push the data to the storage device before returning.
-It gives stronger safety, but it is slower.
-
-### Fsync policies
-
-| Policy | During normal use | What may be lost |
-| --- | --- | --- |
-| `always` | Write and fsync before an applied write command returns to the client | No acknowledged write under normal storage behavior |
-| `everysec` | Cron writes buffered commands on each tick and fsyncs at most once per second | Up to about one second after power loss |
-| `no` | Cron writes buffered commands, but kgcache never asks for fsync | Whatever the OS has not written before power loss |
-
-All three policies write buffered commands regularly. `no` does not mean
-"keep the data only in kgcache memory." It means "let the OS decide when to
-write it to the storage device."
-
-On a clean shutdown:
-
-- `always` and `everysec` finish with an fsync.
-- `no` writes pending commands and closes the file without fsync.
-
-SIGINT and SIGTERM now start the shutdown path. The signal handler only
-records the signal and wakes the application. Normal application code then
-cancels the blocked accept task, stops cron, and closes the listener.
-
-Connection workers are tracked by `ConnectionManager`. During shutdown, the
-manager sets the stopping flag, shuts client sockets down in both directions
-to wake blocked reads and writes, and joins every worker. Only then does
-the server check for persistence children. This connection draining is
-separate from the signal handler and listener wake-up behavior.
+For setup, fsync choices, recovery policy, and durability limits, use the
+[user persistence guide](../user/persistence.md). This page covers journal
+ownership, replay, shutdown ordering, rewrite publication, and failure state.
 
 ## Shutdown
 
@@ -117,10 +33,11 @@ The parent reports an ordinary failed child exit as `AofRewriteFailed`, even
 when rollback succeeds. The child's original error and trace are temporarily
 unavailable. A failure already reported by cron is not logged again during
 shutdown. It still counts as a shutdown error if shutdown handles that
-completion. See [Errors and logging](ERRORS.md).
+completion. See [Errors and logging](errors.md).
 
-Rewrite completion happens before the final AOF flush and sync described
-above. The live AOF file closes only after the rewrite is settled and that
+Rewrite completion happens before the final AOF flush and sync described in
+the [user persistence guide](../user/persistence.md#fsync-policies). The live
+AOF file closes only after the rewrite is settled and that
 final flush is attempted. If rewrite state cannot be settled, shutdown leaves
 the persistence resources open and reports an error. Other shutdown errors
 are reported after remaining safe cleanup, with the first error returned.
@@ -346,4 +263,4 @@ Only one AOF rewrite can run at a time. By default, an AOF rewrite and
 from `BGSAVE` or `BGREWRITEAOF` is scheduled and starts after the active
 operation finishes. With
 `exclusive-bg-persistence no`, one rewrite and one save may overlap. See
-[`exclusive-bg-persistence`](CONFIGURATION.md#exclusive-bg-persistence-recommendation).
+[`exclusive-bg-persistence`](../user/configuration.md#exclusive-bg-persistence-recommendation).

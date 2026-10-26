@@ -1,5 +1,7 @@
 # Build versions
 
+[Developer documentation](README.md)
+
 Use Zig 0.16.0. Ordinary builds read their version from `build.zig.zon`.
 To build a different version without editing source files:
 
@@ -40,7 +42,7 @@ bash tools/release/verify.sh --version 0.2.0
 ```
 
 These commands only build and verify local files. They create no Git tags,
-registry uploads, or GitHub releases. See [release checks](../tests/release/README.md)
+registry uploads, or GitHub releases. See [release checks](../../tests/release/README.md)
 for prerequisites, platforms, and runtime qualification.
 
 Build records use schema version `2`. `version` is the effective build version.
@@ -70,4 +72,4 @@ This development image records unknown source and dirty state. Its binary,
 build record, and OCI version label all carry the explicit version. Without
 `VERSION`, the binary and record use the development default and the label
 stays empty. For clean images, also supply verified `SOURCE_REVISION` and
-`SOURCE_DIRTY=false`. See [container checks](../tests/container/README.md).
+`SOURCE_DIRTY=false`. See [container checks](../../tests/container/README.md).

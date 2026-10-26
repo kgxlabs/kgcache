@@ -19,14 +19,14 @@
 # which collects rules in file order until save "" clears them.
 # CLI overrides apply after this file: --port 7000 or --save '' to clear rules.
 # The first CLI save replaces file rules; later CLI saves append or clear.
-# See docs/CONFIGURATION.md for every CLI form and the supported Redis subset.
+# See docs/user/configuration.md for every CLI form and the supported Redis subset.
 
 # Address the TCP server binds to.
 # bind 127.0.0.1
 
 # TCP port the server listens on. Range: 0 to 65535.
 # Set 0 to let the OS select an available TCP port. Redis uses 0 to
-# disable TCP instead. See docs/CONFIGURATION.md for this difference.
+# disable TCP instead. See docs/user/configuration.md for this difference.
 # port 6379
 
 # Whether to set SO_REUSEADDR on the listening socket, which lets the

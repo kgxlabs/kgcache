@@ -1,5 +1,7 @@
 # Architecture
 
+[Developer documentation](README.md)
+
 ## Role within kgx
 
 kgcache is being developed as the cache component of the kgx infrastructure stack, with standalone operation and Redis compatibility as design goals. The broader platform vision and roadmap are owned by the [kgxlabs organization](https://github.com/kgxlabs).
@@ -91,8 +93,16 @@ and allocator-owned state. The logger owner keeps the logger alive through child
 cleanup. A requested shutdown of a client connection is cooperative and does
 not produce an error event. Child polling has a shared grace period followed by
 termination and a bounded reap period; see
-[Snapshots](SNAPSHOTS.md#reaping-why-it-cant-happen-inside-bgsave) and
-[AOF](AOF.md#shutdown).
+[Snapshots](snapshots.md#reaping-why-it-cant-happen-inside-bgsave) and
+[AOF](aof.md#shutdown).
+
+### Client report snapshots
+
+CLIENT INFO and LIST copy owned report data so it stays valid through client
+disconnects and library-label replacement. Collection and report locks are
+released before sorting, formatting, or sending. A LIST row is consistent at
+its own capture time, not one global snapshot of all clients. This keeps slow
+report output from holding the connection collection lock.
 
 ### Startup configuration
 
@@ -120,7 +130,7 @@ An arena controls lifetime, not memory limits.
 
 ## Storage and concurrency trade-offs
 
-The default backend is intentionally straightforward today: a `StringHashMap` stores values, an `ArrayList` holds TTL bookkeeping, and each expiring entry keeps an index into that list for O(1) updates. Full layout, memory cost, and the planned redesign toward larger keyspaces are in [Expiration bookkeeping](EXPIRATION.md).
+The default backend is intentionally straightforward today: a `StringHashMap` stores values, an `ArrayList` holds TTL bookkeeping, and each expiring entry keeps an index into that list for O(1) updates. Full layout, memory cost, and the planned redesign toward larger keyspaces are in [Expiration bookkeeping](expiration.md).
 
 Concurrency is similarly a deliberate trade-off. The server currently uses a
 joinable thread per connection and mutex-protected storage transactions. This
@@ -137,12 +147,11 @@ remains the ownership and shutdown boundary.
 ## Persistence
 
 Snapshots use `SAVE`, `BGSAVE`, or automatic `save` rules. AOF records each
-write and can rewrite the growing log in a background child. See
-[Persistence](PERSISTENCE.md) for a comparison,
-[Snapshots](SNAPSHOTS.md) for snapshot details, and
-[Append-only file](AOF.md) for AOF.
+write and can rewrite the growing log in a background child. See [user persistence](../user/persistence.md) for modes and guarantees,
+[persistence internals](persistence.md) for ownership, [snapshots](snapshots.md)
+for save mechanics, and [AOF](aof.md) for journal mechanics.
 
-See [Errors and logging](ERRORS.md) for error ownership, terminal reports,
+See [Errors and logging](errors.md) for error ownership, terminal reports,
 and trace availability.
 
 ## Repository map
@@ -179,14 +188,9 @@ and trace availability.
 │   ├── persistence_state.zig    # Persistence lifecycle, retry, and snapshot change accounting
 │   ├── entry.zig                # Stored-value and expiration metadata
 │   └── tests.zig                # Unit-test entry point
-├── docs/                        # Configuration, commands, and architecture reference
-│   ├── CONFIGURATION.md
-│   ├── COMMAND.md
-│   ├── ARCHITECTURE.md          # This file: overview, design direction, repo map
-│   ├── PERSISTENCE.md           # Snapshot and AOF overview
-│   ├── SNAPSHOTS.md             # SAVE, BGSAVE, and automatic saving
-│   ├── AOF.md                   # AOF setup, fsync, loading, and rewrites
-│   ├── ERRORS.md                # Error propagation, logging, and traces
-│   └── EXPIRATION.md            # TTL bookkeeping layout, memory cost, planned redesign
+├── docs/
+│   ├── README.md                # Task-based documentation index
+│   ├── user/                    # Setup, service, clients, contract, and limits
+│   └── development/             # Testing, design, and release procedures
 └── README.md
 ```

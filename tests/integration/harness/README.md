@@ -13,7 +13,7 @@ test supplies these settings in its extra config.
 
 The fixture relies on kgcache's `port 0` behavior to select an available
 TCP port. Redis uses `port 0` to disable TCP. See
-[Redis config compatibility](../../../docs/CONFIGURATION.md#redis-config-compatibility)
+[Redis config compatibility](../../../docs/user/configuration.md#redis-config-compatibility)
 for this difference.
 
 `config_subpath` selects the config file location relative to the child's

@@ -1,16 +1,19 @@
 # Commands
 
-This reference covers the commands currently implemented by kgcache. Command
-names and subcommand names are case-insensitive. kgcache supports a subset of
-Redis commands over RESP2 and RESP3, but full Redis compatibility is still a
-development goal. For connection behavior and other server limitations, see
-[Current status and compatibility](../README.md#current-status-and-compatibility).
+[Documentation](../README.md) / Commands
+
+This reference covers the implemented Redis RESP2/RESP3 string-cache commands.
+Names and subcommands are case-insensitive. See [compatibility](compatibility.md)
+for reply encodings and tested clients, and [limits](limits.md) for unsupported
+features. All commands below have command/unit or real-process coverage;
+[automated evidence](compatibility.md#automated-evidence) links the test categories.
 
 The commands below start with connection and database selection, move through
 key operations, then cover persistence and command introspection.
 
-Invalid argument counts return `ERR wrong number of arguments` for every
-command. The connection remains open so the client can send another request.
+Argument binding rejects invalid counts with `ERR wrong number of arguments`.
+Command-specific validation follows below. Expected command errors leave the
+connection usable.
 
 ## `PING`
 
@@ -39,7 +42,7 @@ the selected database.
 | Field | Value |
 | --- | --- |
 | `server` | `kgcache` |
-| `version` | The effective kgcache version used for this build, see [build versions](BUILDING.md) |
+| `version` | The effective kgcache version used for this build, see [build versions](../development/building.md) |
 | `proto` | The connection's current protocol version, initially `2` |
 | `id` | The connection's positive integer ID, never reused within a server run |
 | `mode` | `standalone` |
@@ -104,9 +107,7 @@ LIST includes registered connections until their worker finishes. Finished
 workers are excluded even before cleanup removes their records. A connection
 captured before it closes can still appear in that response. Each row is
 consistent at its own capture time; the rows are not one simultaneous snapshot
-of all connections. Owned copies preserve row data through disconnects and
-library-label replacement. All collection and report locks are released before
-sorting, formatting, or sending the reply.
+of all connections. A captured row remains valid even if its connection closes or its labels change.
 
 The caller's row includes LIST's own dispatch as `cmd=client|list` and in
 `tot-cmds`. Its incoming bytes are counted, and its current reply bytes are
@@ -121,8 +122,8 @@ Retains the library name or version and returns `OK`. Command, subcommand, and
 attribute names are case-insensitive; valid value bytes are preserved exactly.
 Values may be empty or contain printable ASCII bytes from `!` through `~`.
 Whitespace, control bytes, NUL, and non-ASCII bytes return `ERR syntax error`.
-Unknown attributes return `ERR unsupported option`. Invalid values or failed
-replacement allocation preserve the previous label. Repeated calls replace a
+Unknown attributes return `ERR unsupported option`. Invalid values or a failed
+replacement preserve the previous label. Repeated calls replace a
 label; an empty value clears it. The next INFO in a pipeline sees the change.
 Labels belong to one connection and are not stored in cache data or persistence
 files. The existing encoded-request limit applies, with no shorter label limit.
@@ -134,6 +135,10 @@ occur in the recognized handler and count as `client|setinfo` dispatches.
 Bare `CLIENT` and extra INFO/LIST arguments return `ERR wrong number of arguments`.
 Unknown subcommands, including `SETNAME`, `GETNAME`, `ID`, and `TRACKING`,
 return `ERR unsupported option`. These errors leave the connection usable.
+Remaining diagnostics are tracked in
+[#179](https://github.com/kgxlabs/kgcache/issues/179). These 22 fields are the
+current report contract, not the full Redis CLIENT INFO/LIST output.
+
 `COMMAND INFO CLIENT` reports container arity `-2`, no flags or keys, the
 `@connection` and `@slow` categories, and its supported subcommand metadata.
 `COMMAND INFO client|info` reports arity `2`, the `fast` flag, and `@connection`
@@ -148,16 +153,19 @@ and `@connection` and `@slow`.
 
 Switches the connection to the database at `index` and returns `OK`. The index
 must be within the configured database range. Subsequent key commands on that
-connection use the selected database.
+connection use the selected database. The default is database 0. With the
+default `databases 16`, valid indices are 0 through 15. An invalid index
+returns an error and preserves the previous selection.
 
 ## `SET`
 
 `SET <key> <value> [options]`
 
 Stores a string value in the selected database. Without `GET`, returns `OK`
-when the write applies, or a null bulk string when `NX` or `XX` rejects it.
-With `GET`, returns the previous value, or a null bulk string if no value
-existed, whether the write applies or is rejected.
+when the write applies, or null when `NX` or `XX` rejects it.
+With `GET`, returns the previous value as a blob string, or null if no value
+existed, whether the write applies or is rejected. Null is `$-1\r\n` in RESP2
+and `_\r\n` in RESP3.
 
 | Family | Options |
 | --- | --- |
@@ -170,18 +178,23 @@ existed, whether the write applies or is rejected.
 `NX` applies the write only when the key does not exist. `XX` applies it only
 when the key exists. A rejected write leaves the current value and its
 expiration unchanged. `GET` changes the response to the value that existed
-before the command.
+before the command. An ordinary applied SET clears the old TTL. KEEPTTL
+preserves it. A supplied expiration replaces it.
 
 Only one conditional option, one expiration or TTL option, and one response
-option can be used in a single `SET` command. Expired values are removed when
-read. See [Expiration](EXPIRATION.md) for the current expiration behavior.
+option can be used in a single `SET` command. Expiration arguments must be
+positive decimal integers and fit the supported millisecond timestamp range.
+Missing values, overflow, unknown options, and repeated option groups return
+an error before writing. Expired values are removed when
+read, and cron also removes sampled expired keys. See
+[expiration limits](limits.md#capacity-and-expiration).
 
 ## `GET`
 
 `GET <key>`
 
-Returns the string value as a bulk string. Returns a null bulk string when the
-key is absent or expired.
+Returns the string value as a blob string. Returns null when the
+key is absent or expired: `$-1\r\n` in RESP2 and `_\r\n` in RESP3.
 
 ## `DEL`
 
@@ -195,6 +208,7 @@ that existed and were removed as an integer.
 `DBSIZE`
 
 Returns the number of stored keys in the selected database as an integer.
+Expired entries can remain in this count until lazy or active cleanup removes them.
 
 ## `SAVE`
 
@@ -203,7 +217,7 @@ Returns the number of stored keys in the selected database as an integer.
 Writes a `.kgc` snapshot of all databases to disk and blocks the calling
 connection until the write finishes. Returns `OK` on success, or an error if
 the write fails or a save is already running. The output path is set by
-`dir` and `dbfilename` in [Configuration](CONFIGURATION.md).
+`dir` and `dbfilename` in [Configuration](configuration.md).
 
 ## `BGSAVE`
 
@@ -216,7 +230,7 @@ optional `SCHEDULE` token is case-insensitive. With the default
 after the rewrite finishes. An active save is still an error.
 
 Unlike Redis, kgcache gives bare `BGSAVE` the same scheduling behavior as
-`BGSAVE SCHEDULE`. See [Snapshots](SNAPSHOTS.md#background-saving-bgsave).
+`BGSAVE SCHEDULE`. See [Snapshots](../development/snapshots.md#background-saving-bgsave).
 
 ## `BGREWRITEAOF`
 
@@ -227,7 +241,7 @@ Starts an AOF rewrite and returns
 `exclusive-bg-persistence yes`, it returns
 `Background append only file rewriting scheduled` if a save is active. The
 rewrite starts after the save finishes. It returns an error when AOF is off or
-another rewrite is already running. See [Append-only file](AOF.md#rewrite).
+another rewrite is already running. See [Append-only file](../development/aof.md#rewrite).
 
 `SAVE` and `BGSAVE` share one guard against concurrent saves. Only one AOF
 rewrite can run at a time. One pending request of each kind is remembered, and
@@ -248,7 +262,7 @@ available by their case-insensitive full names through COMMAND INFO.
 | --- | --- |
 | `COUNT` | Returns the number of supported top-level commands as an integer. |
 | `LIST [FILTERBY PATTERN <pattern> \| FILTERBY ACLCAT <category>]` | Returns supported top-level command names as an array. `PATTERN` supports `*` and `?`; `ACLCAT` accepts a category with or without a leading `@`. |
-| `INFO [name ...]` | Returns metadata for the named commands, or all commands when no names are given. Unknown names produce a null array entry. |
+| `INFO [name ...]` | Returns metadata for the named commands, or all commands when no names are given. Unknown names produce a null array entry (`*-1\r\n`) in RESP2 and null (`_\r\n`) in RESP3. Known entries keep the same array layout in both modes. |
 | `GETKEYS <command> [arguments ...]` | Returns the key arguments of a supported command. |
 | `GETKEYSANDFLAGS <command> [arguments ...]` | Returns each key with its access flags as a `[key, flags]` entry. |
 

@@ -1,136 +1,63 @@
 # kgcache
 
-> An in-memory cache server built in Zig, evolving toward a drop-in Redis replacement.
+An in-memory string cache built in Zig, with a tested subset of the Redis
+RESP2 and RESP3 protocols.
 
-`kgcache` is the cache component of the infrastructure stack being developed at [kgxlabs](https://github.com/kgxlabs). Its design goals are standalone operation with existing Redis clients and native integration into the future kgx application deployment platform.
+Store string or binary values, set expiration times, and keep data across
+restarts with snapshots or an append-only file. Use kgcache for local services,
+development, and small cache workloads whose commands fit the
+[compatibility contract](docs/user/compatibility.md).
+There is no authentication, eviction, replication, or clustering.
+See [limits](docs/user/limits.md) before choosing it for a workload.
 
-Today, kgcache supports a subset of Redis functionality over RESP2, including string storage, expiration, snapshots, and append-only persistence. It is under active development and is not yet a drop-in Redis replacement. See [Current status and compatibility](#current-status-and-compatibility) for known limitations.
+## Try it
 
-The platform vision and roadmap belong at the [kgxlabs organization](https://github.com/kgxlabs). This repository documents the cache component, its implementation, and current compatibility.
+The published image below is a [release candidate](https://github.com/kgxlabs/kgcache/releases/tag/v0.1.0-rc.2)
+for Linux amd64. Arm64 hosts need amd64 emulation.
 
-## At a glance
+```sh
+docker run --rm --name kgcache --platform linux/amd64 \
+  -p 127.0.0.1:6379:6379 -v kgcache-data:/data \
+  --stop-timeout 30 kgxlabs/kgcache:0.1.0-rc.2
+```
 
-| | |
+In another terminal, use an installed `redis-cli`:
+
+```sh
+redis-cli SET greeting hello
+redis-cli GET greeting
+redis-cli -3 GET greeting
+```
+
+The replies are `OK`, `hello`, and `hello`. Stop the service with
+`docker stop kgcache`. The named volume keeps its data.
+For a source build, see [getting started](docs/user/getting-started.md).
+
+<a id="current-status-and-compatibility"></a>
+
+## Use kgcache
+
+| Task | Guide |
 | --- | --- |
-| Protocol | RESP2 over TCP |
-| Address | `127.0.0.1:6379` by default; see [Configuration](docs/CONFIGURATION.md) |
-| Runtime | Zig 0.16.0+ |
-| Data model | Process-local string keys and values |
-| Commands | See [Commands](docs/COMMAND.md) |
-| Persistence | `.kgc` snapshots and an optional disk-backed AOF journal; see [Persistence](docs/PERSISTENCE.md) and [AOF](docs/AOF.md) |
+| Start from an image or source | [Getting started](docs/user/getting-started.md) |
+| Run and operate a service | [Service guide](docs/user/service.md) |
+| Connect an application | [Go and Node examples](docs/user/clients.md) |
+| Check client versions and RESP support | [Compatibility](docs/user/compatibility.md) |
+| Find commands and SET options | [Command reference](docs/user/commands.md) |
+| Change settings | [Configuration](docs/user/configuration.md) |
+| Choose restart and durability behavior | [Persistence](docs/user/persistence.md) |
+| Assess unsupported features and limits | [Limits](docs/user/limits.md) |
 
-## Quick start
+The guides describe current `main`. A published image contains the behavior
+of its release source. Check its release notes when using an older version.
 
-Build and start the server:
+## Contribute
 
-```bash
-zig build run
-```
-
-Then connect from another terminal with `redis-cli`:
-
-```console
-$ redis-cli
-127.0.0.1:6379> PING
-PONG
-
-127.0.0.1:6379> SET profile:42 "Ada"
-OK
-
-127.0.0.1:6379> GET profile:42
-"Ada"
-
-127.0.0.1:6379> DBSIZE
-(integer) 1
-```
-
-The default build installs the executable at `zig-out/bin/kgcache`. Use a
-config file, CLI overrides, or both:
-
-```bash
-./zig-out/bin/kgcache path/to/kgcache.conf
-./zig-out/bin/kgcache path/to/kgcache.conf --port 7000
-./zig-out/bin/kgcache --port 7000
-```
-
-See [Configuration](docs/CONFIGURATION.md) for all settings.
-
-For a local Docker service with persistent storage, see
-[Docker Compose](docs/CONTAINERS.md).
-
-To run `kgcache` from any directory, add a shell alias to `~/.zshrc` (or
-`~/.bashrc` for Bash), adjusting the path to your checkout:
-
-```bash
-alias kgcache='"/absolute/path/to/kgcache/zig-out/bin/kgcache"'
-```
-
-After changing or pulling code, run `zig build` from the repository root to
-update the executable used by the `kgcache` alias. Restart any running kgcache
-server to use the rebuilt executable.
-
-Open a new terminal or reload your shell configuration with `source ~/.zshrc`
-(or `source ~/.bashrc`), then run:
-
-```bash
-kgcache /absolute/path/to/kgcache.conf
-```
-
-## Documentation
-
-| Doc | Covers |
-| --- | --- |
-| [Commands](docs/COMMAND.md) | Supported commands, `SET` options, and compatibility notes |
-| [Configuration](docs/CONFIGURATION.md) | `kgcache.conf` file format, every directive, and known gotchas |
-| [Docker Compose](docs/CONTAINERS.md) | Local service setup, storage, health, config changes, and container replacement |
-| [Build versions](docs/BUILDING.md) | Default and explicit SemVer builds, build records, and version inspection |
-| [Release proposals](docs/RELEASE_PROPOSALS.md) | Read-only source/version previews and merged release PR identity |
-| [Release candidates](docs/RELEASE_CANDIDATES.md) | Build and qualify an exact source/version pair, save its image, and verify a transfer |
-| [Release workflow](docs/RELEASE_WORKFLOW.md) | Initial RC branches, backport PRs, GitHub notes, native qualification, publication, and retries |
-| [Architecture](docs/ARCHITECTURE.md) | Role within kgx, request flow, design trade-offs, repository layout |
-| [Test organization](docs/TESTING.md) | Where Zig tests and fixtures belong, test discovery, and checks for test moves |
-| [Errors and logging](docs/ERRORS.md) | Error propagation, terminal reports, and trace availability |
-| [Persistence](docs/PERSISTENCE.md) | Short comparison of snapshots and AOF |
-| [Snapshots](docs/SNAPSHOTS.md) | `SAVE`, `BGSAVE`, child cleanup, and automatic saving |
-| [Append-only file](docs/AOF.md) | AOF setup, fsync policies, file layout, startup, and rewrite flow |
-| [Expiration](docs/EXPIRATION.md) | TTL bookkeeping layout, memory cost, and the planned redesign |
-
-## Development
-
-See [Contributing](CONTRIBUTING.md) for PR titles, checks, squash merges, and backports.
-
-Run the unit test suite:
-
-```bash
-zig build test
-```
-
-The tests cover command decoding, RESP2 and RESP3 reply encoding, command
-dispatch, storage, expiration, snapshots, AOF loading and recovery, fsync
-policies, and AOF rewrites.
-
-See [Test organization](docs/TESTING.md) when adding or moving tests.
-
-Useful commands:
-
-```bash
-zig fmt src/**/*.zig
-zig build
-zig build run
-zig build test
-```
-
-## Current status and compatibility
-
-- TCP sessions start in RESP2. `HELLO 2` and `HELLO 3` select the connection's reply mode and report server and connection metadata. Bare `HELLO` reports the current mode.
-- `CLIENT INFO` reports the caller's connection, and filter-free `CLIENT LIST` reports live connections sorted by ID. Both use the documented 22-field subset. `CLIENT SETINFO` retains library labels for each connection. See [CLIENT commands](docs/COMMAND.md#client).
-- Values are strings only; there is no eviction policy, authentication, replication, clustering, pub/sub, or transactions.
-- Complete requests are processed in order, including requests split across reads. The input buffer starts at 1 KiB by default and grows as needed up to 1 MiB. `connection-buffer-size` sets the initial capacity, clamped to that cap.
-- Each encoded request is limited to 1 MiB and 1,024 array elements, including the command name. Limits apply per command, so a pipeline can exceed them overall. Oversized declared sizes or counts receive a protocol error without waiting for the remaining payload, then the connection closes. EOF with a valid unfinished request closes quietly without executing it. See [TCP request limits](docs/CONFIGURATION.md#tcp-request-limits).
-- Command errors such as unknown commands or wrong argument counts allow later requests. Malformed RESP input receives a protocol error and ends the session. Reply write or flush failures end the session without appending an error to partial output or executing later commands. Peer resets and broken pipes close quietly. Earlier successful commands remain applied.
-- Each reply finishes before the next command starts. A slow reader can pause its worker when socket send space fills. A completed socket write means the local system accepted the bytes; the client may not have read them yet. Shutdown wakes blocked reads and writes before joining workers.
-- `COMMAND` supports registry-based introspection. `COMMAND DOCS` and module filtering are not supported.
-- The active-expiration worker currently needs a locking fix before it can safely process TTL keys in a running server. Expired keys are still removed by `GET`. 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and PR guidance.
+The [developer docs](docs/development/README.md) cover testing, architecture,
+internal design, and release procedures. The [documentation index](docs/README.md)
+links both audiences.
 
 ## License
+
 No license file is currently included.

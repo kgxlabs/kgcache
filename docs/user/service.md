@@ -1,6 +1,8 @@
 # Run kgcache with Docker Compose
 
-The root [docker-compose.yml](../docker-compose.yml) builds a local Linux
+[Documentation](../README.md)
+
+The root [docker-compose.yml](../../docker-compose.yml) builds a local Linux
 amd64 service. It publishes port 6379 on host loopback and stores data in a
 named volume.
 The service has no authentication. Keep it on a trusted network.
@@ -202,8 +204,7 @@ storage for disposable data without those commands.
 `everysec` normally targets about one second of unflushed writes under normal
 I/O progress. It is not a universal loss bound. A client acknowledgement does
 not prove durable storage. A volume is neither a backup nor a failover system.
-See [Persistence](PERSISTENCE.md), [AOF](AOF.md), and [Snapshots](SNAPSHOTS.md)
-for recovery behavior and filesystem limits. Docker kill does not simulate
+See [Persistence](persistence.md) for recovery behavior and filesystem limits. Docker kill does not simulate
 host power loss.
 
 ## Resource limits and shutdown
@@ -218,7 +219,7 @@ The internal persistence child budget defaults to 10000 ms, followed by up
 to 1000 ms for reaping after termination is requested. That budget does not
 bound client draining, filesystem calls, or all cleanup. Review the outer
 allowance when raising the budget or using slow storage. See
-[AOF shutdown](AOF.md#shutdown) for the current lifecycle contract.
+[shutdown guarantees](persistence.md#shutdown-and-failure-limits) for the current lifecycle contract.
 
 CPU, memory, storage, and stop timing belong in deployment configuration.
 Host kernel settings, swap, storage latency, and file-descriptor limits need
@@ -254,5 +255,5 @@ for later disconnects.
 Start with logs, config and health arguments, data permissions, and inner
 versus outer timeout settings. Preserve the volume while investigating.
 
-See [container checks](../tests/container/README.md) for the qualification
+See [container checks](../../tests/container/README.md) for the qualification
 command, pinned client prerequisites, failure artifacts, and CI usage.
