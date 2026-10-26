@@ -615,6 +615,37 @@
             "src-1f4ccf45bdbb4ad0c87d95ebe523a6e9e99ac1f1ee0ba9ec792ecca219d883c7"
           ]
         }
+      },
+      "github": {
+        "intent": {
+          "tag_name": "v0.1.0",
+          "name": "v0.1.0",
+          "target_commitish": "4256d1f878f92328cd55fb0dd1d87228bed0cd0a",
+          "prerelease": false,
+          "body": "## Summary\n\nkgcache 0.1.0 is the first regular release of the standalone string-cache service.\nIt provides a tested subset of Redis RESP2 and RESP3 for local services and cache workloads.\n\n## Highlights\n\n- Binary-safe string keys and values, conditional SET, expiration, and logical databases.\n- Persistent TCP connections, ordered pipelines, and HELLO protocol switching.\n- Tested go-redis v9.22.0/v9.23.0 and node-redis 6.2.0/6.2.1, including default RESP3 and explicit RESP2/RESP3.\n- CLIENT SETINFO library labels and the documented 22-field CLIENT INFO/LIST reports.\n- Snapshots, append-only persistence, recovery checks, and clean shutdown/restart coverage.\n- A non-root Linux amd64 image, persistent storage, a built-in PING health check, and Compose examples.\n- Rewritten getting-started, application, operation, command, and contributor documentation.\n\n## Try it\n\n```sh\ndocker run --detach --rm --name kgcache --platform linux/amd64 \\\n  --publish 127.0.0.1:6379:6379 --volume kgcache-data:/data \\\n  --stop-timeout 30 kgxlabs/kgcache:0.1.0\nredis-cli SET greeting hello\nredis-cli GET greeting\n```\n\nThe replies are `OK` and `hello`. Stop the example with `docker stop kgcache`.\nThe named volume retains its data. Arm64 hosts need amd64 emulation.\n\n## Compatibility and limits\n\nkgcache remains experimental and supports string-cache workloads within its documented contract.\nAuthentication, TLS, eviction, replication, clustering, transactions, scripting, pub/sub, and client-side caching are unsupported.\nKeep the listener on a trusted network.\n\nSnapshot and AOF restart paths are tested. `everysec` is not a hard one-second loss bound.\nChild shutdown polling has a shared budget, not a deadline for all cleanup.\nDirectory fsync and the broader persistence child-safety/source-error work remain documented limits.\n\n- [Compatibility and exact tested clients](https://github.com/kgxlabs/kgcache/blob/v0.1.0/docs/reference/compatibility.md)\n- [Persistence guarantees and limits](https://github.com/kgxlabs/kgcache/blob/v0.1.0/docs/operate/persistence.md)\n- [Documentation](https://github.com/kgxlabs/kgcache/blob/v0.1.0/docs/README.md)\n\n## Release preparation and validation\n\nThis release request starts from merged main `beddff748374fa9e8539766f8c693bab629f5825`.\nThe preparation commit changes only image examples and release links from rc.2 to 0.1.0.\nApplication code, dependencies, workflow definitions, and protection settings are unchanged.\n\nZig formatting, local documentation links/anchors, and commit-message checks passed.\nRequired PR checks must pass before the release merge. The publisher then qualifies\nthe exact 0.1.0 artifact and image on native Linux amd64, verifies a fresh-runner\ntransfer and a clean registry pull, and publishes fixed references and evidence assets.\n\nImage: `docker.io/kgxlabs/kgcache@sha256:78fc428e6c0926d75c74c5ddc063970ebf4904b70b59bd045bc627bb5bcaa4b1`\n\nPlatform: `linux/amd64`\nSource: `4256d1f878f92328cd55fb0dd1d87228bed0cd0a`\n",
+          "assets": [
+            {
+              "name": "build-info.json",
+              "sha256": "4880fa88b32417d63aa2bd5d0f3cadc42199b2468923da0aa79c0a9b620ec9b1",
+              "bytes": 728
+            },
+            {
+              "name": "release-info.json",
+              "sha256": "e0ab2505e7c8bc7c0a7dd7b293b0fd2d79f0eeb349a0fb40cf89d81628ea17bd",
+              "bytes": 1711
+            },
+            {
+              "name": "qualification.json",
+              "sha256": "8518932d0cacd0907e5fde71e73e0f51ab3d54b0cf446c8aea3acbb8b99f605c",
+              "bytes": 3371
+            },
+            {
+              "name": "SHA256SUMS",
+              "sha256": "1faa702e58f1d5627ff97161c342b4e78a643d4842289799e0497e2f86af2e2a",
+              "bytes": 251
+            }
+          ]
+        }
       }
     }
   },
