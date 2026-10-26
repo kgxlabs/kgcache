@@ -428,6 +428,37 @@
             "src-c215cdf4d74f6f82894c147f78be922d5840637f3cb669cf80ec11aacaacc61c"
           ]
         }
+      },
+      "github": {
+        "intent": {
+          "tag_name": "v0.1.0-rc.2",
+          "name": "v0.1.0-rc.2",
+          "target_commitish": "3eb0df5bfd7eca520f56a3e6cf7974568d2f57bf",
+          "prerelease": true,
+          "body": "## Summary\n\nFresh runners can share a Docker daemon ID, which stopped release image verification before the registry pull. Check that the candidate image is absent before pulling it, then record that evidence for publication. Keep existing verification receipts compatible.\n\nBackport of #258 to `release/0.1.0-rc`.\n\n(cherry picked from commit 2705d387c0ce6f35b004cd94412fdf35991c0da7)\n\n## Testing\n\n- `bash tests/release/publication.sh --docker`\n- `make check-shell`\n- `bash tools/release/check-maintenance.sh --event <pr-event.json> --repo .`\n- `git diff origin/release/0.1.0-rc --check`\n\nThe Docker suite uses a local registry and synthetic release fixtures. Native Linux amd64 qualification runs in CI.\n\n## Compatibility\n\nNo breaking changes. Existing verification receipts remain valid.\n\nImage: `docker.io/kgxlabs/kgcache@sha256:ad03c326e621d5325ab57bad76b8d0e6746dc32af567f866fde5af7a2bc4b75a`\n\nPlatform: `linux/amd64`\nSource: `3eb0df5bfd7eca520f56a3e6cf7974568d2f57bf`\n",
+          "assets": [
+            {
+              "name": "build-info.json",
+              "sha256": "8531b811848b9db2fd329fb964e7f4f564fffa46386cdb514d248c24e57bce3a",
+              "bytes": 733
+            },
+            {
+              "name": "release-info.json",
+              "sha256": "5f774615385686638f9ef581d0728759e754961fe93a4d3e2902d3dad6de73cf",
+              "bytes": 1726
+            },
+            {
+              "name": "qualification.json",
+              "sha256": "06c5ab75cf71ab5340d7578ed511844bb3da4165708bf99ca32a8c8492dabe86",
+              "bytes": 3133
+            },
+            {
+              "name": "SHA256SUMS",
+              "sha256": "c0892b4315e8a589059a44b0733e67b8a006c03c0d5f47235e3ef3ad5ebd765e",
+              "bytes": 251
+            }
+          ]
+        }
       }
     }
   },
