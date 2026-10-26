@@ -466,6 +466,12 @@
           "id": 423882250,
           "verified": true
         }
+      },
+      "alias": {
+        "intent": {
+          "line": null,
+          "latest": null
+        }
       }
     }
   },
