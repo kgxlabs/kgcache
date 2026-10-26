@@ -247,6 +247,37 @@
             "src-a3e42c662783e5c9519547b3f48f4ac61b0586cd77f545f58a043a82ff02a2b6"
           ]
         }
+      },
+      "github": {
+        "intent": {
+          "tag_name": "v0.1.0-rc.1",
+          "name": "v0.1.0-rc.1",
+          "target_commitish": "2f3b23fd21ea8d6b8ab298747047d18dae56c77a",
+          "prerelease": true,
+          "body": "First release candidate for kgcache 0.1.0.  Includes string storage, expiration, snapshots, and optional AOF persistence.  Experimental release with partial Redis compatibility. Values are strings only. Active expiration has a known locking issue.\n\nImage: `docker.io/kgxlabs/kgcache@sha256:fe29c448a6afb4d43c903cd99ae3e79f41ac52c44edf2200dee9266f13eacaeb`\n\nPlatform: `linux/amd64`\nSource: `2f3b23fd21ea8d6b8ab298747047d18dae56c77a`\n",
+          "assets": [
+            {
+              "name": "build-info.json",
+              "sha256": "89407ae0f55491eb55c290df4b985dcd0f04a0e0df036601e62d353df1a13818",
+              "bytes": 733
+            },
+            {
+              "name": "release-info.json",
+              "sha256": "99ade682f578a91fe87da71532dff27d171b8b4fbaea78f30a8bd541e5d0ee08",
+              "bytes": 1726
+            },
+            {
+              "name": "qualification.json",
+              "sha256": "1c5d3adc342a27cf11f5adf0f301b61e8f30acd1b93e8d5810f452bd4261ab37",
+              "bytes": 3367
+            },
+            {
+              "name": "SHA256SUMS",
+              "sha256": "6217066552929be6a0b0fd37bb54c78e12cd46b07875ef7d40cc66eee0bf52ae",
+              "bytes": 251
+            }
+          ]
+        }
       }
     }
   },
