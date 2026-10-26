@@ -62,6 +62,10 @@ def candidate_artifact_matches($candidate; $event; $id):
      .workflow_run.head_sha == $event.workflow_sha and
      $candidate.run.workflow_sha == .workflow_run.head_sha and $candidate.run.id == $event.run_id and
      $candidate.run.workflow_ref == $event.repository + "/.github/workflows/release.yml@refs/heads/main"
+   elif $event.kind == "release" and ($event | has("head_sha")) then
+     # Closed PR artifacts retain the PR head. The build uses the reviewed merge.
+     ($event.head_sha | candidate_commit) and .workflow_run.head_sha == $event.head_sha and
+     $candidate.source_sha == $event.source_sha
    else .workflow_run.head_sha == $candidate.source_sha end);
 
 def validate_candidate:

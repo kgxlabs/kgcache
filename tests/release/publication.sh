@@ -496,6 +496,7 @@ main() {
     check_clean_pull
     check_publication_protections
     check_owner_review_rules
+    check_release_artifact_identity
     check_merged_release_prs
     check_initial_release manual
     check_initial_release automatic
