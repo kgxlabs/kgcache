@@ -408,6 +408,18 @@
           "digest": "sha256:ad03c326e621d5325ab57bad76b8d0e6746dc32af567f866fde5af7a2bc4b75a",
           "media_type": "application/vnd.docker.distribution.manifest.v2+json",
           "config_digest": "sha256:b2b2bdaef06d92875a37661676c234e3b9820b9089d0e42a8dc46a0ee3e8c482"
+        },
+        "verified": {
+          "passed": true,
+          "digest": "sha256:ad03c326e621d5325ab57bad76b8d0e6746dc32af567f866fde5af7a2bc4b75a",
+          "image_id": "sha256:b2b2bdaef06d92875a37661676c234e3b9820b9089d0e42a8dc46a0ee3e8c482",
+          "engine_id": "6134b6ae-8eb1-4f62-889e-a360c80bcfbf",
+          "image_absent_before_pull": true,
+          "native_amd64": true,
+          "synthetic": false,
+          "candidate_sha256": "8faf3b275216643573ff852991e5a6a00b1f728e8898f2c16fe3b1e00a6220fd",
+          "service_sha256": "cd42791c79b59053cd5857af6ad2f43764420008f1a903a4ee66dc051a86dcca",
+          "request_key": "9aefd1a9df29cdeb5f6b4972d9340cb2fb4fc9970a72c9353e64b8091eedaf42"
         }
       }
     }
