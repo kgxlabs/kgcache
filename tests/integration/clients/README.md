@@ -12,15 +12,11 @@ The server build and Zig tests need only Zig 0.16.0.
 
 ## Tested versions
 
-Each row runs the full suite with RESP2, RESP3, and the default handshake. Every
-listed profile is required in CI. These results apply to the exact versions shown.
-
-| Profile | Client | Runtime | Package manager |
-| --- | --- | --- | --- |
-| go-redis-v9.22.0 | go-redis v9.22.0 | Go 1.26.9 | Go modules |
-| go-redis-v9.23.0 | go-redis v9.23.0 | Go 1.26.9 | Go modules |
-| node-redis-6.2.1 | node-redis 6.2.1 | Node 22.14.0 | npm 10.9.2 |
-| node-redis-6.2.0 | node-redis 6.2.0 | Node 22.14.0 | npm 10.9.2 |
+The [compatibility table](../../../docs/user/compatibility.md#exact-tested-clients)
+lists exact required client versions, API suites, runtimes, and protocol cases.
+[matrix.json](matrix.json) owns profile selection and dependency paths. The
+full API cases run with explicit RESP2 and RESP3; separate handshake and
+CLIENT INFO cases also verify each library's default RESP3 mode.
 
 ## Running tests
 

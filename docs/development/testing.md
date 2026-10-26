@@ -1,6 +1,36 @@
-# Test organization
+# Testing
 
-This is the repository convention for placing Zig tests. Use it when adding or moving tests.
+[Developer documentation](README.md) / Testing
+
+## Test layers
+
+Run from the repository root with Zig 0.16.0. Client checks need the pinned
+runtimes and locks in [client test setup](../../tests/integration/clients/README.md).
+
+| Layer | Command | What it establishes |
+| --- | --- | --- |
+| Zig format | `zig fmt --check build.zig build.zig.zon src tests` | Build, source, and test files use Zig formatting |
+| Unit | `zig build test` | Parser, reply bytes, command/store semantics, expiration, ownership, persistence, and failure paths |
+| Process | `zig build test-integration` | Real TCP behavior, restart, config, health, transport, and shutdown |
+| Go clients | `make test-go` and `make check-go` | Every required Go profile and native code checks |
+| Node clients | `make test-node` and `make check-node` | Every required Node profile and native code checks |
+| Containers | See [container checks](../../tests/container/README.md) | Image/service lifecycle and client smoke tests |
+| Release | See [release checks](../../tests/release/README.md) | Exact source/version qualification, image transfer, and publication logic |
+
+`make test` attempts the Zig, Go, and Node groups. It does not replace the
+separate format, shell, container, and release checks. The
+[compatibility evidence map](../user/compatibility.md#automated-evidence) links
+user claims to the relevant suites. Tests are not a benchmark or a complete
+Redis conformance suite.
+
+Process/client fixtures use ephemeral ports and temporary data directories.
+They bound test time, reap children, and retain useful failure evidence with
+`KGCACHE_TEST_ARTIFACT_DIR`. See [process tests](../../tests/integration/README.md)
+and [harness ownership](../../tests/integration/harness/README.md).
+
+## Zig test organization
+
+Use these conventions when adding or moving Zig tests.
 
 ## Test entry point
 

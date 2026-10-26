@@ -5,8 +5,9 @@ Run `zig build test-integration` to build kgcache and run the Zig integration ru
 The root Makefile exposes these checks as `make test-integration` and
 `make test-unit`, or together as `make test-zig`. `make test` attempts the Zig,
 Go, and Node test groups. See [Client test projects](clients/README.md) for
-dependency setup and quality checks. The client suites remain planned, so `make test-clients`
-and the full `make test` report a nonzero result until real client cases exist.
+dependency setup and quality checks. Both client suites are implemented and
+required in CI after the Zig checks pass. Exact supported profiles are in
+[compatibility](../../docs/user/compatibility.md#exact-tested-clients).
 
 The baseline suite checks PING, SET/GET/DEL, retained pipeline tails, request limits, recovery after command errors, database isolation, invalid config startup, slow readers, peer resets, idle reader and blocked writer shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
 
@@ -80,7 +81,7 @@ supplies valid replacements. Every rejection requires exit status 1, no
 READY notification, one error event carrying the expected source error,
 and a reaped child. A multiline return trace belongs to that single event.
 
-See [Configuration](../../docs/CONFIGURATION.md#redis-config-compatibility)
+See [Configuration](../../docs/user/configuration.md#redis-config-compatibility)
 for the supported config subset and the `.kgc` and port 0 differences.
 
 The process harness in `tests/integration/harness/` owns each child from start through reaping. It enforces deadlines, captures bounded logs, and removes the fixture's temporary data. Set `KGCACHE_TEST_ARTIFACT_DIR` to keep a failed fixture's config and logs. The harness suite checks bad startup, malformed READY, timeouts, restarts, port conflicts, and two live servers.

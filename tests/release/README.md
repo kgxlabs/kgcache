@@ -1,6 +1,6 @@
 # Linux release checks
 
-The [release workflow](../../docs/RELEASE_WORKFLOW.md) runs qualification and
+The [release workflow](../../docs/development/release-workflow.md) runs qualification and
 manual previews in CI. Publication requires explicit activation. Test its GitHub evidence collector
 locally with `bash tests/release/github.sh`. The fixtures use a GET-only API
 stub and temporary Git history. They need no GitHub token or network access.
@@ -26,11 +26,11 @@ The Docker option checks the same notes and prerelease assets through the
 stateful API fixture while preserving stable aliases.
 
 For a complete source/image qualification and saved-image handoff, see
-[release candidates](../../docs/RELEASE_CANDIDATES.md). The runner uses the
+[release candidates](../../docs/development/release-candidates.md). The runner uses the
 checks below and the existing prepared-image service checks. It never publishes.
 
 For read-only version and source proposals, see
-[release proposals](../../docs/RELEASE_PROPOSALS.md). Run their isolated Git
+[release proposals](../../docs/development/release-proposals.md). Run their isolated Git
 fixtures with `bash tests/release/proposals.sh`. Those checks need no compiler,
 Docker, credentials, or published versions.
 
@@ -63,7 +63,7 @@ Persistence test controls are disabled in the release server.
 
 Use `--version SEMVER` to select an explicit version without changing
 `build.zig.zon`. `verify.sh --version SEMVER` also checks the expected record
-version. See the shared [build-version contract](../../docs/BUILDING.md) for
+version. See the shared [build-version contract](../../docs/development/building.md) for
 accepted inputs, schema version `2`, and executable version inspection.
 
 Use `--prefix DIR` for an isolated output location. The ordinary `zig-out/bin`

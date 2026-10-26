@@ -155,7 +155,7 @@ the separate formatting, shell, build, and container checks.
 
 For a bug fix, add a regression test when practical. Confirm it fails on the old
 code and passes with the fix. Add coverage for new behavior and explain any
-intentional changes to existing tests. Follow [test organization](docs/TESTING.md)
+intentional changes to existing tests. Follow [test organization](docs/development/testing.md)
 when adding or moving Zig tests.
 
 For a performance claim, include a repeatable benchmark command, workload,
@@ -217,7 +217,7 @@ Run the relevant checks on the target code.
 The **Maintenance compatibility** check validates the PR title, body, introduced
 commit messages, and main source references. It rejects declared features and
 breaking changes. Reviewers still judge compatibility. After merging, the
-[release workflow](docs/RELEASE_WORKFLOW.md) checks the actual squash commit,
+[release workflow](docs/development/release-workflow.md) checks the actual squash commit,
 maintainer approval, and main-first history before qualification.
 
 Keep the original commit reference in the final squash commit body. GitHub does

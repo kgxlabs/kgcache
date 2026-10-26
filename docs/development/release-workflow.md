@@ -1,5 +1,7 @@
 # Release workflow
 
+[Developer documentation](README.md)
+
 Creating a remote `release/MAJOR.MINOR.PATCH-rc` branch requests the first
 release candidate. For example, creating `release/0.1.0-rc` from reviewed main
 requests `0.1.0-rc.1`. No preparation commit or PR is needed for that candidate.

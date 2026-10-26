@@ -1,53 +1,30 @@
-# Snapshots
+# Snapshot internals
 
-`SAVE` and `BGSAVE` write a full copy of the data to a `.kgc` file. This
-page explains how snapshots run and how automatic saving works.
+[Developer documentation](README.md) / Snapshots
 
-For a comparison with AOF, see [Persistence](PERSISTENCE.md). For AOF
-setup, fsync choices, startup, and rewrites, see
-[Append-only file](AOF.md).
-
-## Snapshot location and format
-
-Configure the base directory and snapshot filename in `kgcache.conf`:
-
-```conf
-dir ./data
-dbfilename dump.kgc
-```
-
-Create `./data` before starting kgcache, and give the user running the
-server read and write access. A relative `dir` uses the process working
-directory as its base. This example reads and writes `./data/dump.kgc`.
-The defaults, `dir .` and `dbfilename dump.kgc`, use `dump.kgc` in the
-process working directory.
-
-`dbfilename` must be a nonempty filename ending in `.kgc`, with no path
-separators. The old `snapshot-path` directive is rejected. Changing the
-settings does not move, rename, or convert an existing snapshot.
-
-Snapshots use kgcache's `.kgc` format. Redis RDB files cannot be loaded as
-`.kgc` files, including after renaming their extension. See
-[Persistence paths](CONFIGURATION.md#persistence-paths) and
-[Redis config compatibility](CONFIGURATION.md#redis-config-compatibility).
-
-When AOF is disabled, startup loads the configured snapshot if it exists.
-With `appendonly yes`, startup loads AOF; `SAVE` and `BGSAVE` still write to
-the configured snapshot path.
+For mode selection, paths, save rules, and user-visible guarantees, use the
+[user persistence guide](../user/persistence.md#snapshot-setup). Snapshots use
+kgcache's `.kgc` format. This page covers child ownership, copy-on-write,
+claims, dirty counts, and shutdown completion.
 
 ## Background saving (`BGSAVE`)
 
-`SAVE` writes a full snapshot to disk on the connection thread that asked for it: simple, but the client is stuck waiting for however long the write takes. `BGSAVE` runs without blocking the client. It returns `Background saving started` when the save begins. If an AOF rewrite is active and background persistence is exclusive, it returns `Background saving scheduled`, then starts the save after the rewrite finishes.
+SAVE writes a full snapshot on the requesting connection's thread. The caller
+waits for completion. BGSAVE starts a child and returns once the child is
+registered. If an AOF rewrite owns the exclusive persistence claim, it records
+one pending save instead.
 
-That "somewhere else" is a forked child process, and getting this right depends on a few OS-level mechanics that are worth spelling out, since they shape most of the code around it.
+### `fork()` and copy-on-write
 
-### `fork()` and copy-on-write, briefly
+`fork()` creates a child process with the parent's memory view. It returns
+zero in the child and the child's PID in the parent. Both continue after the
+call, so each branch must have a clear exit path.
 
-`fork()` is a POSIX system call that clones the calling process. Right after it returns, there are two processes, the original (the parent) and a near-identical copy (the child), each about to continue running from the exact same point in the code, distinguished only by `fork()`'s return value (`0` in the child, the child's real process ID in the parent).
-
-The clone is cheap because the OS doesn't actually copy memory up front. Parent and child start out pointing at the *same* physical memory pages; those pages are marked copy-on-write (COW), meaning the first time either process writes to one, the OS transparently gives that process its own private copy of just that one page. Pages nobody touches are never duplicated at all.
-
-For `BGSAVE`, this is exactly the "snapshot" primitive it needs: the child sees the entire dataset frozen at the instant of `fork()`, and can spend as long as it wants writing that frozen view to disk. Meanwhile the parent keeps serving requests and mutating its own data: those writes trigger COW faults that give the parent private pages, but never touch what the child sees. No lock is held on the dataset for the duration of the write; the OS's own memory model does the isolating.
+The OS initially shares physical pages between parent and child. A write by
+either process makes a private copy of that page. This is copy-on-write (COW).
+For BGSAVE, the child writes the dataset captured at the fork. The parent can
+continue serving requests. Later writes do not change the child's view.
+Storage locks protect capture and are not held for the child's full disk write.
 
 ```text
               fork()
@@ -89,7 +66,11 @@ A few details here are load-bearing, not stylistic:
 
 ### Why one background save at a time
 
-Two `BGSAVE`s (or a `SAVE` and a `BGSAVE`) writing to the same `.kgc` file at once would interleave or corrupt the output. `PersistenceState` (`src/persistence_state.zig`) is the guard against that: a small piece of state, shared by every connection thread and the background housekeeping loop, tracking whether a kgc save and/or an AOF rewrite is currently in flight, plus the pid of whichever child is running.
+Each save writes a unique temporary file. Saves still share one publication
+slot and dirty-change counter. `PersistenceState` serializes that lifecycle
+so one completion cannot replace a newer snapshot or account for the same
+changes twice. It tracks the save/rewrite claims and child PIDs for connection
+threads, cron, and shutdown.
 
 The claim has to happen in the *parent*, before `fork()`: a flag flipped inside the child would only ever exist in the child's own COW-private copy of that memory, invisible to the parent and every other thread, which is exactly the same isolation `BGSAVE` relies on for the snapshot itself working correctly here. `SAVE` and `BGSAVE` share one "save already in progress" error. Repeated manual requests while a save is active are errors, not a queue.
 
@@ -98,13 +79,14 @@ Both forms follow the same policy. When an AOF rewrite blocks the save, one
 pending save is recorded and repeated requests coalesce into it. This is an
 intentional difference from Redis: bare `BGSAVE` schedules in this case too.
 
-Since kgcache handles each connection on its own OS thread, this state is genuinely shared across threads, not just across the fork boundary: `PersistenceState` protects it with a mutex rather than a plain flag.
+Connection threads and cron share this state. `PersistenceState` protects its
+lifecycle transitions with a mutex.
 
 ### Reaping: why it can't happen inside `bgsave()`
 
 When a child process exits, the kernel doesn't let it fully disappear until its parent calls `waitpid()` on it: until then it's a "zombie", just sitting in the process table. `bgsave()` itself can't be the one to reap its child: `waitpid()` without `WNOHANG` blocks until the child exits, which would make the parent wait anyway and defeat the entire point of `BGSAVE` being non-blocking.
 
-During normal operation, reaping happens on its own timeline: the background housekeeping loop in `cron.zig` (`cron-interval-ms`, shared with active expiration; see [Configuration](CONFIGURATION.md)) polls with `waitpid(pid, &status, WNOHANG)` on every tick.
+During normal operation, reaping happens on its own timeline: the background housekeeping loop in `cron.zig` (`cron-interval-ms`, shared with active expiration; see [Configuration](../user/configuration.md)) polls with `waitpid(pid, &status, WNOHANG)` on every tick.
 
 ```text
 tick 1: fork() ── child starts dumping
@@ -126,7 +108,7 @@ replacement leaves every change dirty. The child exits without logging;
 the parent reports `BackgroundSaveFailed` for an ordinary exit of 1, or the
 existing reaper error for a wait or abnormal-exit failure. The child's original
 error and trace are temporarily unavailable. Cron releases the save claim only
-after this work is complete. See [Errors and logging](ERRORS.md).
+after this work is complete. See [Errors and logging](errors.md).
 
 During shutdown, kgcache stops accepting work and stops cron, then drains and
 joins all client workers. A worker can start `BGSAVE` while it is finishing a
@@ -151,7 +133,7 @@ state or the borrowed logger. A successful save becomes the latest completed
 snapshot, covering the data captured when the child forked. A failed save does
 not mark those changes as saved; the previous completed snapshot remains the
 latest one. Shutdown reports the failure and continues safe cleanup. See
-[AOF shutdown](AOF.md#shutdown) for the rewrite and final flush order.
+[AOF shutdown](aof.md#shutdown) for the rewrite and final flush order.
 
 ### `exclusive-bg-persistence`
 
@@ -159,29 +141,20 @@ By default, a `BGSAVE` and an AOF background rewrite are mutually exclusive. A m
 
 Turning exclusivity off (`exclusive-bg-persistence no`) is possible but not recommended. It lets one `BGSAVE` and one AOF rewrite run at the same time. Two children then share the parent's COW memory, so every later parent write may require page copies for both children.
 
-## Saving on clean shutdown
+## Final shutdown save
 
-With AOF off, `shutdown-save yes` saves dirty data on SIGINT or SIGTERM.
-This is the default. Workers and existing saves finish before the dirty count
-is checked. An unchanged store needs no extra save. Deleting the last key still
-counts as a change and needs a snapshot of the empty database.
+With AOF off, the server can start a final snapshot after workers join and
+existing children settle. It uses the drain context's remaining budget.
+The child does not get a fresh grace period. Success must publish the snapshot
+before its captured changes become clean. Failure preserves dirty state and
+returns a shutdown error. There is no retry after a failed final attempt.
 
-The server starts one final child and polls it directly because cron has stopped.
-The child uses only the remaining shutdown budget. A required save that fails or
-times out makes the process exit with code 1. The previous complete snapshot
-stays in place until the parent can publish a successful save.
-
-Use `shutdown-save no` to opt out. `save ""` disables periodic saves only.
-AOF mode and failure cleanup do not request an extra snapshot on stop.
-
-The save writes the full dataset, even if only one key changed. Large datasets
-may need a longer `persistence-shutdown-grace-ms` value. SIGKILL or a supervisor
-forcing exit before completion can leave the latest changes unsaved.
-The directory-sync limit in issue #64 is unchanged.
+The exact setting behavior and forced-stop limits are in
+[user shutdown guarantees](../user/persistence.md#shutdown-and-failure-limits).
 
 ## Automatic background saving (condition-based snapshots)
 
-Beyond on-demand `SAVE`/`BGSAVE`, kgcache can trigger a `BGSAVE` on its own once enough writes have piled up: the same idea as `redis-server`'s `save <seconds> <changes>` directive (see [Configuration](CONFIGURATION.md#automatic-background-saving-save) for the config format). This needs two things: something that counts writes, and something that periodically checks whether a configured rule has been satisfied.
+Beyond on-demand `SAVE`/`BGSAVE`, kgcache can trigger a `BGSAVE` on its own once enough writes have piled up: the same idea as `redis-server`'s `save <seconds> <changes>` directive (see [Configuration](../user/configuration.md#automatic-background-saving-save) for the config format). This needs two things: something that counts writes, and something that periodically checks whether a configured rule has been satisfied.
 
 ### Counting writes: `PersistenceState`
 

@@ -1,21 +1,23 @@
 # Release candidates
 
+[Developer documentation](README.md)
+
 The candidate tools build and test one exact source/version pair, save its
 image, and verify a later load. They keep all output local. They create no Git
 version tags, registry uploads, or GitHub releases.
 
-The [release workflow](RELEASE_WORKFLOW.md) runs these commands in CI and
+The [release workflow](release-workflow.md) runs these commands in CI and
 verifies artifact transfer in a separate job.
 
-Use the prerequisites in [release checks](../tests/release/README.md),
-[container checks](../tests/container/README.md), and
-[client setup](../tests/integration/clients/README.md). Prepare the pinned Go,
+Use the prerequisites in [release checks](../../tests/release/README.md),
+[container checks](../../tests/container/README.md), and
+[client setup](../../tests/integration/clients/README.md). Prepare the pinned Go,
 Node, and npm versions before starting. The source builder uses the pinned,
 checksum-verified Zig compiler.
 
 ## Build and qualify
 
-Create a [proposal](RELEASE_PROPOSALS.md), then qualify it:
+Create a [proposal](release-proposals.md), then qualify it:
 
 ```sh
 mkdir -p test-artifacts/release

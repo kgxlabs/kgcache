@@ -9,7 +9,7 @@ Prepare the Go, Node, and npm versions in the
 these prerequisites before creating resources. Dependency preparation can
 use the network; dependencies remain locked in isolated profile workspaces.
 
-For operator instructions, see [Docker Compose](../../docs/CONTAINERS.md).
+For operator instructions, see [Docker Compose](../../docs/user/service.md).
 Build and qualify from the repository root:
 
 ```sh
@@ -34,7 +34,7 @@ settings. Local builds read the package version from `build.zig.zon`. They
 record `SOURCE_REVISION=unknown` and `SOURCE_DIRTY=true` by default. The image
 version label stays empty unless `VERSION` is supplied. An explicit `VERSION`
 overrides the binary and build record too. The record keeps the package default
-as `development_version`. See the shared [build-version contract](../../docs/BUILDING.md)
+as `development_version`. See the shared [build-version contract](../../docs/development/building.md)
 for the accepted SemVer format and local build examples.
 
 Release CI verifies a clean checkout, then supplies `SOURCE_REVISION`,

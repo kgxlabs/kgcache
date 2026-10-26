@@ -1,5 +1,7 @@
 # Release proposals
 
+[Developer documentation](README.md)
+
 `tools/release/propose.sh` makes read-only source/version previews. It does not
 build, reserve a version, change Git refs, upload an image, or create a release.
 
@@ -7,7 +9,7 @@ For an initial candidate, create a remote `release/MAJOR.MINOR.PATCH-rc` branch
 from reviewed main. Later backport PRs into that branch request the next number.
 The protected state freezes each source, version, and notes before qualification.
 The explicit Publish RC action can recover branches created before automation
-was installed. See the [release workflow](RELEASE_WORKFLOW.md).
+was installed. See the [release workflow](release-workflow.md).
 There is no checked-in release-line registry to maintain.
 
 ## Preview a committed source

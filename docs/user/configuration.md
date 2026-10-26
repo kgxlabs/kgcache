@@ -1,7 +1,9 @@
 # Configuration
 
+[Documentation](../README.md)
+
 For image defaults and shared config mounts, see
-[Docker Compose](CONTAINERS.md).
+[Docker Compose](service.md).
 
 kgcache starts with built-in defaults. To use a config file, pass its path as a positional argument:
 
@@ -101,7 +103,7 @@ The network deadline does not bound config filesystem access or process startup.
 
 Each process loads its own settings. If the server uses endpoint overrides,
 supply the same config path, bind, and port to the health command. Container
-examples and timing are in the [container guide](../tests/container/README.md#health-check).
+examples and timing are in the [container guide](../../tests/container/README.md#health-check).
 
 ## Quotes and empty values
 
@@ -162,7 +164,7 @@ Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config pa
 | `active-expire-budget-ms` | `--active-expire-budget-ms 10` | `10` | Time budget per expiration sweep before the worker yields |
 | `active-expire-batch-size` | `--active-expire-batch-size 20` | `20` | Keys sampled per expiration batch, per database |
 | `active-expire-threshold-percent` | `--active-expire-threshold-percent 25` | `25` | Batch expiry rate that triggers an immediate next batch on the same database |
-| `exclusive-bg-persistence` | `--exclusive-bg-persistence yes` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Snapshots](SNAPSHOTS.md#background-saving-bgsave). |
+| `exclusive-bg-persistence` | `--exclusive-bg-persistence yes` | `yes` | Whether a `BGSAVE` and an AOF background rewrite are prevented from running at the same time (`yes`/`no`). See [Snapshots](../development/snapshots.md#background-saving-bgsave). |
 | `save` | `--save 60 1` | none (disabled) | One or more `save <seconds> <changes>` rules for triggering an automatic `BGSAVE`. May repeat; see below. |
 | `appendonly` | `--appendonly yes` | `no` | Turn the append-only file on (`yes`/`no`) |
 | `appendfsync` | `--appendfsync always` | `everysec` | Fsync policy: `always`, `everysec`, or `no` |
@@ -177,7 +179,7 @@ Append any CLI form below to `./zig-out/bin/kgcache`, with an optional config pa
 
 The input buffer grows as needed up to 1 MiB and retains its grown capacity until the connection ends. Configured values above 1 MiB remain accepted, but the initial allocation is clamped to 1 MiB. See [TCP request limits](#tcp-request-limits) for the limits on individual commands.
 
-See [`kgcache.conf.example`](../kgcache.conf.example) for a file with every directive documented inline.
+See [`kgcache.conf.example`](../../kgcache.conf.example) for a file with every directive documented inline.
 
 ## Numeric ranges
 
@@ -303,7 +305,7 @@ positive: `seconds` is at most 9223372036854775807 and `changes` is at most
 
 With no `save` line, automatic saving is off. `save ""` clears earlier file rules,
 and `--save ''` clears file rules and earlier CLI rules. Manual `SAVE` and `BGSAVE`
-still work. See [Snapshots](SNAPSHOTS.md#automatic-background-saving-condition-based-snapshots)
+still work. See [Snapshots](../development/snapshots.md#automatic-background-saving-condition-based-snapshots)
 for the write counter and rule checks.
 
 To replace file rules with one CLI rule after a clear:
@@ -364,7 +366,7 @@ disabling manual `BGREWRITEAOF`.
 the last incremental file. Damage in a base or earlier incremental file
 still stops startup.
 
-See [Append-only file](AOF.md) for the file layout, startup flow, rewrite
+See [Append-only file](../development/aof.md) for the file layout, startup flow, rewrite
 flow, and failure behavior.
 
 ## Not yet configurable

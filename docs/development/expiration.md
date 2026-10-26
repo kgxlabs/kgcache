@@ -1,6 +1,30 @@
-# Expiration bookkeeping
+# Expiration internals
 
-How TTLs are tracked alongside key/value entries, what that costs in memory, and where the design is headed as the keyspace grows.
+[Developer documentation](README.md) / Expiration
+
+User-visible expiration behavior and limits are in
+[capacity and expiration](../user/limits.md#capacity-and-expiration).
+
+## Active expiration
+
+Cron calls `expiration.runRound` after each `cron-interval-ms` sleep. The round
+samples random TTL entries in each database. Each count check and sampled
+removal runs inside a storage transaction. The transaction ends on success and
+error, so the old active-expiration locking warning no longer applies.
+
+One `active-expire-budget-ms` budget covers the whole round. A batch uses
+`active-expire-batch-size` samples. If its expired percentage reaches
+`active-expire-threshold-percent`, the round tries another batch in that
+database while time remains. The next round rotates its starting database.
+This helps a busy database avoid starving later databases.
+
+GET also expires entries lazily. Active cleanup is sampling, not an exact
+per-key timer. The implementation and multi-database/largest-batch regression
+tests live in [src/expiration.zig](../../src/expiration.zig). Storage expiration
+and index maintenance tests are in [src/storage](../../src/storage).
+
+The remaining sections describe metadata cost and possible storage redesign.
+Those future choices do not mean active expiration is disabled today.
 
 ## Layout
 
