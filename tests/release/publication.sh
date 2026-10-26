@@ -183,6 +183,62 @@ check_alias_precedence() {
     printf 'Passed: maintenance, prerelease, and metadata alias precedence\n'
 }
 
+check_clean_pull() {
+    local mode message registry=docker.io/fixture/kgcache
+    local record="$publication_workspace/clean-pull-request.json"
+    local calls="$publication_workspace/docker-calls"
+    local bin="$publication_workspace/verify-bin"
+
+    mkdir "$bin"
+    cp tests/release/verify-docker.sh "$bin/docker"
+    chmod +x "$bin/docker"
+    jq --arg registry "$registry" '.registry = {
+        intent: {repository: $registry, engine_id: "shared-engine"},
+        uploaded: {digest: ("sha256:" + ("a" * 64))}}' \
+        "$publication_workspace/tagged.json" > "$record"
+    for mode in missing present daemon-error timeout unrelated-missing; do
+        case "$mode" in
+            missing) message='fixture reached digest pull' ;;
+            present) message='qualified image is already present' ;;
+            *) message='cannot confirm the qualified image is absent' ;;
+        esac
+        : > "$calls"
+        VERIFY_FIXTURE_MODE="$mode" VERIFY_FIXTURE_CALLS="$calls" PATH="$bin:$PATH" \
+            expect_github_failure "clean-pull-$mode" "$message" \
+            bash tools/release/publish.sh verify --request "$publication_key" \
+            --registry "$registry" --record "$record" --candidate "$candidate_test_workspace/good" \
+            --output "$publication_workspace/clean-pull-$mode"
+        if [[ "$mode" == missing ]]; then
+            grep -Fq "image pull --platform linux/amd64 $registry@sha256:" "$calls"
+        elif grep -Fq 'image pull' "$calls"; then
+            release_fail "clean pull reached the registry after $mode"
+        fi
+        [[ ! -e "$publication_workspace/clean-pull-$mode" ]] ||
+            release_fail 'preflight fixture produced a verification receipt'
+    done
+    jq -en -L tools/release --slurpfile request "$record" '
+        include "publication";
+        {requests: {test: $request[0]}} as $ledger |
+        {passed: true, digest: $request[0].registry.uploaded.digest,
+          image_id: $request[0].candidate.image_id,
+          candidate_sha256: $request[0].candidate_sha256,
+          engine_id: "shared-engine", image_absent_before_pull: true} as $receipt |
+        ($ledger | checkpoint("test"; "verified"; $receipt) |
+          .requests.test.registry.verified == $receipt) and
+        (try ($ledger | checkpoint("test"; "verified";
+          $receipt | .image_absent_before_pull = false | .engine_id = "other-engine") | false) catch true) and
+        (try ($ledger | checkpoint("test"; "verified";
+          $receipt | del(.image_absent_before_pull)) | false) catch true) and
+        (try ($ledger | checkpoint("test"; "verified";
+          $receipt | .engine_id = "") | false) catch true) and
+        (try ($ledger | checkpoint("test"; "verified";
+          $receipt | .digest = ("sha256:" + ("b" * 64))) | false) catch true) and
+        ($ledger | checkpoint("test"; "verified";
+          $receipt | del(.image_absent_before_pull) | .engine_id = "legacy-other-engine") |
+          .requests.test.registry.verified.engine_id == "legacy-other-engine")' > /dev/null
+    printf 'Passed: shared daemon IDs, explicit absence evidence, and legacy verification receipts\n'
+}
+
 seed_registry_transport() {
     local archive="$publication_workspace/seed" path checksum bytes location base separator
 
@@ -268,7 +324,8 @@ check_registry_and_api() {
     jq -n --slurpfile request "$publication_workspace/uploaded.json" --arg sha "$summary" \
         '{passed:true, synthetic:true, native_amd64:false, digest:$request[0].registry.uploaded.digest,
           request_key:$request[0].request_key, candidate_sha256:$request[0].candidate_sha256,
-          image_id:$request[0].candidate.image_id, engine_id:"synthetic-separate-engine", service_sha256:$sha}' \
+          image_id:$request[0].candidate.image_id, engine_id:$request[0].registry.intent.engine_id,
+          image_absent_before_pull:true, service_sha256:$sha}' \
         > "$publication_workspace/verification/verification.json"
     # Start with one already assigned fixed reference to test partial recovery.
     timeout 60s docker buildx imagetools create --prefer-index=false \
@@ -436,6 +493,7 @@ main() {
     setup_github_fixture
     setup_publication_rules
     check_publication_requests
+    check_clean_pull
     check_publication_protections
     check_owner_review_rules
     check_merged_release_prs
