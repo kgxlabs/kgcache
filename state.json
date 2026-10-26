@@ -317,7 +317,7 @@
         "decision_ref": "https://github.com/kgxlabs/kgcache/pull/259"
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "image",
+      "status": "release",
       "proposal": {
         "schema_version": 1,
         "mode": "release",
@@ -461,6 +461,10 @@
         },
         "draft": {
           "id": 423882250
+        },
+        "published": {
+          "id": 423882250,
+          "verified": true
         }
       }
     }
