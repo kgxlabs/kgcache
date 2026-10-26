@@ -476,6 +476,29 @@
           "verified": true
         }
       }
+    },
+    "1b75564fb92fa562a14afcdb66dd10163108e607d363b22d270d091f1598f07b": {
+      "request_key": "1b75564fb92fa562a14afcdb66dd10163108e607d363b22d270d091f1598f07b",
+      "source_sha": "4256d1f878f92328cd55fb0dd1d87228bed0cd0a",
+      "branch": "release/0.1.0",
+      "version": "0.1.0",
+      "policy_sha": "beddff748374fa9e8539766f8c693bab629f5825",
+      "event": {
+        "schema_version": 1,
+        "repository": "kgxlabs/kgcache",
+        "kind": "release",
+        "branch": "release/0.1.0",
+        "source_sha": "4256d1f878f92328cd55fb0dd1d87228bed0cd0a",
+        "version": "0.1.0",
+        "pr_number": 266,
+        "head_sha": "2f0565c0dfbb10b4d5e2255b68f4221852c4baa3",
+        "merged_at": "2026-10-26T13:41:36Z",
+        "title": "chore(release): prepare 0.1.0",
+        "notes": "## Summary\n\nkgcache 0.1.0 is the first regular release of the standalone string-cache service.\nIt provides a tested subset of Redis RESP2 and RESP3 for local services and cache workloads.\n\n## Highlights\n\n- Binary-safe string keys and values, conditional SET, expiration, and logical databases.\n- Persistent TCP connections, ordered pipelines, and HELLO protocol switching.\n- Tested go-redis v9.22.0/v9.23.0 and node-redis 6.2.0/6.2.1, including default RESP3 and explicit RESP2/RESP3.\n- CLIENT SETINFO library labels and the documented 22-field CLIENT INFO/LIST reports.\n- Snapshots, append-only persistence, recovery checks, and clean shutdown/restart coverage.\n- A non-root Linux amd64 image, persistent storage, a built-in PING health check, and Compose examples.\n- Rewritten getting-started, application, operation, command, and contributor documentation.\n\n## Try it\n\n```sh\ndocker run --detach --rm --name kgcache --platform linux/amd64 \\\n  --publish 127.0.0.1:6379:6379 --volume kgcache-data:/data \\\n  --stop-timeout 30 kgxlabs/kgcache:0.1.0\nredis-cli SET greeting hello\nredis-cli GET greeting\n```\n\nThe replies are `OK` and `hello`. Stop the example with `docker stop kgcache`.\nThe named volume retains its data. Arm64 hosts need amd64 emulation.\n\n## Compatibility and limits\n\nkgcache remains experimental and supports string-cache workloads within its documented contract.\nAuthentication, TLS, eviction, replication, clustering, transactions, scripting, pub/sub, and client-side caching are unsupported.\nKeep the listener on a trusted network.\n\nSnapshot and AOF restart paths are tested. `everysec` is not a hard one-second loss bound.\nChild shutdown polling has a shared budget, not a deadline for all cleanup.\nDirectory fsync and the broader persistence child-safety/source-error work remain documented limits.\n\n- [Compatibility and exact tested clients](https://github.com/kgxlabs/kgcache/blob/v0.1.0/docs/reference/compatibility.md)\n- [Persistence guarantees and limits](https://github.com/kgxlabs/kgcache/blob/v0.1.0/docs/operate/persistence.md)\n- [Documentation](https://github.com/kgxlabs/kgcache/blob/v0.1.0/docs/README.md)\n\n## Release preparation and validation\n\nThis release request starts from merged main `beddff748374fa9e8539766f8c693bab629f5825`.\nThe preparation commit changes only image examples and release links from rc.2 to 0.1.0.\nApplication code, dependencies, workflow definitions, and protection settings are unchanged.\n\nZig formatting, local documentation links/anchors, and commit-message checks passed.\nRequired PR checks must pass before the release merge. The publisher then qualifies\nthe exact 0.1.0 artifact and image on native Linux amd64, verifies a fresh-runner\ntransfer and a clean registry pull, and publishes fixed references and evidence assets.",
+        "decision_ref": "https://github.com/kgxlabs/kgcache/pull/266"
+      },
+      "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
+      "status": "queued"
     }
   },
   "aliases": {}
