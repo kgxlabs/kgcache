@@ -1,108 +1,125 @@
-# Client test projects
+# Run real-client compatibility tests
 
-The go-redis v9 and node-redis v6 suites run real clients against kgcache with
-explicit RESP2 and RESP3, plus a default handshake check. They cover strings and binary values,
-database selection, client reports, SET options and expiration, ordered pipelines,
-command errors, snapshot reload, background persistence replies, pools, reconnects,
-concurrent clients, database isolation, and shutdown cleanup.
+[Contributor guide](../../../docs/contribute/testing.md) / Client suites
 
-Use Go 1.26.9 and Node 22.14.0 with its bundled npm 10.9.2. Put those tools on
-`PATH`. The launchers check installed versions and never download runtimes.
-The server build and Zig tests need only Zig 0.16.0.
+The Go and Node suites execute real library APIs against a spawned kgcache.
+Use them after changing commands, handshakes, connection lifecycle, or shared
+client fixtures. The exact required versions and API suites are documented in
+[compatibility](../../../docs/reference/compatibility.md).
 
-## Tested versions
+## Install the pinned tools
 
-The [compatibility table](../../../docs/user/compatibility.md#exact-tested-clients)
-lists exact required client versions, API suites, runtimes, and protocol cases.
-[matrix.json](matrix.json) owns profile selection and dependency paths. The
-full API cases run with explicit RESP2 and RESP3; separate handshake and
-CLIENT INFO cases also verify each library's default RESP3 mode.
+Use Zig 0.16.0, Go 1.26.9, Node 22.14.0, and Node's bundled npm 10.9.2. Put the
+runtimes on PATH. Launchers verify them and never download a runtime.
 
-## Running tests
-
-You can also unpack the official Go distribution into `.client-tools/go` and
-the official Node distribution into `.client-tools/node` at the repository root.
-Make prepends their `bin` directories to `PATH`, including Node's bundled npm.
-This ignored local setup leaves global tools and shell settings unchanged.
-Verify Go with `.client-tools/go/bin/go version` and bundled npm with
-`.client-tools/node/bin/node .client-tools/node/lib/node_modules/npm/bin/npm-cli.js --version`.
-
-Run all test groups from the repository root:
+Alternatively, unpack official runtime distributions into ignored directories
+`.client-tools/go` and `.client-tools/node` at the repository root. Make prepends
+their `bin` paths. This leaves global tools unchanged. Verify that local setup:
 
 ```sh
-make test
+.client-tools/go/bin/go version
+.client-tools/node/bin/node .client-tools/node/lib/node_modules/npm/bin/npm-cli.js --version
 ```
 
-This runs Zig unit and process tests, plus the Go and Node client test targets.
-Client targets build the server and prepare their pinned dependencies before
-execution. Every test group is attempted even if another group fails. The command
-returns a nonzero result when any test group fails.
+Dependency preparation uses committed locks and can need network access.
+[matrix.json](matrix.json) maps profiles to exact clients, runtimes, API suites,
+and dependency directories. A compatible version can share a suite, but keeps
+its own locks. No command discovers or upgrades a client version.
 
-Select one test group with `make test-zig`, `make test-go`, or `make test-node`.
+## Run a suite
 
-Run individual steps with:
+From the repository root:
 
 ```sh
-make build
-make test-unit test-integration
+make test-go
+make test-node
+```
+
+Each target builds a Debug server, prepares dependencies, and runs every required
+profile for that language. Full API cases use explicit RESP2 and RESP3.
+Separate handshake and CLIENT INFO cases require default RESP3 with identity
+reporting enabled.
+
+For Zig plus both languages, use `make test`. It attempts every group and exits
+nonzero if any group fails. `make test-zig` selects just the Zig groups.
+
+Select a profile or library:
+
+```sh
+make test-go CLIENT_PROFILE=go-redis-v9.22.0
+make deps-node CLIENT_LIBRARY=node-redis
+make test-go CLIENT_PROFILE=go-redis-v9.22.0 GO_TEST_ARGS='-run TestHandshake'
+make test-node CLIENT_PROFILE=node-redis-6.2.1 NODE_TEST_ARGS='--testPathPatterns=pipeline'
+```
+
+Use selectors on individual language targets. Aggregate targets cover both
+required language sets. Unknown profiles, conflicting selectors, and wrong-
+language selections fail. Empty or fixture-only test selections also fail
+because they execute no real client case.
+
+## Check code and dependencies
+
+```sh
 make deps-clients
 make list-clients
 make check-clients
 ```
 
-`deps-go` and `deps-node` prepare one language independently. `deps-node` also
-installs the Node root's locked quality tools. `check-go` checks gofmt and go vet;
-`check-node` runs strict TypeScript checks, local ESLint, and Prettier.
-`fmt-go` and `fmt-node` apply formatting.
-An alternate Go executable can be selected with `make GO=/path/to/go check-go`.
+`deps-go` and `deps-node` prepare one language. Node preparation also installs
+the root's locked quality tools. `check-go` runs gofmt checks and go vet.
+`check-node` runs strict TypeScript, local ESLint, and Prettier. Apply formatting
+with `make fmt-go` or `make fmt-node`. To select another Go executable, use
+`make GO=/absolute/path/to/go check-go`.
 
-`test-go` and `test-node` build the
-Debug server and prepare dependencies. [Client CI](../../../.github/workflows/client-tests.yml)
-has separate Go and Node jobs after [unit and process integration tests](../../../.github/workflows/zig-tests.yml)
-pass. Each client job runs one pinned compatibility profile and
-uploads failure evidence.
+Every profile runs in a temporary copy of its API suite and shared fixture,
+with that profile's locked dependencies. Resolved client versions are verified.
+The workspace is removed after success, failure, or cancellation, while
+artifacts remain outside it. Baseline manifests and locks stay unchanged.
 
-Select a registered profile or filter required profiles by library:
+The standard-library launchers support `list`, `validate`, `deps`, `test`, and
+`smoke`, with `--profile ID` or `--library NAME`:
+[Go launcher](go/run.go) and [Node launcher](node/run.ts).
 
-```sh
-make deps-go CLIENT_PROFILE=go-redis-v9.22.0
-make deps-node CLIENT_LIBRARY=node-redis
-make test-go CLIENT_PROFILE=go-redis-v9.22.0
-make test-go CLIENT_PROFILE=go-redis-v9.22.0 GO_TEST_ARGS='-run TestHandshake'
-make test-node CLIENT_PROFILE=node-redis-6.2.1 NODE_TEST_ARGS='--testPathPatterns=pipeline'
-```
+## Inspect failures
 
-The Node example selects its pipeline cases. Conflicting
-selectors, unknown profiles, and profiles for the wrong language fail. Default
-language commands select all required profiles. Each selected profile gets a
-temporary copy of its suite and shared fixture with its own locked dependencies.
-The launchers verify the resolved client version and remove the workspace after
-success, failure, or cancellation. Artifacts stay outside that workspace.
-Baseline manifests and locks remain unchanged. Use selectors with individual
-language commands; aggregate commands cover both required language sets.
+Set `KGCACHE_TEST_ARTIFACT_DIR=test-artifacts` to retain evidence. Make resolves
+that path and supplies an absolute `KGCACHE_BIN` before entering suite folders.
+Go retains bounded native output plus config, server logs, exits, and persistence
+files. Node retains Jest results and bounded bundles, then removes fixture data.
 
-Each native launcher accepts `list`, `validate`, `deps`, `test`, or `smoke`,
-followed by `--profile ID` or `--library NAME`. Go's launcher uses only Go's standard library,
-and Node's launcher uses only Node's standard library.
+Cases cover binary strings, SET conditions/expiration, databases, reports,
+pipelines, command errors, snapshot restart, background replies, pools,
+reconnection, concurrency, isolation, and connected-client shutdown. Use a
+focused native filter after reading the failed case and logs.
 
-The `smoke` action checks a caller-owned endpoint instead of starting a server.
-Set `KGCACHE_SMOKE_HOST` and `KGCACHE_SMOKE_PORT`, then use `make smoke-go` or
-`make smoke-node` with a registered `CLIENT_PROFILE`. See
-[container checks](../../container/README.md#compose-and-client-coverage).
+## Use the native test command
 
-The Makefile supplies an absolute `KGCACHE_BIN` for the built server. Set
-`KGCACHE_TEST_ARTIFACT_DIR=test-artifacts` to retain diagnostics;
-the Makefile resolves it before entering suite directories. Node retains Jest
-results and bounded failure bundles, then removes each fixture's temporary data.
-Fixture-only and empty selections fail because they execute no client cases.
-Direct Go tests also work from `go/go-redis/v9`:
+From `go/go-redis/v9`, after dependency setup:
 
 ```sh
-KGCACHE_BIN=/absolute/path/to/kgcache GOTOOLCHAIN=local GOWORK=off go test -mod=readonly -count=1 -timeout=5m ./...
+KGCACHE_BIN=/absolute/path/to/kgcache GOTOOLCHAIN=local GOWORK=off \
+  go test -mod=readonly -count=1 -timeout=5m ./...
 ```
 
-Go runs the shared process fixture checks before client cases. Tests use the
-committed module pins with local toolchain selection. On failure, Go retains
-bounded native output and config, log, exit, and persistence-file evidence.
-Direct `npm test` is usable from `node/node-redis/v6` with an absolute `KGCACHE_BIN`
-supplied by the caller.
+Go runs shared fixture checks before client cases and disables test caching.
+From `node/node-redis/v6`, direct `npm test` is also usable with the absolute
+`KGCACHE_BIN` supplied. Keep the pinned runtime and committed locks in both paths.
+
+## Check an existing endpoint
+
+The smoke action borrows a server owned by its caller:
+
+```sh
+export KGCACHE_SMOKE_HOST=127.0.0.1
+export KGCACHE_SMOKE_PORT=6379
+make smoke-go CLIENT_PROFILE=go-redis-v9.22.0
+make smoke-node CLIENT_PROFILE=node-redis-6.2.1
+```
+
+Programs use unique keys, bounded network deadlines, and closed clients. They
+check default, RESP2, and RESP3 setup. The [container runner](../../container/README.md)
+uses them against its prepared image. Full version-matrix execution stays in
+[client CI](../../../.github/workflows/client-tests.yml), gated by
+[Zig checks](../../../.github/workflows/zig-tests.yml). The
+[weekly workflow](../../../.github/workflows/weekly-client-compatibility.yml)
+reuses the same registry and tests with separate status names.

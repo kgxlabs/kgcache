@@ -1,121 +1,104 @@
-# Process integration tests
+# Run process integration tests
 
-Run `zig build test-integration` to build kgcache and run the Zig integration runner. `zig build test` runs the unit suite. The runner calls suite files in `tests/integration/suites/`.
+[Contributor guide](../../docs/contribute/testing.md) / Process tests
 
-The root Makefile exposes these checks as `make test-integration` and
-`make test-unit`, or together as `make test-zig`. `make test` attempts the Zig,
-Go, and Node test groups. See [Client test projects](clients/README.md) for
-dependency setup and quality checks. Both client suites are implemented and
-required in CI after the Zig checks pass. Exact supported profiles are in
-[compatibility](../../docs/user/compatibility.md#exact-tested-clients).
+The process suite starts real kgcache executables and checks TCP replies,
+files, restarts, logs, and exits. Use it after changing service behavior or a
+boundary that unit tests cannot exercise alone.
 
-The baseline suite checks PING, SET/GET/DEL, retained pipeline tails, request limits, recovery after command errors, database isolation, invalid config startup, slow readers, peer resets, idle reader and blocked writer shutdown, reconnection after restart, and two simultaneous servers. Each case checks replies or exit status from a real kgcache process.
+## Run
 
-The PING cases check PONG without a message and exact bulk string replies for
-ordinary, empty, and binary messages containing NUL, CRLF, and a non-ASCII byte.
+Use Zig 0.16.0 from the repository root:
 
-The DEL cases remove several keys in one command, mix existing and missing keys,
-and repeat keys. They check the removal count, the resulting key values, and
-that an unrelated key remains intact.
+```sh
+zig build test-integration
+```
 
-The command error cases send an invalid SET, BGSAVE, or COMMAND request, read
-the error, then send PING on the same TCP connection and require PONG. They also
-check that invalid SET requests leave the stored value intact and that binary
-option bytes do not appear in the error response.
+For retained failure evidence:
 
-The CLIENT INFO cases check RESP2 bulk and RESP3 `txt:` verbatim replies,
-the 22 fields in order, endpoint formatting, fixed indicators, empty labels,
-and identity agreement with HELLO on two connections. They pipeline invalid
-CLIENT forms with PING in both modes to check mapped errors and recovery.
-Consecutive INFO replies verify exact read and write byte deltas, including the
-previous INFO reply and PONG, without depending on socket read grouping.
-They also verify `cmd=client|info`, INFO's own dispatch, handler-error counts,
-unchanged counts for rejected bindings, and separate totals for each connection.
-HELLO, SELECT, expected errors, versionless HELLO, INFO, and PING in one pipeline
-verify the latest valid database/protocol and independent connection defaults.
-SETINFO cases pipeline both labels with INFO and PING in both modes. They check
-case handling, exact value bytes, replacement, clearing, rejected attributes
-and invalid bytes, handler-error counts, separate connection labels, and
-COMMAND's SETINFO metadata. Unit tests also cover replacement/snapshot allocation
-failures, input-buffer reuse, concurrent snapshots, partial output failure,
-worker startup failure, reaping, and shutdown cleanup.
+```sh
+KGCACHE_TEST_ARTIFACT_DIR=test-artifacts/process zig build test-integration
+```
 
-CLIENT LIST cases verify the same 22 fields in RESP2 and RESP3, caller inclusion,
-ascending IDs, independent database/protocol/labels, replacement and clearing,
-pipeline visibility, rejected filters without dispatch, disconnect exclusion,
-and new IDs after reconnect. Manager tests copy reports during concurrent label
-updates and worker registration/reaping, inject allocation failures, and keep
-owned rows after manager destruction. A real socket test leaves a 1 MiB LIST
-reply unread, verifies another client still answers PING and the collection lock
-is free, and requires shutdown to join the blocked writer within five seconds.
+The runner calls [suites](suites) against a built server. `zig build test`
+runs units separately. Make provides `make test-integration`, `make test-unit`,
+and `make test-zig`. `make test` attempts Zig and the required
+[Go/Node clients](clients/README.md). CI runs clients only after the Zig gate.
 
-The configuration cases use `databases`, `dir`, `dbfilename`, `appenddirname`,
-and `appendfilename` with a real process. They check the first and last valid
-database indices and reject the next index. Snapshot cases call `SAVE`, then
-restart and read the saved data. AOF cases use `appendfsync always`, then
-restart and read the journaled data without a snapshot. Both use relative and
-absolute persistence directories and check the expected files. The config
-file sits in another subdirectory, and the cases require no persistence files
-in the working directory or under the config file's directory.
+## Find coverage
 
-Listener precedence cases keep a control server running on an OS-selected
-loopback port and put that occupied port and `bind 0.0.0.0` in the target's
-file. CLI overrides select `127.0.0.1` and port 0. READY must report loopback
-with a different selected port, and both servers must answer PING. These
-cases cover config paths before, between, and after overrides, startup
-without a config file, and `./-cache.conf`.
+| Area | What cases check |
+| --- | --- |
+| Basic commands | PING message forms, binary SET/GET, multi-key DEL, and selected-database isolation |
+| Request framing | Split requests, complete pipeline prefixes, retained unfinished tails, growth, and limits |
+| Errors | Command errors preserve the connection and stored values; malformed frames close it |
+| Protocol setup | HELLO modes, switching, metadata, and rejected setup without state changes |
+| Client reports | Exact 22-field INFO/LIST shape, counters, library labels, visibility, and filters |
+| Startup | File/CLI precedence, database range, paths, invalid settings, and readiness failures |
+| Health | Exact PING/PONG, deadlines, malformed peers, and silent success/error result |
+| Persistence | Snapshot/AOF reload, tail recovery, shutdown saves, active children, failures, and reaping |
+| Connections | Restart on the same endpoint, two independent servers, resets, and connected-client shutdown |
+| Backpressure | Unread large replies, independent observer progress, and blocked-writer cancellation |
 
-Health command cases check file and CLI endpoint settings, repeated overrides,
-wildcard mapping, invalid endpoints, and inaccessible persistence paths.
-Healthy probes must exit 0 silently. Controlled peers verify the exact PING
-request, fragmented PONG, early EOF, malformed and other RESP values, silence,
-and a reply delivered too slowly for the shared network deadline. Each command
-has a four-second outer deadline and bounded output. Failures must exit 1 with
-one short stderr line. An inherited readiness descriptor receives no bytes,
-and a controlled test build must probe without initializing persistence controls.
+Use the [compatibility reference](../../docs/reference/compatibility.md) for
+which behavior is part of the public contract. Test results do not imply full
+Redis conformance or a throughput guarantee.
 
-Startup rejection cases cover unknown and removed file and CLI names,
-invalid overrides, missing values, duplicate paths, invalid readiness
-arguments, and bare `--`. Invalid file values must still fail when the CLI
-supplies valid replacements. Every rejection requires exit status 1, no
-READY notification, one error event carrying the expected source error,
-and a reaped child. A multiline return trace belongs to that single event.
+## Add a case
 
-See [Configuration](../../docs/user/configuration.md#redis-config-compatibility)
-for the supported config subset and the `.kgc` and port 0 differences.
+Use the [process fixture](harness/README.md). It owns child startup, readiness,
+temporary data, deadlines, output capture, stopping, and reaping. Connect to its
+reported address. Two-server cases need separate data directories and ports.
 
-The process harness in `tests/integration/harness/` owns each child from start through reaping. It enforces deadlines, captures bounded logs, and removes the fixture's temporary data. Set `KGCACHE_TEST_ARTIFACT_DIR` to keep a failed fixture's config and logs. The harness suite checks bad startup, malformed READY, timeouts, restarts, port conflicts, and two live servers.
+Assert the reply or exit that establishes the behavior. Persistence cases also
+check restored data and expected files. Config cases deliberately put the file
+in another directory to distinguish working-directory paths from config paths.
 
-The two server case requires separate ports and data directories. It confirms that data written to one server is absent from the other, then checks that the second server still responds after the first stops.
+For a rejection, require the intended source error, exit code 1, no READY line,
+and a reaped child. One error event can include a multiline return trace.
+Set `report_failures = false` when a case expects and inspects failure output.
 
-The retained-tail case uses a small connection buffer and sends a pipeline
-larger than it, with three complete commands and an unfinished fourth that also
-exceeds the initial capacity. It reads the first three replies and checks the
-unchanged value from another connection.
-It then finishes the fourth command, checks the new value, and sends another
-pipeline on the same connection after growth.
-Deterministic connection tests cover exact read splits, including binary and
-empty bodies.
+## Preserve the hard boundaries
 
-The request-limit cases send an oversized array count or declared value size
-after a successful SET/GET pipeline. They keep the socket open without sending
-the missing payload, require the earlier replies followed by the request-limit
-error and connection closure within the harness deadline, and check the earlier
-stored value from another connection.
+### Framing and command recovery
 
-The transport process cases seed a 16 MiB value through AOF replay, then request
-GET followed by DEL from a client with a small receive buffer. They read only
-the reply header and leave the body unread. Another client must still finish
-PING and DBSIZE, and the later DEL must remain pending. One case sends SIGTERM
-while the writer and observer remain open, requiring a clean exit within the
-existing five-second deadline. Another resets the slow client and an idle
-client, then checks that the observer still responds and the value remains.
-Both cases require no error-level log for expected transport termination.
-The existing harness captures failure logs and exit status, reaps the child,
-and fails if shutdown needs a forced kill.
+Retained-tail cases use a small initial buffer and a pipeline larger than that
+buffer. They require replies for its complete prefix before finishing the tail.
+They check the value through another connection before and after tail completion.
 
-Connection unit tests pause borrowed and owned replies to check command order,
-owner cleanup, and storage access while output waits. A manager test uses real
-TCP sockets with small buffers and a 1 MiB reply to check reader and writer
-wakeup within five seconds. Scripted I/O checks unexpected source logging and
-that failed partial output has no appended error reply or later command.
+Limit cases send oversized declared counts or lengths without the missing
+payload. Require the earlier valid replies, the limit error, and bounded close.
+Check earlier applied writes from another connection. Deterministic unit tests
+cover exact read splits, empty bodies, and binary bytes.
+
+### CLIENT reports
+
+INFO cases compare exact byte deltas without relying on socket read grouping.
+They check self-dispatch timing, handler errors versus rejected bindings,
+connection-local counts, protocol/database changes, and SETINFO ownership.
+LIST adds sorted IDs, caller inclusion, disconnect/reconnect visibility,
+label replacement, and rejected filters before dispatch.
+
+Unit cases inject allocation failures and concurrent snapshot changes. A real
+socket case leaves a 1 MiB LIST reply unread, checks observer PING and released
+collection locking, then requires shutdown to join the writer within five
+seconds. Keep this coverage when changing report formatting or locking.
+
+### Transport cancellation
+
+Backpressure cases seed a 16 MiB value through AOF replay. A small-buffer reader
+requests GET then DEL but leaves the GET body unread. The later DEL must remain
+pending while another client completes PING and DBSIZE.
+
+SIGTERM must wake blocked writers and idle readers and finish within the
+fixture's five-second stop deadline. Reset cases require continued observer
+progress and no internal error log for expected peer termination. Scripted I/O
+units separately check original error reporting, owner cleanup, and no appended
+error bytes or later command after partial output fails.
+
+## Diagnose a failure
+
+Read the case name, process result, stdout, stderr, and generated config before
+rerunning it. The fixture drains output while the child runs, so full pipes
+cannot hide a deadlock. Retained evidence stays outside the removed temporary
+data directory. A forced cleanup kill fails a case that expected a clean stop.
