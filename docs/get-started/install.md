@@ -8,9 +8,9 @@ from source when you want a native executable or want to change the server.
 ## Run the container image
 
 Follow the [quick start](README.md) for a runnable Docker command and the
-first SET/GET requests. The current published image is
-`kgxlabs/kgcache:0.1.0-rc.2`, a Linux amd64 release candidate.
-Its [release record](https://github.com/kgxlabs/kgcache/releases/tag/v0.1.0-rc.2)
+first SET/GET requests. The image for this release is
+`kgxlabs/kgcache:0.1.0`, for Linux amd64.
+Its [release record](https://github.com/kgxlabs/kgcache/releases/tag/v0.1.0)
 identifies the source and image digest.
 
 For local builds, persistent volumes, and custom settings, use the

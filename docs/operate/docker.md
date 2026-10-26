@@ -94,7 +94,7 @@ docker run --detach --rm --name kgcache-port --platform linux/amd64 \
   --publish 127.0.0.1:7000:7000 --volume kgcache-port-data:/data \
   --stop-timeout 30 \
   --health-cmd 'kgcache healthcheck /etc/kgcache/kgcache.conf --port 7000' \
-  kgxlabs/kgcache:0.1.0-rc.2 /etc/kgcache/kgcache.conf --port 7000
+  kgxlabs/kgcache:0.1.0 /etc/kgcache/kgcache.conf --port 7000
 redis-cli -p 7000 PING
 ```
 

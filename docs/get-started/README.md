@@ -12,10 +12,10 @@ then continue at **Write and read a value** below.
 ```sh
 docker run --detach --rm --name kgcache --platform linux/amd64 \
   --publish 127.0.0.1:6379:6379 --volume kgcache-data:/data \
-  --stop-timeout 30 kgxlabs/kgcache:0.1.0-rc.2
+  --stop-timeout 30 kgxlabs/kgcache:0.1.0
 ```
 
-This starts the Linux amd64 release candidate in the background. It exposes
+This starts the Linux amd64 release in the background. It exposes
 port 6379 on your machine's loopback address and stores data in a named volume.
 Arm64 hosts need amd64 emulation. If port 6379 is occupied, use another host
 port, such as `--publish 127.0.0.1:6380:6379`, and add `-p 6380` to the
