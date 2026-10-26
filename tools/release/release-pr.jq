@@ -47,6 +47,8 @@ def dispatch_event($repository; $source; $run):
       "RC publication requires an explicit Publish RC dispatch from main")
   | require((.inputs.source_sha | sha) and .inputs.source_sha == $source and
       (.inputs.version // "") == ""; "publication requires the exact source SHA and automatic version selection")
+  | require((.inputs.resume_run_id // "") | . == "" or
+      (type == "string" and test("\\A[1-9][0-9]*\\z")); "invalid original publication run ID")
   | require(($run | type == "string" and test("\\A[1-9][0-9]*\\z")) and
       (.sender.login | reference) and (.sender.id | type == "number" and . > 0 and floor == .);
       "publication requires a dispatch run and actor identity")

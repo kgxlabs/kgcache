@@ -143,6 +143,18 @@ def proposer_state($ledger; $line):
           policy_sha: .proposal.original_policy_sha,
           status: (if .status == "complete" then "complete" else "incomplete" end)}]};
 
+# A new manual run may resume only an existing tagged, retained candidate.
+def publication_run_matches($run; $resume):
+  if .event.trigger | IN("workflow_dispatch", "repository_dispatch") then
+    ($run | type == "string" and test("\\A[1-9][0-9]*\\z")) and
+    ((.event.run_id == $run and $resume == "") or
+     (($resume | type == "string" and test("\\A[1-9][0-9]*\\z")) and .event.run_id == $resume and
+      (.status | IN("tagged", "image", "release", "complete")) and (.tag_object_sha | sha) and
+      (.candidate_sha256 | checksum) and (.candidate.archive_sha256 | checksum) and
+      (.candidate.artifact_id | reference) and (.event.workflow_sha | sha) and
+      .candidate.run.id == .event.run_id and .candidate.run.workflow_sha == .event.workflow_sha))
+  else $resume == "" end;
+
 # Freeze each operation's intent and its read-back result separately.
 def checkpoint($key; $phase; $value):
   .requests[$key] as $request
