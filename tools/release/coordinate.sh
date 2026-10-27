@@ -349,10 +349,12 @@ main() {
         coordinate_git rev-list --reverse --first-parent "$source" > "$coordinate_workspace/ancestors"
         while IFS= read -r before; do
             [[ "$before" != "$source" ]] || break
-            earlier=$(jq -r --arg branch "$branch" --arg source "$before" \
-                '.requests[] | select(.branch == $branch and .source_sha == $source) |
+            earlier=$(jq -r -L "$RELEASE_ROOT/tools/release" --arg branch "$branch" --arg source "$before" --arg key "$request" \
+                'include "release-pr"; .requests[$key] as $current |
+                 .requests[] | select(.branch == $branch and .source_sha == $source) | . as $earlier |
                  if .status == "complete" or .status == "superseded" or
-                    (.status == "failed" and .tag_object_sha == null) then empty else .request_key end' \
+                    (.status == "failed" and .tag_object_sha == null) or
+                    ($current | release_can_follow($earlier)) then empty else .request_key end' \
                 "$coordinate_workspace/state.json")
             [[ -z "$earlier" ]] || release_fail 'an earlier source is unresolved; retry its original request'
         done < "$coordinate_workspace/ancestors"

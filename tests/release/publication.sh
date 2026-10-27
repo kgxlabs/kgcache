@@ -416,6 +416,7 @@ check_registry_and_api() {
     check_merged_release_publication
     check_merged_release_publication manual v0.4.0-rc.1 'Manual candidate notes.'
     check_merged_release_publication automatic v0.5.0-rc.1 'Initial release candidate for 0.5.0.'
+    check_merged_release_publication stable v0.6.1
 }
 
 check_publication_protections() {
@@ -503,12 +504,15 @@ main() {
     export GITHUB_FIXTURE_REAL_CURL
     setup_github_fixture
     setup_publication_rules
+    jq -en -L "$RELEASE_ROOT/tools/release" -f "$RELEASE_ROOT/tests/release/versions.jq" > /dev/null
+    printf 'Passed: stable and RC version selection, branch matching, and tagged predecessor rules\n'
     check_publication_requests
     check_clean_pull
     check_publication_protections
     check_owner_review_rules
     check_release_artifact_identity
     check_merged_release_prs
+    check_stable_release_prs
     check_initial_release manual
     check_initial_release automatic
     check_alias_precedence
@@ -516,4 +520,4 @@ main() {
     printf 'Publication contracts passed with local Git fixtures. No external writes.\n'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
