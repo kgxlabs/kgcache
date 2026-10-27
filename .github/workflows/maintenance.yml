@@ -16,10 +16,10 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Check out trusted base tooling
+      - name: Check out trusted main tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: main
           path: base
           persist-credentials: false
 
@@ -40,9 +40,10 @@ jobs:
             '.pull_request.head.repo.full_name == $repository' "$GITHUB_EVENT_PATH"
           version=$(jq -er -L base/tools/release \
             'include "release-pr"; .pull_request.base.ref | release_version' "$GITHUB_EVENT_PATH")
-          if jq -en -L base/tools/release --arg version "$version" \
-            'include "release-pr"; $version | rc_series' > /dev/null; then
-            printf 'The next RC number is reserved after merge.\n'
+          series=$(jq -rn -L base/tools/release --arg version "$version" \
+            'include "release-pr"; $version | release_series')
+          if [[ "$series" == true ]]; then
+            printf 'The next release number is reserved after merge.\n'
             exit 0
           fi
           status=$(curl --silent --show-error --max-time 45 \

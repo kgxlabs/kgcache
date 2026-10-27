@@ -17,6 +17,7 @@ on:
         options:
           - Preview
           - Publish RC
+          - Diagnose publisher access
       source_ref:
         description: 'Source branch, tag, or full commit SHA'
         required: true
@@ -50,10 +51,61 @@ concurrency:
   queue: max
 
 jobs:
+  diagnose:
+    name: Diagnose publisher Git access without writes
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'Diagnose publisher access'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the trusted main workflow
+        env:
+          WORKFLOW_REF: ${{ github.ref }}
+        run: test "$WORKFLOW_REF" = refs/heads/main
+      - id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: read
+          permission-administration: write
+          permission-actions: read
+      - name: Read app permissions and Git authentication responses
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 30 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            https://api.github.com/installation/repositories \
+            | jq --arg repo "$REPOSITORY" '{repositories: [.repositories[] |
+                select(.full_name == $repo) | {full_name, permissions}]}'
+          for auth in basic bearer; do
+            headers="$RUNNER_TEMP/$auth.headers"
+            body="$RUNNER_TEMP/$auth.body"
+            if [[ "$auth" == basic ]]; then
+              options=(--user "x-access-token:$GH_TOKEN")
+            else
+              options=(--header "Authorization: Bearer $GH_TOKEN")
+            fi
+            code=$(curl --silent --show-error --max-time 30 \
+              "${options[@]}" --dump-header "$headers" --output "$body" \
+              --write-out '%{http_code}' \
+              "https://github.com/$REPOSITORY.git/info/refs?service=git-receive-pack")
+            printf '%s Git receive-pack authentication: HTTP %s\n' "$auth" "$code"
+            sed -nE '/^([Hh][Tt][Tt][Pp]\/|[Xx]-[Gg]it[Hh]ub-[Rr]equest-[Ii][Dd]:|[Xx]-[Rr]ate[Ll]imit-|[Rr]etry-[Aa]fter:|[Xx]-[Aa]ccepted-[Gg]it[Hh]ub-[Pp]ermissions:)/p' "$headers"
+            if [[ "$code" != 200 ]]; then head -c 4096 "$body"; printf '\n'; fi
+          done
+
   route:
     name: Read publication activation from main
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.operation != 'Diagnose publisher access') ||
       github.event_name == 'repository_dispatch' ||
       (github.event_name == 'pull_request' && github.event.pull_request.merged == true &&
         github.event.pull_request.head.repo.full_name == github.repository)

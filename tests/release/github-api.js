@@ -5,6 +5,7 @@ const crypto = require('node:crypto');
 
 const root = process.argv[2];
 const statePath = `${root}/state.json`;
+const staleReleasesPath = `${root}/stale-releases.json`;
 const initial = { releases: [], assets: {}, latest: null, nextId: 1 };
 fs.writeFileSync(statePath, JSON.stringify(initial));
 
@@ -31,6 +32,11 @@ const server = http.createServer(async (req, res) => {
     const faultPath = `${root}/fault.json`;
     const fault = fs.existsSync(faultPath) ? JSON.parse(fs.readFileSync(faultPath)) : {};
     const matchesFault = fault.method === req.method && fault.path === path;
+    if (fs.existsSync(`${root}/lag-release-list`) && !fs.existsSync(staleReleasesPath) &&
+        (req.method === 'POST' && path === '/releases' ||
+         req.method === 'PATCH' && /^\/releases\/\d+$/.test(path))) {
+        fs.writeFileSync(staleReleasesPath, JSON.stringify(state.releases));
+    }
     fs.appendFileSync(`${root}/calls.jsonl`, `${JSON.stringify({ method: req.method, path: req.url })}\n`);
     const send = (code, body, binary = false) => {
         fs.writeFileSync(statePath, JSON.stringify(state));
@@ -53,9 +59,14 @@ const server = http.createServer(async (req, res) => {
         send(200, { type: 'file', encoding: 'base64', sha, content: content.toString('base64') });
     } else if (req.method === 'GET' && path === '/releases') {
         const page = Number(url.searchParams.get('page') || 1);
-        send(200, state.releases.slice((page - 1) * 100, page * 100));
+        const releases = fs.existsSync(staleReleasesPath) ?
+            JSON.parse(fs.readFileSync(staleReleasesPath)) : state.releases;
+        send(200, releases.slice((page - 1) * 100, page * 100));
     } else if (req.method === 'GET' && path === '/releases/latest') {
         const release = state.releases.find((item) => item.id === state.latest);
+        send(release ? 200 : 404, release || { message: 'Not Found' });
+    } else if (req.method === 'GET' && /^\/releases\/\d+$/.test(path)) {
+        const release = state.releases.find((item) => item.id === Number(path.split('/')[2]));
         send(release ? 200 : 404, release || { message: 'Not Found' });
     } else if (req.method === 'POST' && path === '/releases') {
         const body = JSON.parse(bytes);

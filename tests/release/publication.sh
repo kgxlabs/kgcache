@@ -280,7 +280,7 @@ seed_registry_transport() {
 }
 
 check_registry_and_api() {
-    local port attempt digest image summary asset_id host_os main_fix descendant prior_key
+    local port attempt digest image summary asset_id host_os main_fix descendant prior_key field
 
     host_os=$(uname -s)
     publication_registry_container="kgcache-registry-test-${publication_workspace##*.}"
@@ -335,6 +335,7 @@ check_registry_and_api() {
     cmp "$publication_workspace/promoted.json" "$publication_workspace/promote-retry.json"
     printf 'Passed: real local registry digest/config identity, upload retry, fixed promotion, and partial recovery\n'
 
+    touch "$publication_workspace/http/lag-release-list"
     printf '{"method":"POST","path":"/releases/1/assets","after":false}\n' > "$publication_workspace/http/fault.json"
     expect_github_failure partial-assets 'missing complete asset' publish_fixture release
     jq -e '.releases | length == 1 and .[0].draft == true' "$publication_workspace/http/state.json" > /dev/null
@@ -345,13 +346,23 @@ check_registry_and_api() {
     jq -e '.latest == null and (.releases | length == 1) and
         .releases[0].draft == false and (.releases[0].assets | length == 4)' \
         "$publication_workspace/http/state.json" > /dev/null
+    jq -e '. == []' "$publication_workspace/http/stale-releases.json" > /dev/null
+    rm "$publication_workspace/http/lag-release-list" "$publication_workspace/http/stale-releases.json"
     cp "$publication_workspace/http/state.json" "$publication_workspace/http/clean.json"
+    for field in tag_name name target_commitish body prerelease; do
+        jq --arg field "$field" '.releases[0][$field] |=
+            if type == "boolean" then not else . + "-conflict" end' \
+            "$publication_workspace/http/clean.json" > "$publication_workspace/http/state.json"
+        expect_github_failure "conflicting-release-$field" 'release conflicts with its original tag, source, or notes' \
+            publish_fixture release
+    done
+    cp "$publication_workspace/http/clean.json" "$publication_workspace/http/state.json"
     asset_id=$(jq -r '.releases[0].assets[0].id | tostring' "$publication_workspace/http/state.json")
     jq --arg id "$asset_id" '.assets[$id] = ("conflicting bytes" | @base64)' \
         "$publication_workspace/http/clean.json" > "$publication_workspace/http/state.json"
     expect_github_failure conflicting-asset 'release asset bytes conflict' publish_fixture release
     cp "$publication_workspace/http/clean.json" "$publication_workspace/http/state.json"
-    printf 'Passed: partial assets, lost publication response, asset conflicts, and exact release retry\n'
+    printf 'Passed: stale release lists, partial assets, lost publication response, metadata and asset conflicts, and exact release retry\n'
 
     printf '{"method":"PATCH","path":"/releases/1","after":false}\n' > "$publication_workspace/http/fault.json"
     expect_github_failure partial-latest 'cannot read back GitHub latest' publish_fixture aliases
@@ -405,6 +416,7 @@ check_registry_and_api() {
     check_merged_release_publication
     check_merged_release_publication manual v0.4.0-rc.1 'Manual candidate notes.'
     check_merged_release_publication automatic v0.5.0-rc.1 'Initial release candidate for 0.5.0.'
+    check_merged_release_publication stable v0.6.1
 }
 
 check_publication_protections() {
@@ -492,12 +504,16 @@ main() {
     export GITHUB_FIXTURE_REAL_CURL
     setup_github_fixture
     setup_publication_rules
+    bash "$RELEASE_ROOT/tests/release/maintenance-workflow.sh"
+    jq -en -L "$RELEASE_ROOT/tools/release" -f "$RELEASE_ROOT/tests/release/versions.jq" > /dev/null
+    printf 'Passed: stable and RC version selection, branch matching, and tagged predecessor rules\n'
     check_publication_requests
     check_clean_pull
     check_publication_protections
     check_owner_review_rules
     check_release_artifact_identity
     check_merged_release_prs
+    check_stable_release_prs
     check_initial_release manual
     check_initial_release automatic
     check_alias_precedence
@@ -505,4 +521,4 @@ main() {
     printf 'Publication contracts passed with local Git fixtures. No external writes.\n'
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
