@@ -29,6 +29,11 @@ versions, and candidate retries. Historical merge commits in a branch base are
 allowed, while a release-request commit with multiple parents is rejected.
 Missing PR/history rules, non-squash methods, or extra bypass actors fail.
 
+Run `bash tests/release/maintenance-workflow.sh` to exercise the actual
+maintenance workflow preflight with local events and a tag API stub. It checks
+stable and RC series with existing tags, exact prerelease targets, API errors,
+and fork rejection. The publication suite also runs this check.
+
 The Docker publication option needs Docker, Buildx, and Node. It uses temporary
 Git repos, a local registry with synthetic images, and a loopback GitHub API.
 It tests prerelease assets and notes while preserving stable aliases. Native

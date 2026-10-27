@@ -493,6 +493,7 @@ main() {
     export GITHUB_FIXTURE_REAL_CURL
     setup_github_fixture
     setup_publication_rules
+    bash "$RELEASE_ROOT/tests/release/maintenance-workflow.sh"
     jq -en -L "$RELEASE_ROOT/tools/release" -f "$RELEASE_ROOT/tests/release/versions.jq" > /dev/null
     printf 'Passed: stable and RC version selection, branch matching, and tagged predecessor rules\n'
     check_publication_requests
