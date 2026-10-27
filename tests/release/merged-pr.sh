@@ -181,7 +181,11 @@ check_merged_release_publication() {
           image_id:$request[0].candidate.image_id,engine_id:"synthetic-separate-engine",service_sha256:$sha}' \
         > "$result-verification/verification.json"
     publish_fixture promote --verification "$result-verification" > /dev/null
+    if [[ "$fixture_name" == versioned ]]; then
+        printf '{"method":"POST","path":"/releases","after":true}\n' > "$publication_workspace/http/fault.json"
+    fi
     publish_fixture release > "$result-published.json"
+    [[ ! -e "$publication_workspace/http/fault.json" ]] || release_fail 'lost creation response was not exercised'
     publish_fixture release > "$result-publish-retry.json"
     cmp "$result-published.json" "$result-publish-retry.json"
     publish_fixture aliases > "$result-complete.json"

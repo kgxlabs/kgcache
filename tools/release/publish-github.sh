@@ -23,6 +23,7 @@ publish_api_call() {
         --silent --show-error --max-time 60 --connect-timeout 10 --max-filesize 2097152 \
         --request "$method" --header 'Accept: application/vnd.github+json' \
         --header 'X-GitHub-Api-Version: 2022-11-28' \
+        --header 'Cache-Control: no-cache' \
         --header "Authorization: Bearer ${GH_TOKEN:-fixture}" \
         ${options[@]+"${options[@]}"} --output "$output" --write-out '%{http_code}' "$host$path"); then
         :
@@ -45,6 +46,16 @@ publish_find_release() {
     jq -s --arg tag "$tag" 'add | map(select(.tag_name == $tag)) |
         if length > 1 then error("duplicate releases for tag") else .[0] // null end' \
         "$publish_workspace/releases.jsonl" > "$publish_workspace/release.json"
+}
+
+publish_read_release() {
+    local id=$1
+
+    [[ "$id" =~ ^[1-9][0-9]*$ ]] || release_fail 'invalid release ID'
+    publish_api_call GET "/repos/$publish_repository/releases/$id" "$publish_workspace/release.json"
+    [[ "$publish_http_code" == 200 ]] || release_fail 'cannot read release by its recorded ID'
+    jq -e --argjson id "$id" '.id == $id' "$publish_workspace/release.json" > /dev/null ||
+        release_fail 'release read-back ID differs'
 }
 
 publish_assets() {
@@ -139,13 +150,27 @@ publish_release() {
     publish_assets
     publish_checkpoint github_intent "$publish_workspace/github-intent.json"
     tag=$(jq -r '.tag_name' "$publish_workspace/github-intent.json")
-    publish_find_release "$tag"
+    id=$(jq -r '.github.draft.id // empty' "$publish_workspace/request.json")
+    if [[ -n "$id" ]]; then
+        publish_read_release "$id"
+    else
+        publish_find_release "$tag"
+    fi
     if jq -e '. == null' "$publish_workspace/release.json" > /dev/null; then
         jq 'del(.assets) | . + {draft: true, make_latest: "false"}' \
             "$publish_workspace/github-intent.json" > "$publish_workspace/create.json"
         publish_api_call POST "/repos/$publish_repository/releases" "$publish_workspace/response.json" \
             "$publish_workspace/create.json"
-        publish_find_release "$tag"
+        if [[ "$publish_http_code" == 201 ]]; then
+            # The release list can lag behind a successful creation.
+            id=$(jq -er '.id' "$publish_workspace/response.json")
+            publish_read_release "$id"
+        else
+            # A lost response has no reliable ID. Reconcile by the original tag.
+            publish_find_release "$tag"
+        fi
+        jq -e '. != null' "$publish_workspace/release.json" > /dev/null ||
+            release_fail 'created release is not visible; retry the original publication'
     fi
     jq -e --slurpfile intent "$publish_workspace/github-intent.json" \
         '.id > 0 and .tag_name == $intent[0].tag_name and .name == $intent[0].name and
@@ -186,10 +211,11 @@ publish_release() {
         publish_api_call PATCH "/repos/$publish_repository/releases/$id" "$publish_workspace/response.json" \
             "$publish_workspace/publish.json"
     fi
-    publish_find_release "$tag"
+    publish_read_release "$id"
     jq -e --argjson id "$id" --slurpfile intent "$publish_workspace/github-intent.json" \
         '.id == $id and .draft == false and .prerelease == $intent[0].prerelease and
-         .tag_name == $intent[0].tag_name and .body == $intent[0].body' \
+         .tag_name == $intent[0].tag_name and .name == $intent[0].name and
+         .target_commitish == $intent[0].target_commitish and .body == $intent[0].body' \
         "$publish_workspace/release.json" > /dev/null || release_fail 'published release read-back failed'
     jq -n --argjson id "$id" '{id: $id, verified: true}' > "$publish_workspace/published.json"
     publish_checkpoint published "$publish_workspace/published.json"
