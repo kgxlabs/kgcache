@@ -669,7 +669,68 @@
         "decision_ref": "https://github.com/kgxlabs/kgcache/pull/270"
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "queued"
+      "status": "admitted",
+      "proposal": {
+        "schema_version": 1,
+        "mode": "release",
+        "repository": "kgxlabs/kgcache",
+        "publishable": false,
+        "proposal_only": true,
+        "qualification_required": true,
+        "source_sha": "aa691cd39886d1b88cf4e33607ac414c14287180",
+        "development_version": "0.0.0",
+        "policy_sha": "1094106fdfab821e29180fbac9205e4c936a01e1",
+        "original_policy_sha": "1094106fdfab821e29180fbac9205e4c936a01e1",
+        "reservation": null,
+        "line": "0.1",
+        "branch": "release/0.1.0",
+        "cut_sha": "aa691cd39886d1b88cf4e33607ac414c14287180",
+        "version": "0.1.1",
+        "intended_tag": "v0.1.1",
+        "channel": "regular",
+        "image": {
+          "version_tag": "0.1.1",
+          "source_version_key": "83745c261e13172cd3db4f5069cc96bfc59bde284b05b4eb4c8e62997592c433",
+          "source_tag": "src-83745c261e13172cd3db4f5069cc96bfc59bde284b05b4eb4c8e62997592c433"
+        },
+        "request_key": "875a03134e6443156703016709c7808e23586925c58b9dc49274ae51f1e4c32e",
+        "event": {
+          "schema_version": 1,
+          "repository": "kgxlabs/kgcache",
+          "kind": "release",
+          "branch": "release/0.1.0",
+          "source_sha": "aa691cd39886d1b88cf4e33607ac414c14287180",
+          "version": "0.1.1",
+          "pr_number": 270,
+          "head_sha": "958b8a4ca6708983d285983ee9ad70f9035b757e",
+          "merged_at": "2026-10-27T06:47:15Z",
+          "title": "fix(release): backport version progression to 0.1.0",
+          "notes": "## Summary\n\nBackport #269 to `release/0.1.0`. Each new merged PR reserves the next stable patch or RC number while retries keep their original versions. A tagged older release with a missing bundle no longer blocks a fresh candidate for the next version.\n\nWith the existing `0.1.0` reservation, merging this PR requests `0.1.1` and runs native qualification for its new source and image.\n\n(cherry picked from commit a2c3752468cc3a8f87a6fb5d77d7d7a763ee2681)\n\nThe cherry-pick applied without conflicts. The PR also updates the maintenance\nworkflow to use trusted main version rules from #269. This avoids rejecting the\nexisting `v0.1.0` tag before the next patch can be reserved. The same CI adjustment\nis proposed for main in #271.\n\n## Testing\n\n- `bash tests/release/publication.sh --docker`\n- `bash tests/release/publication.sh`\n- `bash tests/release/maintenance-workflow.sh`\n- `bash tests/release/candidates.sh`\n- `bash tests/release/github.sh`\n- `bash tests/release/proposals.sh`\n- `make check-shell`\n- `bash tools/release/check-maintenance.sh --event <pr-event.json> --repo .`\n- `git diff origin/release/0.1.0 --check`\n\nThe full Docker suite passed for the version backport. The CI-only adjustment\nalso passed its regression test, shell checks, and actionlint 1.7.12. The\npublication suite also passed with the new preflight included. Maintenance\ncompatibility now passes in GitHub.\n\nThe Docker publication suite uses a loopback registry and synthetic releases. Native application qualification runs in CI.\n\n## Compatibility\n\nExisting reservations, tags, image digests, and retry notes keep their identities. Stable branches advance patch versions. Both RC branch forms advance RC numbers. RCs keep stable aliases unchanged.\n",
+          "decision_ref": "https://github.com/kgxlabs/kgcache/pull/270"
+        },
+        "source_eligible": true,
+        "reused": false,
+        "supersedes": [],
+        "decision_ref": "https://github.com/kgxlabs/kgcache/pull/270",
+        "release_notes": {
+          "pr_number": 270,
+          "body": "## Summary\n\nBackport #269 to `release/0.1.0`. Each new merged PR reserves the next stable patch or RC number while retries keep their original versions. A tagged older release with a missing bundle no longer blocks a fresh candidate for the next version.\n\nWith the existing `0.1.0` reservation, merging this PR requests `0.1.1` and runs native qualification for its new source and image.\n\n(cherry picked from commit a2c3752468cc3a8f87a6fb5d77d7d7a763ee2681)\n\nThe cherry-pick applied without conflicts. The PR also updates the maintenance\nworkflow to use trusted main version rules from #269. This avoids rejecting the\nexisting `v0.1.0` tag before the next patch can be reserved. The same CI adjustment\nis proposed for main in #271.\n\n## Testing\n\n- `bash tests/release/publication.sh --docker`\n- `bash tests/release/publication.sh`\n- `bash tests/release/maintenance-workflow.sh`\n- `bash tests/release/candidates.sh`\n- `bash tests/release/github.sh`\n- `bash tests/release/proposals.sh`\n- `make check-shell`\n- `bash tools/release/check-maintenance.sh --event <pr-event.json> --repo .`\n- `git diff origin/release/0.1.0 --check`\n\nThe full Docker suite passed for the version backport. The CI-only adjustment\nalso passed its regression test, shell checks, and actionlint 1.7.12. The\npublication suite also passed with the new preflight included. Maintenance\ncompatibility now passes in GitHub.\n\nThe Docker publication suite uses a loopback registry and synthetic releases. Native application qualification runs in CI.\n\n## Compatibility\n\nExisting reservations, tags, image digests, and retry notes keep their identities. Stable branches advance patch versions. Both RC branch forms advance RC numbers. RCs keep stable aliases unchanged.",
+          "sha256": "81160b626dc39974f4f0b2c4e1f57f219cb2c3ef59423530c26045d28bb77d48"
+        },
+        "state_request": {
+          "mode": "release",
+          "repository": "kgxlabs/kgcache",
+          "branch": "release/0.1.0",
+          "source_sha": "aa691cd39886d1b88cf4e33607ac414c14287180",
+          "policy_sha": "1094106fdfab821e29180fbac9205e4c936a01e1",
+          "request_key": "875a03134e6443156703016709c7808e23586925c58b9dc49274ae51f1e4c32e",
+          "version": "0.1.1",
+          "status": "proposed"
+        },
+        "eligibility_limits": [
+          "Native source and image qualification must pass before publication."
+        ]
+      }
     }
   },
   "aliases": {}
