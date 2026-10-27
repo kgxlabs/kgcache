@@ -669,7 +669,7 @@
         "decision_ref": "https://github.com/kgxlabs/kgcache/pull/270"
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "release",
+      "status": "complete",
       "proposal": {
         "schema_version": 1,
         "mode": "release",
@@ -869,6 +869,9 @@
           "request_key": "875a03134e6443156703016709c7808e23586925c58b9dc49274ae51f1e4c32e",
           "repository": "docker.io/kgxlabs/kgcache",
           "release_id": 425127739
+        },
+        "complete": {
+          "verified": true
         }
       }
     }
