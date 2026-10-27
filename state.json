@@ -824,6 +824,38 @@
           "id": 425127739,
           "verified": true
         }
+      },
+      "alias": {
+        "intent": {
+          "line": {
+            "key": "line/0.1",
+            "tag": "0.1",
+            "previous": null,
+            "advance": true,
+            "target": {
+              "version": "0.1.1",
+              "digest": "sha256:22be2ad7dd6e915e8098800d032a5c246c0efab866ab5a9c3aca46b5a59e7740",
+              "request_key": "875a03134e6443156703016709c7808e23586925c58b9dc49274ae51f1e4c32e",
+              "repository": "docker.io/kgxlabs/kgcache",
+              "release_id": 425127739
+            },
+            "reason": "higher precedence"
+          },
+          "latest": {
+            "key": "latest",
+            "tag": "latest",
+            "previous": null,
+            "advance": true,
+            "target": {
+              "version": "0.1.1",
+              "digest": "sha256:22be2ad7dd6e915e8098800d032a5c246c0efab866ab5a9c3aca46b5a59e7740",
+              "request_key": "875a03134e6443156703016709c7808e23586925c58b9dc49274ae51f1e4c32e",
+              "repository": "docker.io/kgxlabs/kgcache",
+              "release_id": 425127739
+            },
+            "reason": "higher precedence"
+          }
+        }
       }
     }
   },
