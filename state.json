@@ -742,6 +742,10 @@
           "workflow_sha": "aa691cd39886d1b88cf4e33607ac414c14287180"
         },
         "artifact_id": "12715961229"
+      },
+      "tag_intent": {
+        "object_sha": "123b881b7734b6d417f89549624ba8cef881418a",
+        "epoch": "1793084555"
       }
     }
   },
