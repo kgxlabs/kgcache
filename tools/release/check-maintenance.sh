@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run trusted base-branch tooling against PR metadata and Git objects only.
+# Run trusted tooling against PR metadata and Git objects only.
 set -euo pipefail
 source "${BASH_SOURCE[0]%/*}/common.sh"
 
