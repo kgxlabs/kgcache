@@ -221,7 +221,7 @@ github_rules() {
 
 github_select_release_pr() {
     local repo=$1 event=$2 source=$3 ledger=$4 branch number policy fingerprint key revision encoded
-    local parent previous
+    local parent previous series initial_rc
     local github_review_bypass=null
 
     jq -e -L "$RELEASE_ROOT/tools/release" --arg repository "$github_repository" --arg source "$source" \
@@ -238,20 +238,23 @@ github_select_release_pr() {
     jq -e --slurpfile event "$github_output/event.json" \
         '.head.sha == $event[0].head_sha and .merged_at == $event[0].merged_at' \
         "$github_output/api/pr-$number.json" > /dev/null || release_fail 'merged release PR differs from delivery'
-    if jq -en -L "$RELEASE_ROOT/tools/release" --arg branch "$branch" \
-        'include "release-pr"; $branch | release_version | rc_series' > /dev/null; then
+    series=$(jq -rn -L "$RELEASE_ROOT/tools/release" --arg branch "$branch" \
+        'include "release-pr"; $branch | release_version | release_series')
+    initial_rc=$(jq -rn -L "$RELEASE_ROOT/tools/release" --arg branch "$branch" \
+        'include "release-pr"; $branch | release_version | rc_series')
+    if [[ "$series" == true ]]; then
         github_list "/repos/$github_repository/commits/$parent/pulls?per_page=100" \
             "$github_output/api/associated-$parent.json"
         previous=$(jq -er --arg source "$parent" --arg branch "$branch" --arg repository "$github_repository" \
             '[.[] | select(.merge_commit_sha == $source and .base.ref == $branch and
               (.base.repo.full_name | ascii_downcase) == $repository)] | unique_by(.number) |
-              if length <= 1 then .[0].number // 0 else error("ambiguous previous RC merge") end' \
+              if length <= 1 then .[0].number // 0 else error("ambiguous previous release merge") end' \
             "$github_output/api/associated-$parent.json")
         if [[ "$previous" != 0 ]]; then
             jq -e --arg source "$parent" --arg branch "$branch" --argjson number "$previous" \
                 'any(.requests[]; .source_sha == $source and .branch == $branch and .event.pr_number == $number)' \
-                "$ledger" > /dev/null || release_fail 'previous RC merge has no stored request; retry its original workflow first'
-        else
+                "$ledger" > /dev/null || release_fail 'previous release merge has no stored request; retry its original workflow first'
+        elif [[ "$initial_rc" == true ]]; then
             jq -e --arg source "$parent" --arg branch "$branch" \
                 'any(.requests[]; .source_sha == $source and .branch == $branch)' "$ledger" > /dev/null ||
                 release_fail 'initial RC request is missing; retry branch creation or recover the initial request from main'
