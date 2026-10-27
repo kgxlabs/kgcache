@@ -39,6 +39,23 @@ Keep `(cherry picked from commit ...)` in the final squash message. GitHub may
 use the PR body instead of the picked commit body, so copy that reference when
 needed. The message and PR body also provide the release notes.
 
+## Request a stable patch release
+
+A stable release branch stays open for later patches. For example, the first
+merged PR into `release/0.1.0` requests `0.1.0`. Later PR merges request `0.1.1`,
+`0.1.2`, and so on. Creating the stable branch alone does not publish a release.
+Merge each fix into main, then backport it through a PR against the same release
+branch. A new branch is not needed for every patch.
+
+The branch version is the first allowed patch in its major/minor line. The
+publisher chooses the next number after all stored regular reservations in
+that line, including queued and failed requests. It never gives an existing
+number to a different source. Retrying a request keeps its original version
+and notes.
+
+Qualification uses the tools in the selected source commit. Backport required
+release-tooling changes from main so the release branch can use them too.
+
 ## Start a release-candidate series
 
 Creating remote `release/MAJOR.MINOR.PATCH-rc` requests candidate `.1` for that
@@ -72,16 +89,21 @@ Merge a fix into main, then follow the backport procedure with
 such as `0.1.0-rc.2`. Keep that PR's body suitable for release notes.
 
 Direct pushes, opened PRs, and closed unmerged PRs do not request later
-candidates. Ordinary main PRs do not publish. An exact target such as
-`release/0.1.0` requests that exact version through a merged release PR.
+candidates. Ordinary main PRs do not publish. A numbered target such as
+`release/0.1.0-rc.1` also accepts later RCs. Its first merged PR requests at least
+`0.1.0-rc.1`; later merges advance the counter for the same target. Initial
+publication on branch creation applies to the `release/0.1.0-rc` pattern.
 
 The initial request must be stored before a later RC PR is admitted. If Actions
 processes them out of order, retry the PR workflow after the initial request
-exists. Publication waits for earlier requests on the same branch, except
-untagged qualification failures.
+exists. Earlier PR merges on the same branch must also have stored requests
+before a later merge is admitted. Publication waits for earlier untagged
+requests, except qualification failures. Once an earlier stable patch or RC is
+tagged, a new merge can qualify and publish its next version even if the earlier
+publication still needs recovery. The earlier request and tag stay unchanged.
 
-Each version belongs to one stored request. RC numbering advances past reserved
-numbers, including queued, failed, and exact-version requests. A retry retains
+Each version belongs to one stored request. Stable and RC numbering advance past
+reserved numbers, including queued and failed requests. A retry retains
 its version and notes. Another request cannot take that number. Unrelated
 existing tags stop publication. Prereleases do not move stable Docker aliases.
 

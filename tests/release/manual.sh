@@ -190,6 +190,10 @@ check_initial_release() {
         .event.workflow_sha == $workflow and .event.workflow_sha != .source_sha and
         .proposal.release_notes.body == .event.notes and (.event.notes | length > 0) and .proposal.release_notes.pr_number == null' \
         "$result-allocated.json" > /dev/null
+    coordinate_fixture enqueue --event "$publication_workspace/release-event-43.json" --event-name pull_request --source "$next_source" \
+        > "$result-backport.json"
+    second_key=$(jq -r .request_key "$result-backport.json")
+    expect_github_failure manual-before-tag-order 'earlier source is unresolved' coordinate_fixture allocate --request "$second_key"
     printf 'synthetic qualification failure\n' > "$result-failure.txt"
     coordinate_fixture fail --request "$key" --failure "$result-failure.txt" > /dev/null
     coordinate_fixture allocate --request "$key" > "$result-failed-retry.json"
@@ -242,6 +246,8 @@ check_initial_release() {
         > "$result-backport.json"
     second_key=$(jq -r .request_key "$result-backport.json")
     jq -e --arg version "$target-rc.2" '.version == $version' "$result-backport.json" > /dev/null
-    expect_github_failure manual-backport-order 'earlier source is unresolved' coordinate_fixture allocate --request "$second_key"
+    coordinate_fixture allocate --request "$second_key" > "$result-next-allocated.json"
+    jq -e --arg version "$target-rc.2" '.version == $version and .status == "admitted"' \
+        "$result-next-allocated.json" > /dev/null
     printf 'Passed: %s initial RC without source changes, authorization, frozen retry, artifact origin, and later backport\n' "$fixture_name"
 }

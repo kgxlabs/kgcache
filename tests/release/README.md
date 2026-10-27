@@ -23,7 +23,7 @@ Proposal fixtures need no compiler, Docker, credentials, or published versions.
 GitHub fixtures need no token or network connection to GitHub.
 
 The publication suite checks initial RC requests, recovery of existing branches,
-exact-version merged PRs, state creation, reviewed main cuts, branch creation,
+stable patch and numbered RC merges, state creation, reviewed main cuts, branch creation,
 actor access, main-first backports, reserved numbering, frozen notes, duplicate
 versions, and candidate retries. Historical merge commits in a branch base are
 allowed, while a release-request commit with multiple parents is rejected.
