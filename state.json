@@ -669,7 +669,7 @@
         "decision_ref": "https://github.com/kgxlabs/kgcache/pull/270"
       },
       "enforcement_sha256": "be444680c9818f884ec34b70c9674f929df07f5d61e112f52015c738fd7c6d5a",
-      "status": "qualified",
+      "status": "tagged",
       "proposal": {
         "schema_version": 1,
         "mode": "release",
@@ -746,7 +746,8 @@
       "tag_intent": {
         "object_sha": "123b881b7734b6d417f89549624ba8cef881418a",
         "epoch": "1793084555"
-      }
+      },
+      "tag_object_sha": "123b881b7734b6d417f89549624ba8cef881418a"
     }
   },
   "aliases": {}
