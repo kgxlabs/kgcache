@@ -755,6 +755,11 @@
           "engine_id": "6134b6ae-8eb1-4f62-889e-a360c80bcfbf",
           "image_id": "sha256:d7fca1c000f4e209b6a6f1d7965f7874a4a90e32e76605a218c9f3e0d08b5a44",
           "candidate_sha256": "81b4c8182f800a56de244251747b59e08d92df38d06091e68a410e5f29edd8f7"
+        },
+        "uploaded": {
+          "digest": "sha256:22be2ad7dd6e915e8098800d032a5c246c0efab866ab5a9c3aca46b5a59e7740",
+          "media_type": "application/vnd.docker.distribution.manifest.v2+json",
+          "config_digest": "sha256:d7fca1c000f4e209b6a6f1d7965f7874a4a90e32e76605a218c9f3e0d08b5a44"
         }
       }
     }
