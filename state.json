@@ -786,6 +786,37 @@
             "src-83745c261e13172cd3db4f5069cc96bfc59bde284b05b4eb4c8e62997592c433"
           ]
         }
+      },
+      "github": {
+        "intent": {
+          "tag_name": "v0.1.1",
+          "name": "v0.1.1",
+          "target_commitish": "aa691cd39886d1b88cf4e33607ac414c14287180",
+          "prerelease": false,
+          "body": "## Summary\n\nBackport #269 to `release/0.1.0`. Each new merged PR reserves the next stable patch or RC number while retries keep their original versions. A tagged older release with a missing bundle no longer blocks a fresh candidate for the next version.\n\nWith the existing `0.1.0` reservation, merging this PR requests `0.1.1` and runs native qualification for its new source and image.\n\n(cherry picked from commit a2c3752468cc3a8f87a6fb5d77d7d7a763ee2681)\n\nThe cherry-pick applied without conflicts. The PR also updates the maintenance\nworkflow to use trusted main version rules from #269. This avoids rejecting the\nexisting `v0.1.0` tag before the next patch can be reserved. The same CI adjustment\nis proposed for main in #271.\n\n## Testing\n\n- `bash tests/release/publication.sh --docker`\n- `bash tests/release/publication.sh`\n- `bash tests/release/maintenance-workflow.sh`\n- `bash tests/release/candidates.sh`\n- `bash tests/release/github.sh`\n- `bash tests/release/proposals.sh`\n- `make check-shell`\n- `bash tools/release/check-maintenance.sh --event <pr-event.json> --repo .`\n- `git diff origin/release/0.1.0 --check`\n\nThe full Docker suite passed for the version backport. The CI-only adjustment\nalso passed its regression test, shell checks, and actionlint 1.7.12. The\npublication suite also passed with the new preflight included. Maintenance\ncompatibility now passes in GitHub.\n\nThe Docker publication suite uses a loopback registry and synthetic releases. Native application qualification runs in CI.\n\n## Compatibility\n\nExisting reservations, tags, image digests, and retry notes keep their identities. Stable branches advance patch versions. Both RC branch forms advance RC numbers. RCs keep stable aliases unchanged.\n\nImage: `docker.io/kgxlabs/kgcache@sha256:22be2ad7dd6e915e8098800d032a5c246c0efab866ab5a9c3aca46b5a59e7740`\n\nPlatform: `linux/amd64`\nSource: `aa691cd39886d1b88cf4e33607ac414c14287180`\n",
+          "assets": [
+            {
+              "name": "build-info.json",
+              "sha256": "0b0ed1b566316c9adebaa5107cfa369f5420b11f6e8d233b5d9eedd5ddcf2ccd",
+              "bytes": 728
+            },
+            {
+              "name": "release-info.json",
+              "sha256": "f0cf70c833599242d3378d79e83b2eba0607232b7aa3af3fd9b041e6d3831e41",
+              "bytes": 1711
+            },
+            {
+              "name": "qualification.json",
+              "sha256": "defb211969b40ac0ce9312026bd85853da803118abf7304bc072ab6f3561f5d6",
+              "bytes": 3371
+            },
+            {
+              "name": "SHA256SUMS",
+              "sha256": "d72a130380e7398163fdee42e988ceea4fcace3823e5a5944440a51cb4e92a00",
+              "bytes": 251
+            }
+          ]
+        }
       }
     }
   },
