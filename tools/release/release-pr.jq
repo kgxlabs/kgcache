@@ -11,19 +11,53 @@ def release_version:
 def rc_series:
   semver and (semver_parts | .prerelease == ["rc"] and .metadata == null);
 
+def numbered_rc:
+  semver and (semver_parts | .metadata == null and
+    (.prerelease | type == "array" and length == 2 and .[0] == "rc" and
+      (.[1] | test("\\A[1-9][0-9]*\\z"))));
+
+def release_series:
+  rc_series or numbered_rc or (semver_parts | .prerelease == null);
+
 def release_matches($version):
   release_version as $target
   | if $target | rc_series then
       ($version | startswith($target + ".")) and
       ($version[($target | length) + 1:] | test("\\A[1-9][0-9]*\\z"))
+    elif ($target | numbered_rc) then
+      ($version | numbered_rc) and ($version | split("-")[0]) == ($target | split("-")[0]) and
+      semver_compare($version; $target) >= 0
+    elif ($target | semver_parts | .prerelease == null) then
+      ($version | semver_parts | .prerelease == null and .metadata == null) and
+      ($version | version_line) == ($target | version_line) and semver_compare($version; $target) >= 0
     else $version == $target end;
+
+def next_patch($target; $requests):
+  ($target | version_line) as $line
+  | reduce ($requests[] | select(.version != null) | .version |
+      select((semver_parts | .prerelease == null) and version_line == $line)) as $reserved
+      ($target; if semver_compare($reserved; .) >= 0 then
+        $reserved | semver_parts | .major + "." + .minor + "." + (.patch | numeric_increment)
+       else . end);
 
 def release_request_version($ledger):
   (.branch | release_version) as $target
   | if $target | rc_series then
       next_candidate($target[:-3]; "rc"; [$ledger.requests[] | select(.version != null)])
+    elif $target | numbered_rc then
+      next_candidate(($target | split("-")[0]); "rc"; [$ledger.requests[] | select(.version != null)]) as $next
+      | if semver_compare($next; $target) < 0 then $target else $next end
+    elif ($target | semver_parts | .prerelease == null) then
+      next_patch($target; [$ledger.requests[]])
     else $target end
   | . as $version | docker_tag | $version;
+
+# A later numbered release can proceed after an earlier tag was reserved.
+# The earlier request keeps its identity and can still recover its own bytes.
+def release_can_follow($earlier):
+  .event.kind == "release" and $earlier.event.kind == "release" and .branch == $earlier.branch and
+    (.branch | release_version | release_series) and
+    ($earlier.tag_object_sha | sha) and semver_compare(.version; $earlier.version) > 0;
 
 def release_event($repository; $source):
   require(.action == "closed" and .pull_request.merged == true and
