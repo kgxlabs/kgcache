@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/images/kgcache-transparent-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset=".github/images/kgcache-transparent-light.svg">
+    <img src=".github/images/kgcache-transparent-light.svg" alt="kgcache logo" width="160" height="160">
+  </picture>
+</p>
+
 # kgcache
 
 kgcache is an in-memory string cache built in Zig. It serves a tested subset
