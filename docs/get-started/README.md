@@ -10,16 +10,17 @@ then continue at **Write and read a value** below.
 ## Start a server
 
 ```sh
-docker run --detach --rm --name kgcache --platform linux/amd64 \
-  --publish 127.0.0.1:6379:6379 --volume kgcache-data:/data \
-  --stop-timeout 30 kgxlabs/kgcache
+docker run -d --name kgcache -p 127.0.0.1:6379:6379 kgxlabs/kgcache:latest
 ```
 
-This starts the Linux amd64 release in the background. It exposes
-port 6379 on your machine's loopback address and stores data in a named volume.
-Arm64 hosts need amd64 emulation. If port 6379 is occupied, use another host
-port, such as `--publish 127.0.0.1:6380:6379`, and add `-p 6380` to the
-`redis-cli` commands below.
+This starts the server in the background with its bundled config. It exposes
+port 6379 on your machine's loopback address. Keep this address because kgcache
+has no authentication. If port 6379 is occupied, use another host port, such as
+`-p 127.0.0.1:6380:6379`, and add `-p 6380` to the `redis-cli` commands below.
+
+The published image supports Linux amd64. Arm64 hosts need amd64 emulation.
+Add `--platform linux/amd64` to select that platform explicitly and avoid
+Docker's platform warning.
 
 Check that the server responds:
 
@@ -66,12 +67,17 @@ with the same launch command and data directory. The commands below apply
 to the Docker example.
 
 ```sh
-docker stop kgcache
+docker stop --timeout 30 kgcache
+docker start kgcache
 ```
 
-The command requests a clean stop and allows 30 seconds before forced
-termination. The container is removed because it used `--rm`. The data volume
-remains. Run the original Docker command again to reuse it.
+`docker stop` requests a clean stop and allows 30 seconds before forced
+termination. `docker start` reuses the stopped container and its data.
+Use it instead of running `docker run` again with the same container name.
+
+This example stores data inside the container. Removing the container also
+removes its data. To keep data when replacing a container, use the
+[named-volume example](../operate/docker.md#keep-data-when-replacing-a-container).
 
 The image uses an append-only file by default. A native source build uses
 snapshots with AOF off. Read [Persistence](../operate/persistence.md) before
