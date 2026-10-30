@@ -20,13 +20,15 @@ an existing Redis application.
 
 ## Quick start
 
-Start the Linux amd64 release with Docker:
+Start kgcache with Docker:
 
 ```sh
-docker run --detach --rm --name kgcache --platform linux/amd64 \
-  --publish 127.0.0.1:6379:6379 --volume kgcache-data:/data \
-  --stop-timeout 30 kgxlabs/kgcache
+docker run -d --name kgcache -p 127.0.0.1:6379:6379 kgxlabs/kgcache:latest
 ```
+
+The image includes a default config. The port is limited to localhost because
+kgcache has no authentication. The image supports Linux amd64. Arm64 hosts need
+amd64 emulation; add `--platform linux/amd64` to select it explicitly.
 
 Use an installed `redis-cli` to write and read a value:
 
@@ -35,10 +37,12 @@ redis-cli SET greeting hello
 redis-cli GET greeting
 ```
 
-The replies are `OK` and `hello`. Run `docker stop kgcache` to stop the server.
-The named volume keeps its data. See the [quick start](docs/get-started/README.md)
-for a walkthrough, or [installation](docs/get-started/install.md) to build
-from source. Arm64 hosts need amd64 emulation for this image.
+The replies are `OK` and `hello`. Run `docker stop --timeout 30 kgcache` to stop
+the server and `docker start kgcache` to start it again. Data stays in the
+container. To keep data when replacing the container, use a
+[named volume](docs/operate/docker.md#keep-data-when-replacing-a-container).
+See the [quick start](docs/get-started/README.md) for a walkthrough, or
+[installation](docs/get-started/install.md) to build from source.
 
 ## Documentation
 

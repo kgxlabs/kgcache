@@ -3,8 +3,34 @@
 [Docs](../README.md) / [Operate](README.md) / Docker
 
 Use the published image for a quick trial, or build the checked-out source
-with Compose. Both use a persistent data directory at `/data`.
+with Compose. Both store data at `/data`. A named volume keeps that data when
+the container is replaced.
 The [quick start](../get-started/README.md) provides the published-image command.
+
+## Keep data when replacing a container
+
+Use a named volume for data that must survive container replacement. Stop the
+quick-start container first if it is still using host port 6379. Then run:
+
+```sh
+docker run -d --name kgcache-persistent --platform linux/amd64 \
+  -p 127.0.0.1:6379:6379 -v kgcache-data:/data \
+  --stop-timeout 30 kgxlabs/kgcache:latest
+```
+
+This uses the bundled config and stores data in the `kgcache-data` volume.
+Arm64 hosts need amd64 emulation. A new volume does not copy data from an
+existing container.
+
+To replace this container while keeping its data:
+
+```sh
+docker stop kgcache-persistent
+docker rm kgcache-persistent
+```
+
+Run the same `docker run` command again to reuse the volume. Removing the
+container keeps the named volume. Do not attach it to multiple running servers.
 
 ## Build the local service
 
