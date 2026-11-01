@@ -171,7 +171,7 @@ const BlockingCommandIo = struct {
 test "create builds the full object graph and destroy leaks nothing" {
     const testing = std.testing;
 
-    const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger(), .{});
     try server.destroy(.cleanup);
 }
 
@@ -196,7 +196,7 @@ test "snapshot and AOF persistence use relative and absolute dir" {
             };
 
             {
-                const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+                const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
                 defer server.destroy(.cleanup) catch unreachable;
                 _ = try server._store.set(.{
                     .key = "persistent",
@@ -231,7 +231,7 @@ test "snapshot and AOF persistence use relative and absolute dir" {
                 try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "history", .{}));
             }
 
-            const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+            const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
             defer restarted.destroy(.cleanup) catch unreachable;
             var loaded = try restarted._store.get("persistent", 0) orelse return error.TestUnexpectedResult;
             defer loaded.deinit();
@@ -256,6 +256,7 @@ test "create rejects a missing persistence directory without creating it" {
             testing.allocator,
             .{ .dir = missing_dir, .append_only = append_only },
             logging.NoopLogger.logger(),
+            .{},
         ));
         try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "missing", .{}));
     }
@@ -278,9 +279,9 @@ test "startup requires new file access only for configured persistence writes" {
         .{ .shutdown_save = false, .save_rules = &.{.{ .seconds = 60, .changes = 1 }} },
     };
     for (configs) |config| {
-        try testing.expectError(error.AccessDenied, Server.create(io, testing.allocator, config, logging.NoopLogger.logger()));
+        try testing.expectError(error.AccessDenied, Server.create(io, testing.allocator, config, logging.NoopLogger.logger(), .{}));
     }
-    const server = try Server.create(io, testing.allocator, .{ .shutdown_save = false }, logging.NoopLogger.logger());
+    const server = try Server.create(io, testing.allocator, .{ .shutdown_save = false }, logging.NoopLogger.logger(), .{});
     try server.destroy(.cleanup);
 }
 
@@ -291,7 +292,7 @@ test "startup removes its exclusive directory probe without changing existing da
     const path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     defer testing.allocator.free(path);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "existing", .data = "preserved" });
-    const server = try Server.create(testing.io, testing.allocator, .{ .dir = path }, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, .{ .dir = path }, logging.NoopLogger.logger(), .{});
     try server.destroy(.cleanup);
     var iterator = tmp.dir.iterate();
     const entry = (try iterator.next(testing.io)).?;
@@ -310,13 +311,13 @@ test "create validates persistence names supplied directly in Config" {
         .{ .dbfilename = "dump.rdb" },
         .{ .append_dirname = "../aof" },
     }) |config| {
-        try testing.expectError(error.InvalidValue, Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger()));
+        try testing.expectError(error.InvalidValue, Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{}));
     }
 }
 
 test "server destroy keeps Store alive until a connection command finishes" {
     const testing = std.testing;
-    const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, Config.default(), logging.NoopLogger.logger(), .{});
     var server_destroyed = false;
     defer if (!server_destroyed) server.destroy(.cleanup) catch unreachable;
 
@@ -380,7 +381,7 @@ test "create with appendonly off builds no aof backend and creates no append dir
     var config = Config.default();
     config.append_dirname = dirname;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     try testing.expect(server._aof == null);
     try server.destroy(.cleanup);
 
@@ -399,7 +400,7 @@ test "create with appendonly on opens the append directory and destroy leaves no
     config.append_only = true;
     config.append_dirname = dirname;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     try testing.expect(server._aof != null);
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
@@ -420,7 +421,7 @@ test "destroy releases server state after AOF close failure" {
     config.append_only = true;
     config.append_dirname = dirname;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     const aof = &server._aof.?;
     const file = aof._file orelse return error.TestUnexpectedResult;
     file.close(testing.io);
@@ -446,7 +447,7 @@ test "create with appendonly on does not load the kgc snapshot" {
     config.append_dirname = dirname;
     config.dbfilename = snapshot_path;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer server.destroy(.cleanup) catch unreachable;
 
     const loaded = try server._store.get("foo", 0);
@@ -465,7 +466,7 @@ test "create with appendonly off still loads the kgc snapshot" {
     var config = Config.default();
     config.dbfilename = snapshot_path;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer server.destroy(.cleanup) catch unreachable;
 
     var loaded = try server._store.get("foo", 0) orelse return error.TestUnexpectedResult;
@@ -505,7 +506,7 @@ test "replay does not append to the file it is replaying" {
     config.append_only = true;
     config.append_dirname = dirname;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer server.destroy(.cleanup) catch unreachable;
 
     var dir = try cwd.openDir(testing.io, dirname, .{});
@@ -532,7 +533,7 @@ test "replay leaves the dirty count at zero" {
     config.append_only = true;
     config.append_dirname = dirname;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer server.destroy(.cleanup) catch unreachable;
 
     try testing.expectEqual(0, server._persistence_state.captureSnapshotChangeCount());
@@ -565,7 +566,7 @@ test "failed AOF replay frees loaded entries and leaves orphaned files untouched
 
     try testing.expectError(
         error.UnknownCommand,
-        Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger()),
+        Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{}),
     );
     try dir.access(testing.io, "appendonly.aof.2.base", .{});
 }
@@ -605,7 +606,7 @@ test "malformed AOF headers and terminators fail startup without tail repair" {
                 try dir.writeFile(testing.io, .{ .sub_path = "appendonly.aof.1.incr", .data = contents });
                 var logger = logging.TestLogger.init();
 
-                try testing.expectError(item.err, Server.create(testing.io, testing.allocator, config, logger.logger()));
+                try testing.expectError(item.err, Server.create(testing.io, testing.allocator, config, logger.logger(), .{}));
                 const preserved = try dir.readFileAlloc(testing.io, "appendonly.aof.1.incr", testing.allocator, .unlimited);
                 defer testing.allocator.free(preserved);
                 try testing.expectEqualStrings(contents, preserved);
@@ -642,7 +643,7 @@ test "manifest without incrementals is repaired and server remains writable" {
     config.append_dirname = dirname;
     config.append_fsync = .always;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer server.destroy(.cleanup) catch unreachable;
 
     const repaired_manifest = try Manifest.read(
@@ -685,7 +686,7 @@ test "writes survive a simulated restart" {
 
     const expires_at = time.nowMs(testing.io) + 60_000;
     {
-        const first = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        const first = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
         _ = try first._store.set(.{
             .key = "persistent",
             .value = "one",
@@ -705,7 +706,7 @@ test "writes survive a simulated restart" {
         try first.destroy(.cleanup);
     }
 
-    const second = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const second = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer second.destroy(.cleanup) catch unreachable;
 
     var persistent = try second._store.get("persistent", 0) orelse return error.TestUnexpectedResult;

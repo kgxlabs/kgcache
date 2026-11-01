@@ -6,16 +6,18 @@ const PersistenceState = @import("persistence_state.zig");
 const Manifest = @import("persistence/manifest.zig");
 const Config = @import("config.zig");
 const cron = @import("cron.zig");
-const ConnectionManager = @import("connection.zig").ConnectionManager;
+const connection = @import("connection.zig");
+const ConnectionManager = connection.ConnectionManager;
 const time = @import("time.zig");
 const logging = @import("logger.zig");
 const persistence_drain = @import("persistence/drain.zig");
+const lifecycle = @import("lifecycle.zig");
+const LifecycleHooks = lifecycle.LifecycleHooks;
 
 const Server = @This();
 
-pub const ReadyCallback = struct {
-    context: *anyopaque,
-    notify: *const fn (*anyopaque, std.Io.net.IpAddress) anyerror!void,
+pub const Options = struct {
+    lifecycle_hooks: ?LifecycleHooks = null,
 };
 
 pub const StopReason = enum {
@@ -30,6 +32,8 @@ _config: Config,
 _snapshot_path: []u8,
 // Borrowed from the caller. Server does not own or release the logger implementation.
 _logger: logging.Logger,
+// The hook value is copied. Its context remains owned by the caller.
+_lifecycle_hooks: ?LifecycleHooks,
 
 _persistence_state: PersistenceState,
 _kgc: persistence.KgcPersistence,
@@ -46,15 +50,15 @@ _listener: ?std.Io.net.Server = null,
 _cron_stop_requested: std.atomic.Value(bool) = .init(false),
 _cron_thread: ?std.Thread = null,
 
-/// Builds the whole object graph on the heap and returns a stable `*Server`.
-/// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`,
-/// `_mem_store` (via `_kgc`/`_data_storages`), and `_connection_manager`
-/// capture pointers back into `self`'s own fields. Returning `Server` by value
-/// would copy those fields to a new address while the captured pointers kept
-/// pointing at this function's now-dead stack frame, causing silent memory
-/// corruption. Heap allocation gives `self` a permanent address before any
-/// self-referential field is built.
-pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: logging.Logger) !*Server {
+// Builds the whole object graph on the heap and returns a stable `*Server`.
+// This must return `*Server`, never `Server` by value: `_kgc`, `_aof`,
+// `_mem_store` (via `_kgc`/`_data_storages`), and `_connection_manager`
+// capture pointers back into `self`'s own fields. Returning `Server` by value
+// would copy those fields to a new address while the captured pointers kept
+// pointing at this function's now-dead stack frame, causing silent memory
+// corruption. Heap allocation gives `self` a permanent address before any
+// self-referential field is built.
+pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: logging.Logger, options: Options) !*Server {
     const self = try allocator.create(Server);
     errdefer allocator.destroy(self);
 
@@ -72,6 +76,7 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
     self._config = config;
     self._snapshot_path = snapshot_path;
     self._logger = logger;
+    self._lifecycle_hooks = options.lifecycle_hooks;
     self._listener = null;
     self._cron_stop_requested = .init(false);
     self._cron_thread = null;
@@ -174,9 +179,9 @@ fn validatePersistenceDirectory(io: std.Io, config: Config) !void {
     try dir.deleteFile(io, name);
 }
 
-/// The listener is bound here rather than in `create` so `create` can be
-/// exercised in tests without touching the network.
-pub fn run(self: *Server, ready_callback: ?ReadyCallback) !void {
+// The listener is bound here rather than in `create` so `create` can be
+// exercised in tests without touching the network.
+pub fn run(self: *Server) !void {
     const address = try std.Io.net.IpAddress.parseIp4(self._config.bind_address, self._config.port);
 
     self._listener = try address.listen(self._io, .{
@@ -196,8 +201,8 @@ pub fn run(self: *Server, ready_callback: ?ReadyCallback) !void {
     ) catch unreachable;
     self._logger.info(started_message);
 
-    if (ready_callback) |callback| {
-        try callback.notify(callback.context, self._listener.?.socket.address);
+    if (self._lifecycle_hooks) |hooks| {
+        try hooks.notifyReady(self._listener.?.socket.address);
     }
 
     while (true) {
@@ -207,12 +212,14 @@ pub fn run(self: *Server, ready_callback: ?ReadyCallback) !void {
     }
 }
 
-/// Unwinds `create` in reverse. `_store.deinit()` chains through
-/// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
-/// so the storage backends must not be deinitialized separately here.
-/// Returns the first cleanup source after releasing safe resources. An
-/// unresolved child keeps persistence resources alive.
+// Unwinds `create` in reverse. `_store.deinit()` chains through
+// `MemoryStore.deinit` -> `NotifierStorage.deinit` -> `DefaultStorage.deinit`,
+// so the storage backends must not be deinitialized separately here.
+// Returns the first cleanup source after releasing safe resources. An
+// unresolved child keeps persistence resources alive.
 pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
+    // This has been called already in Server.run defer clean up and this is called again here.
+    // This is intentional and no-op. This is to make sure we dont release cron related resources without stopping cron thread.
     self.stopCron();
 
     var cleanup_error: ?anyerror = null;
@@ -224,7 +231,8 @@ pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
         .grace_ms = self._config.persistence_shutdown_grace_ms,
     });
     const journal: ?persistence.JournalPersistence = if (self._aof) |*aof| aof.journal() else null;
-    @import("persistence/test_control.zig").draining();
+    if (self._lifecycle_hooks) |hooks| hooks.notifyPersistenceDraining();
+
     var drain_result = shutdown_context.run(self._io, self._logger, &self._persistence_state, journal);
     if (cleanup_error == null) cleanup_error = drain_result.err;
 
@@ -339,7 +347,7 @@ test "server owns and joins the cron thread" {
     var config = Config.default();
     config.cron_interval_ms = 1;
 
-    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer server.destroy(.cleanup) catch unreachable;
 
     try server.startCron();
@@ -348,4 +356,51 @@ test "server owns and joins the cron thread" {
     server.stopCron();
     try testing.expect(server._cron_thread == null);
     try testing.expect(server._cron_stop_requested.load(.acquire));
+}
+
+test "ready hook failure returns the source error and stops cron before cleanup" {
+    const testing = std.testing;
+    const Observer = struct {
+        server: ?*Server = null,
+        address: ?std.Io.net.IpAddress = null,
+        cron_running: bool = false,
+        drain_count: usize = 0,
+
+        fn ready(context: *anyopaque, address: std.Io.net.IpAddress) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.address = address;
+            self.cron_running = self.server.?._cron_thread != null;
+            return error.TestReadyFailure;
+        }
+
+        fn draining(context: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.drain_count += 1;
+        }
+    };
+    var observer: Observer = .{};
+    const server = try Server.create(testing.io, testing.allocator, .{
+        .bind_address = "127.0.0.1",
+        .port = 0,
+        .cron_interval_ms = 1,
+    }, logging.NoopLogger.logger(), .{
+        .lifecycle_hooks = .{
+            .context = &observer,
+            .on_ready = Observer.ready,
+            .on_persistence_draining = Observer.draining,
+        },
+    });
+    var needs_destroy = true;
+    defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
+    observer.server = server;
+
+    try testing.expectError(error.TestReadyFailure, server.run());
+    try testing.expect(observer.cron_running);
+    try testing.expect(observer.address.?.getPort() != 0);
+    try testing.expect(server._cron_thread == null);
+    try testing.expectEqual(@as(usize, 0), observer.drain_count);
+
+    needs_destroy = false;
+    try server.destroy(.cleanup);
+    try testing.expectEqual(@as(usize, 1), observer.drain_count);
 }

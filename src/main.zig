@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const Cli = @import("cli.zig");
 const ConfigLoader = @import("config/loader.zig");
 const Server = @import("server.zig");
@@ -6,6 +7,42 @@ const ReadyPipe = @import("readiness.zig");
 const logging = @import("logger.zig");
 const test_control = @import("persistence/test_control.zig");
 const healthcheck = @import("healthcheck.zig");
+const lifecycle = @import("lifecycle.zig");
+const LifecycleHooks = lifecycle.LifecycleHooks;
+
+const LifecycleContext = struct {
+    ready_pipe: ReadyPipe,
+    caller_hooks: ?LifecycleHooks,
+
+    fn lifecycleHooks(self: *LifecycleContext) ?LifecycleHooks {
+        const has_ready = self.ready_pipe.file != null or
+            (if (self.caller_hooks) |hooks| hooks.on_ready != null else false);
+        const has_draining = if (self.caller_hooks) |hooks| hooks.on_persistence_draining != null else false;
+        if (!has_ready and !has_draining) return null;
+
+        return .{
+            .context = self,
+            .on_ready = if (has_ready) notifyReady else null,
+            .on_persistence_draining = if (has_draining) notifyPersistenceDraining else null,
+        };
+    }
+
+    fn notifyReady(context: *anyopaque, address: std.Io.net.IpAddress) anyerror!void {
+        const self: *LifecycleContext = @ptrCast(@alignCast(context));
+        if (self.caller_hooks) |hooks| try hooks.notifyReady(address);
+        try ReadyPipe.notify(&self.ready_pipe, address);
+    }
+
+    fn notifyPersistenceDraining(context: *anyopaque) void {
+        const self: *LifecycleContext = @ptrCast(@alignCast(context));
+        if (self.caller_hooks) |hooks| hooks.notifyPersistenceDraining();
+    }
+};
+
+// Forward controlled-build drain notifications from application startup.
+fn notifyTestControlDraining(_: *anyopaque) void {
+    test_control.draining();
+}
 
 var shutdown_event: std.Io.Event = .unset;
 var shutdown_signal_number: std.atomic.Value(u32) = .init(0);
@@ -62,11 +99,18 @@ pub fn main(init: std.process.Init) u8 {
 
     // Return 0 for success and 1 for failure so callers (CI or whatever) can check the result.
     // The lifecycle already logged failures, so do not let Zig report them again.
-    runApplication(init, logger) catch return 1;
+    var test_control_context: u8 = 0;
+    const lifecycle_hooks: ?LifecycleHooks = if (build_options.persistence_test_controls) .{
+        .context = &test_control_context,
+        .on_persistence_draining = notifyTestControlDraining,
+    } else null;
+
+    runApplication(init, logger, lifecycle_hooks) catch return 1;
+
     return 0;
 }
 
-fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
+fn runApplication(init: std.process.Init, logger: logging.Logger, caller_hooks: ?LifecycleHooks) !void {
     const mode = Cli.modeFromArgs(init.minimal.args);
     var cli = Cli.parse(init.arena, init.minimal.args) catch |err| {
         if (mode == .healthcheck) {
@@ -79,7 +123,7 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     defer cli.deinit();
 
     if (cli.mode == .version) {
-        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), init.io, "kgcache " ++ @import("build_options").version ++ "\n");
+        try std.Io.File.writeStreamingAll(std.Io.File.stdout(), init.io, "kgcache " ++ build_options.version ++ "\n");
         return;
     }
 
@@ -109,8 +153,12 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
 
     try test_control.init(init.minimal.environ);
     defer test_control.deinit();
-    var ready_pipe = ReadyPipe.init(init.io, cli.ready_fd);
-    defer ready_pipe.close();
+
+    var lifecycle_context: LifecycleContext = .{
+        .ready_pipe = ReadyPipe.init(init.io, cli.ready_fd),
+        .caller_hooks = caller_hooks,
+    };
+    defer lifecycle_context.ready_pipe.close();
 
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
@@ -118,7 +166,9 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     const shutdown_handlers = ShutdownHandlers.install(init.io);
     defer shutdown_handlers.restore();
 
-    const server = Server.create(init.io, gpa.allocator(), config, logger) catch |err| {
+    const server = Server.create(init.io, gpa.allocator(), config, logger, .{
+        .lifecycle_hooks = lifecycle_context.lifecycleHooks(),
+    }) catch |err| {
         logger.err("app: failed to create server", err, @errorReturnTrace());
         return err;
     };
@@ -126,11 +176,8 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
     var runtime_error: ?anyerror = null;
     logger.info("app: starting server");
 
-    const ready_callback: ?Server.ReadyCallback = if (cli.ready_fd != null) .{
-        .context = &ready_pipe,
-        .notify = ReadyPipe.notify,
-    } else null;
-    const received_signal = superviseServer(init.io, server, logger, ready_callback) catch |err| blk: {
+    // this is blocking and will only return either 1. Server run return / crash , 2. receives SIGINT/SIGTERM
+    const received_signal = superviseServer(init.io, server, logger) catch |err| blk: {
         logger.err("app: server runtime failed", err, @errorReturnTrace());
         runtime_error = err;
         break :blk null;
@@ -154,11 +201,11 @@ fn runApplication(init: std.process.Init, logger: logging.Logger) !void {
 }
 
 // create tasks and listen on their cancellation
-fn superviseServer(io: std.Io, server: *Server, logger: logging.Logger, ready_callback: ?Server.ReadyCallback) !?std.posix.SIG {
+fn superviseServer(io: std.Io, server: *Server, logger: logging.Logger) !?std.posix.SIG {
     var result_buffer: [2]RunOutcome = undefined;
     var select = std.Io.Select(RunOutcome).init(io, &result_buffer);
 
-    try select.concurrent(.server, Server.run, .{ server, ready_callback });
+    try select.concurrent(.server, Server.run, .{server});
     defer select.cancelDiscard();
 
     try select.concurrent(.shutdown_signal, waitForShutdownSignal, .{io});
@@ -226,7 +273,7 @@ test "application reports loader failures once with the source error" {
             .preopens = undefined,
         };
         var test_logger = logging.TestLogger.init();
-        try testing.expectError(case.err, runApplication(init, test_logger.logger()));
+        try testing.expectError(case.err, runApplication(init, test_logger.logger(), null));
         const events = test_logger.recordedEvents();
         try testing.expectEqual(1, events.len);
         try testing.expectEqual(logging.TestLogger.Event.Kind.err, events[0].kind);
@@ -256,7 +303,7 @@ test "application reports CLI errors once" {
             .preopens = undefined,
         };
         var test_logger = logging.TestLogger.init();
-        try testing.expectError(case.err, runApplication(init, test_logger.logger()));
+        try testing.expectError(case.err, runApplication(init, test_logger.logger(), null));
 
         const events = test_logger.recordedEvents();
         try testing.expectEqual(1, events.len);
@@ -291,7 +338,7 @@ test "application reports override errors before reading the config file" {
             .preopens = undefined,
         };
         var test_logger = logging.TestLogger.init();
-        try testing.expectError(case.err, runApplication(init, test_logger.logger()));
+        try testing.expectError(case.err, runApplication(init, test_logger.logger(), null));
         const events = test_logger.recordedEvents();
         try testing.expectEqual(1, events.len);
         try testing.expectEqualStrings("app: invalid command line", events[0].message());
@@ -308,4 +355,39 @@ test "shutdown handler wakes the signal waiter with the received signal" {
     shutdownHandler(.TERM);
 
     try std.testing.expectEqual(std.posix.SIG.TERM, try waitForShutdownSignal(std.testing.io));
+}
+
+test "caller readiness failure prevents READY output" {
+    const testing = std.testing;
+    const Caller = struct {
+        called: bool = false,
+
+        fn ready(context: *anyopaque, _: std.Io.net.IpAddress) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.called = true;
+            return error.TestReadyFailure;
+        }
+    };
+    var fds: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.PipeFailed;
+    defer _ = std.c.close(fds[0]);
+
+    var caller: Caller = .{};
+    var context: LifecycleContext = .{
+        .ready_pipe = ReadyPipe.init(testing.io, fds[1]),
+        .caller_hooks = .{
+            .context = &caller,
+            .on_ready = Caller.ready,
+        },
+    };
+    defer context.ready_pipe.close();
+    const hooks = context.lifecycleHooks().?;
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(4321) };
+    try testing.expectError(error.TestReadyFailure, hooks.notifyReady(address));
+    try testing.expect(caller.called);
+    try testing.expect(context.ready_pipe.file != null);
+
+    context.ready_pipe.close();
+    var buffer: [64]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), std.c.read(fds[0], &buffer, buffer.len));
 }
