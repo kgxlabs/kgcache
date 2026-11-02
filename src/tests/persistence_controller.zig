@@ -208,3 +208,184 @@ fn emit(self: *PersistenceController, stage: protocol.Stage, pid: std.posix.pid_
         return n == @sizeOf(protocol.Event);
     }
 }
+
+const AdapterFixture = struct {
+    var inherited_release_writer: std.posix.fd_t = -1;
+
+    controller: PersistenceController,
+    events: [2]std.posix.fd_t,
+    release_pipe: [2]std.posix.fd_t,
+    child: ?std.posix.pid_t = null,
+    reaped: bool = false,
+
+    fn init(backend: protocol.Backend, stage: protocol.Stage) !AdapterFixture {
+        var events: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&events) != 0) return error.PipeFailed;
+        errdefer for (events) |fd| {
+            _ = std.c.close(fd);
+        };
+        var release_pipe: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&release_pipe) != 0) return error.PipeFailed;
+        inherited_release_writer = release_pipe[1];
+        return .{
+            .controller = .{
+                .environ = std.process.Environ.empty,
+                .event_fd = events[1],
+                .release_fd = release_pipe[0],
+                .server_pid = std.c.getpid(),
+                .backend = backend,
+                .gate_stage = stage,
+                .original_wait_pid = wait,
+            },
+            .events = events,
+            .release_pipe = release_pipe,
+        };
+    }
+
+    fn fork() anyerror!std.posix.pid_t {
+        const pid = std.posix.system.fork();
+        if (pid < 0) return error.TestForkFailed;
+        if (pid == 0) _ = std.c.close(inherited_release_writer);
+        return pid;
+    }
+
+    fn wait(pid: std.posix.pid_t) anyerror!?u32 {
+        var fds: [0]std.posix.pollfd = .{};
+        const io = std.testing.io;
+        const deadline = std.Io.Clock.awake.now(io).toMilliseconds() + 3000;
+        while (true) {
+            var status: c_int = undefined;
+            const result = std.c.waitpid(pid, &status, std.c.W.NOHANG);
+            if (result == pid) return @bitCast(status);
+            if (result < 0 and std.posix.errno(result) != .INTR) return error.TestWaitFailed;
+            if (std.Io.Clock.awake.now(io).toMilliseconds() >= deadline) return error.TestChildTimedOut;
+            _ = std.c.poll(&fds, 0, 1);
+        }
+    }
+
+    fn event(self: *AdapterFixture, stage: protocol.Stage) !protocol.Event {
+        var fds = [_]std.posix.pollfd{.{ .fd = self.events[0], .events = std.posix.POLL.IN, .revents = 0 }};
+        if (std.c.poll(&fds, 1, 3000) != 1) return error.TestEventTimedOut;
+        var result: protocol.Event = undefined;
+        if (std.c.read(self.events[0], std.mem.asBytes(&result).ptr, @sizeOf(protocol.Event)) != @sizeOf(protocol.Event)) return error.TestEventReadFailed;
+        try std.testing.expectEqual(stage, result.stage);
+        try std.testing.expectEqual(self.child.?, result.child_pid);
+        return result;
+    }
+
+    fn release(self: *AdapterFixture) !void {
+        if (std.c.write(self.release_pipe[1], "r", 1) != 1) return error.TestReleaseFailed;
+    }
+
+    fn deinit(self: *AdapterFixture) void {
+        if (self.child) |pid| {
+            if (!self.reaped) {
+                std.posix.kill(pid, .KILL) catch {};
+                _ = wait(pid) catch null;
+            }
+        }
+        self.controller.deinit();
+        _ = std.c.close(self.events[0]);
+        if (self.release_pipe[1] >= 0) _ = std.c.close(self.release_pipe[1]);
+    }
+};
+
+test "sync adapters gate only after output sync succeeds and preserve child failure status" {
+    const testing = std.testing;
+    const Sync = struct {
+        fail: bool,
+        signal_fd: std.posix.fd_t,
+        calls: usize = 0,
+
+        fn run(ptr: ?*anyopaque, file: std.Io.File) std.Io.File.SyncError!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.calls += 1;
+            if (self.fail) return error.InputOutput;
+            if (std.c.fsync(file.handle) != 0) return error.InputOutput;
+            if (std.c.write(self.signal_fd, "s", 1) != 1) return error.InputOutput;
+        }
+    };
+    for ([_]protocol.Backend{ .kgc, .aof }) |backend| {
+        for ([_]bool{ false, true }) |fail| {
+            var fixture = try AdapterFixture.init(backend, .synced);
+            defer fixture.deinit();
+            var tmp = testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const file = try tmp.dir.createFile(testing.io, "output", .{});
+            defer file.close(testing.io);
+            var synced: [2]std.posix.fd_t = undefined;
+            if (std.c.pipe(&synced) != 0) return error.PipeFailed;
+            defer for (synced) |fd| {
+                _ = std.c.close(fd);
+            };
+            var sync: Sync = .{ .fail = fail, .signal_fd = synced[1] };
+            var vtable = testing.io.vtable.*;
+            vtable.fileSync = Sync.run;
+            const original_io: std.Io = .{ .userdata = &sync, .vtable = &vtable };
+            const controller = &fixture.controller;
+            controller.kgc = BackendAdapter.init(AdapterFixture.fork, original_io, syncKgc);
+            controller.aof = BackendAdapter.init(AdapterFixture.fork, original_io, syncAof);
+            active_controller = controller;
+            const io = if (backend == .kgc) controller.kgc.?.adaptedIo() else controller.aof.?.adaptedIo();
+            if (fail) {
+                try testing.expectError(error.InputOutput, file.sync(io));
+            } else {
+                try file.sync(io);
+            }
+            try testing.expectEqual(@as(usize, 1), sync.calls);
+            var marker: [1]u8 = undefined;
+            if (!fail) try testing.expectEqual(@as(isize, 1), std.c.read(synced[0], &marker, 1));
+            const pid = try controller.forkBackend(backend, AdapterFixture.fork);
+            if (pid == 0) {
+                file.sync(io) catch std.c._exit(1);
+                std.c._exit(if (sync.calls == 2) 0 else 98);
+            }
+            fixture.child = pid;
+            if (!fail) {
+                _ = try fixture.event(.synced);
+                var sync_poll = [_]std.posix.pollfd{.{ .fd = synced[0], .events = std.posix.POLL.IN, .revents = 0 }};
+                try testing.expectEqual(@as(c_int, 1), std.c.poll(&sync_poll, 1, 0));
+                try testing.expectEqual(@as(isize, 1), std.c.read(synced[0], &marker, 1));
+                try fixture.release();
+            }
+            const status = (try waitPid(pid)).?;
+            fixture.reaped = true;
+            try testing.expect(std.c.W.IFEXITED(status));
+            try testing.expectEqual(@as(u8, if (fail) 1 else 0), std.c.W.EXITSTATUS(status));
+            // Failure must report reaped directly, without a preceding synced record.
+            const reaped = try fixture.event(.reaped);
+            try testing.expectEqual(status, reaped.status);
+        }
+    }
+}
+
+test "before-write gates close standard descriptors and terminate when the harness disappears" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |lost_harness| {
+        var fixture = try AdapterFixture.init(.kgc, .before_write);
+        defer fixture.deinit();
+        active_controller = &fixture.controller;
+        const pid = try fixture.controller.forkBackend(.kgc, AdapterFixture.fork);
+        if (pid == 0) {
+            if (std.c.fcntl(0, std.posix.F.GETFD) != -1 or std.c.fcntl(1, std.posix.F.GETFD) != -1) std.c._exit(98);
+            std.c._exit(0);
+        }
+        fixture.child = pid;
+        _ = try fixture.event(.before_write);
+        if (lost_harness) {
+            _ = std.c.close(fixture.release_pipe[1]);
+            fixture.release_pipe[1] = -1;
+        } else {
+            try fixture.release();
+        }
+        const status = (try waitPid(pid)).?;
+        fixture.reaped = true;
+        try testing.expect(std.c.W.IFEXITED(status));
+        try testing.expectEqual(@as(u8, if (lost_harness) 92 else 0), std.c.W.EXITSTATUS(status));
+        const reaped = try fixture.event(.reaped);
+        try testing.expectEqual(status, reaped.status);
+        fixture.controller.deinit();
+        try testing.expectEqual(@as(c_int, -1), std.c.fcntl(fixture.events[1], std.posix.F.GETFD));
+        try testing.expectEqual(@as(c_int, -1), std.c.fcntl(fixture.release_pipe[0], std.posix.F.GETFD));
+    }
+}

@@ -419,7 +419,12 @@ test "application setup failure skips readiness and cleans up with the caller co
     defer testing.allocator.free(dir);
     const dir_arg = try testing.allocator.dupeZ(u8, dir);
     defer testing.allocator.free(dir_arg);
-    const args = [_][*:0]const u8{ "kgcache", "--dir", dir_arg.ptr };
+    var fds: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&fds) != 0) return error.PipeFailed;
+    defer _ = std.c.close(fds[0]);
+    var fd_buffer: [16]u8 = undefined;
+    const fd_arg = try std.fmt.bufPrintZ(&fd_buffer, "{d}", .{fds[1]});
+    const args = [_][*:0]const u8{ "kgcache", "--dir", dir_arg.ptr, "--ready-fd", fd_arg.ptr };
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const init: std.process.Init = .{
@@ -448,6 +453,9 @@ test "application setup failure skips readiness and cleans up with the caller co
     try testing.expectEqual(@as(usize, 1), context.drain_count);
     try testing.expect(context.server_graph_ready);
     try testing.expect(context.cleanup_saw_setup);
+    try testing.expectEqual(@as(c_int, -1), std.c.fcntl(fds[1], std.posix.F.GETFD));
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), std.c.read(fds[0], &byte, 1));
 
     var errors: usize = 0;
     for (test_logger.recordedEvents()) |event| {
@@ -457,4 +465,106 @@ test "application setup failure skips readiness and cleans up with the caller co
         try testing.expectEqual(error.TestSetupFailure, event.source.?);
     }
     try testing.expectEqual(@as(usize, 1), errors);
+}
+
+test "readiness failures return their source after stopping cron and cleaning up" {
+    const testing = std.testing;
+    const Context = struct {
+        server: ?*Server = null,
+        fail_ready: bool,
+        ready_count: usize = 0,
+        drain_count: usize = 0,
+        selected_port: u16 = 0,
+        listener_fd: ?std.posix.fd_t = null,
+        cron_was_running: bool = false,
+        cleanup_was_safe: bool = false,
+
+        fn configure(ptr: *anyopaque, server: *Server) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.server = server;
+        }
+
+        fn ready(ptr: *anyopaque, address: std.Io.net.IpAddress) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const server = self.server.?;
+            self.ready_count += 1;
+            self.selected_port = address.getPort();
+            self.listener_fd = server._listener.?.socket.handle;
+            self.cron_was_running = server._cron_thread != null;
+            try testing.expectEqual(server._listener.?.socket.address, address);
+            try testing.expectEqual([4]u8{ 127, 0, 0, 1 }, address.ip4.bytes);
+            if (self.fail_ready) return error.TestReadyFailure;
+        }
+
+        fn draining(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.drain_count += 1;
+            const server = self.server.?;
+            self.cleanup_was_safe = server._cron_thread == null and server._data_storages.len == 1;
+        }
+    };
+    for ([_]enum { caller, pipe, bind_address }{ .caller, .pipe, .bind_address }) |failure| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const dir_arg = try std.fmt.allocPrintSentinel(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+        defer testing.allocator.free(dir_arg);
+        var fds: [2]std.posix.fd_t = undefined;
+        if (std.c.pipe(&fds) != 0) return error.PipeFailed;
+        // Passing the read end makes the actual readiness write fail.
+        const ready_fd = if (failure == .pipe) fds[0] else fds[1];
+        const retained_fd = if (failure == .pipe) fds[1] else fds[0];
+        defer _ = std.c.close(retained_fd);
+        var fd_buffer: [16]u8 = undefined;
+        const fd_arg = try std.fmt.bufPrintZ(&fd_buffer, "{d}", .{ready_fd});
+        const occupied_address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+        var occupied = try occupied_address.listen(testing.io, .{});
+        defer occupied.deinit(testing.io);
+        var port_buffer: [8]u8 = undefined;
+        const port_arg = try std.fmt.bufPrintZ(&port_buffer, "{d}", .{if (failure == .bind_address) occupied.socket.address.getPort() else @as(u16, 0)});
+        const args = [_][*:0]const u8{
+            "kgcache", "--dir", dir_arg.ptr, "--port", port_arg.ptr, "--reuse-address", "no", "--databases", "1", "--ready-fd", fd_arg.ptr,
+        };
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const init: std.process.Init = .{
+            .minimal = .{ .args = .{ .vector = &args }, .environ = std.process.Environ.empty },
+            .arena = &arena,
+            .gpa = testing.allocator,
+            .io = testing.io,
+            .environ_map = undefined,
+            .preopens = undefined,
+        };
+        var context: Context = .{ .fail_ready = failure == .caller };
+        var logger = logging.TestLogger.init();
+        const expected: anyerror = switch (failure) {
+            .caller => error.TestReadyFailure,
+            .pipe => error.NotOpenForWriting,
+            .bind_address => error.AddressInUse,
+        };
+        try testing.expectError(expected, run(init, logger.logger(), .{
+            .configure_server = .{ .context = &context, .configure = Context.configure },
+            .lifecycle_hooks = .{ .context = &context, .on_ready = Context.ready, .on_persistence_draining = Context.draining },
+        }));
+        try testing.expectEqual(@as(usize, if (failure == .bind_address) 0 else 1), context.ready_count);
+        try testing.expectEqual(@as(usize, 1), context.drain_count);
+        try testing.expect(context.cleanup_was_safe);
+        if (failure != .bind_address) {
+            try testing.expect(context.selected_port != 0);
+            try testing.expect(context.cron_was_running);
+            try testing.expectEqual(@as(c_int, -1), std.c.fcntl(context.listener_fd.?, std.posix.F.GETFD));
+        }
+        try testing.expectEqual(@as(c_int, -1), std.c.fcntl(ready_fd, std.posix.F.GETFD));
+        if (failure != .pipe) {
+            var byte: [1]u8 = undefined;
+            try testing.expectEqual(@as(isize, 0), std.c.read(retained_fd, &byte, 1));
+        }
+        var reports: usize = 0;
+        for (logger.recordedEvents()) |event| {
+            if (event.kind != .err) continue;
+            reports += 1;
+            try testing.expectEqual(expected, event.source.?);
+            try testing.expectEqualStrings("app: server runtime failed", event.message());
+        }
+        try testing.expectEqual(@as(usize, 1), reports);
+    }
 }

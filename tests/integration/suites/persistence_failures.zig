@@ -2,13 +2,14 @@ const std = @import("std");
 const support = @import("server_process");
 const resp_client = @import("../harness/resp_client.zig");
 
-const Failure = enum { snapshot_write, rewrite_write, publication, timeout };
+const Failure = enum { snapshot_write, rewrite_write, publication, timeout, lost_harness, invalid_command };
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, controlled_path: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: failed persistence process stops started", .{});
-    for ([_]Failure{ .snapshot_write, .rewrite_write, .publication, .timeout }) |failure| {
+    for ([_]Failure{ .snapshot_write, .rewrite_write, .publication, .timeout, .lost_harness, .invalid_command }) |failure| {
         const rewrite = failure == .rewrite_write;
         const write_failure = failure == .snapshot_write or rewrite;
+        const gate_failure = failure == .lost_harness or failure == .invalid_command;
         const server = try support.ServerProcess.createStopped(io, allocator, controlled_path, .{
             .case_name = @tagName(failure),
             .extra_config = if (rewrite)
@@ -16,7 +17,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             else
                 "dir data\nappendonly no\nsave \"\"\ndbfilename state.kgc\npersistence-shutdown-grace-ms 1000\n",
             .control_child = if (rewrite) .aof else .kgc,
-            .control_stage = if (write_failure) .before_write else .synced,
+            .control_stage = if (write_failure or gate_failure) .before_write else .synced,
             .stop_timeout_ms = 3_500,
             .read_timeout_ms = 3_500,
             .artifact_dir = artifact_dir,
@@ -62,7 +63,12 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
             try root.rename("data", root, "saved-data", io);
             directory_moved = true;
         }
-        if (write_failure) {
+        if (failure == .lost_harness) {
+            _ = std.c.close(server.control_release.?);
+            server.control_release = null;
+        } else if (failure == .invalid_command) {
+            if (std.c.write(server.control_release.?, "x", 1) != 1) return error.ChildReleaseFailed;
+        } else if (write_failure) {
             try server.failChildWrite();
         } else if (failure != .timeout) {
             try server.releaseChild();
@@ -71,7 +77,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         if (failure == .timeout) {
             if (!std.c.W.IFSIGNALED(reaped.status) or std.c.W.TERMSIG(reaped.status) != .KILL) return error.ChildNotKilled;
         } else {
-            const expected: u8 = if (write_failure) 1 else 0;
+            const expected: u8 = if (gate_failure) 92 else if (write_failure) 1 else 0;
             if (!std.c.W.IFEXITED(reaped.status) or std.c.W.EXITSTATUS(reaped.status) != expected) return error.WrongChildExit;
         }
         try server.waitForExit(1);
@@ -81,6 +87,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
         }
         const source = switch (failure) {
             .snapshot_write => "BackgroundSaveFailed",
+            .lost_harness, .invalid_command => "ChildExitedAbnormally",
             .rewrite_write => "AofRewriteFailed",
             .publication => "FileNotFound",
             .timeout => "PersistenceShutdownTimeout",

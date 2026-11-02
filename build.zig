@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     unit_tests.root_module.addOptions("build_options", build_options);
+    unit_tests.root_module.addImport("application", unit_tests.root_module);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
@@ -83,6 +84,7 @@ pub fn build(b: *std.Build) void {
     const control_protocol = b.createModule(.{
         .root_source_file = b.path("src/tests/test_control_protocol.zig"),
     });
+    unit_tests.root_module.addImport("persistence_test_protocol", control_protocol);
     const server_process = b.createModule(.{
         .root_source_file = b.path("tests/integration/harness/server_process.zig"),
         .target = target,

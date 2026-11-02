@@ -63,5 +63,5 @@ pub fn main(init: std.process.Init) !void {
     try transport_shutdown.run(init.io, init.gpa, executable_path, artifact_dir);
     try restart_same_port.run(init.io, init.gpa, executable_path, artifact_dir);
     try two_servers.run(init.io, init.gpa, executable_path, artifact_dir);
-    try process_harness.run(init.io, init.gpa, executable_path, fake_absolute_path, artifact_dir);
+    try process_harness.run(init.io, init.gpa, executable_path, fake_absolute_path, controlled_absolute_path, artifact_dir);
 }

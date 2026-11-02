@@ -721,3 +721,68 @@ test "writes survive a simulated restart" {
     const expiration = try second._data_storages[1].getExp("expiring") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(expires_at, expiration.expires_at);
 }
+
+test "servers keep separate hook contexts through run failure and destroy" {
+    const testing = std.testing;
+    const Context = struct {
+        ready_count: usize = 0,
+        drain_count: usize = 0,
+
+        fn ready(ptr: *anyopaque, address: std.Io.net.IpAddress) anyerror!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.ready_count += 1;
+            try testing.expect(address.getPort() != 0);
+            return error.TestReadyFailure;
+        }
+
+        fn draining(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.drain_count += 1;
+        }
+    };
+    var first: Context = .{};
+    var second: Context = .{};
+    const config: Config = .{ .port = 0 };
+    const a = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{
+        .lifecycle_hooks = .{ .context = &first, .on_ready = Context.ready, .on_persistence_draining = Context.draining },
+    });
+    var a_live = true;
+    defer if (a_live) a.destroy(.cleanup) catch unreachable;
+    const b = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{
+        .lifecycle_hooks = .{ .context = &second, .on_ready = Context.ready, .on_persistence_draining = Context.draining },
+    });
+    var b_live = true;
+    defer if (b_live) b.destroy(.cleanup) catch unreachable;
+    try testing.expectError(error.TestReadyFailure, a.run());
+    try testing.expectEqual(@as(usize, 1), first.ready_count);
+    try testing.expectEqual(@as(usize, 0), second.ready_count);
+    a_live = false;
+    try a.destroy(.cleanup);
+    try testing.expectEqual(@as(usize, 1), first.drain_count);
+    try testing.expectEqual(@as(usize, 0), second.drain_count);
+    try testing.expectError(error.TestReadyFailure, b.run());
+    b_live = false;
+    try b.destroy(.cleanup);
+    try testing.expectEqual(@as(usize, 1), second.ready_count);
+    try testing.expectEqual(@as(usize, 1), second.drain_count);
+    try testing.expectEqual(@as(usize, 1), first.ready_count);
+    try testing.expectEqual(@as(usize, 1), first.drain_count);
+}
+
+test "server without hooks binds, starts cron, and cleans up after accept failure" {
+    const testing = std.testing;
+    const Accept = struct {
+        fn fail(_: ?*anyopaque, _: std.Io.net.Socket.Handle, _: std.Io.net.Server.AcceptOptions) std.Io.net.Server.AcceptError!std.Io.net.Socket {
+            return error.ConnectionAborted;
+        }
+    };
+    const server = try Server.create(testing.io, testing.allocator, .{ .port = 0 }, logging.NoopLogger.logger(), .{});
+    defer server.destroy(.cleanup) catch unreachable;
+    var vtable = testing.io.vtable.*;
+    vtable.netAccept = Accept.fail;
+    server._io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    try testing.expectError(error.ConnectionAborted, server.run());
+    try testing.expect(server._listener.?.socket.address.getPort() != 0);
+    try testing.expect(server._cron_thread == null);
+    try testing.expectEqual(@as(c_int, -1), std.c.fcntl(server._listener.?.socket.handle, std.posix.F.GETFD));
+}
