@@ -772,17 +772,29 @@ test "servers keep separate hook contexts through run failure and destroy" {
 test "server without hooks binds, starts cron, and cleans up after accept failure" {
     const testing = std.testing;
     const Accept = struct {
+        var active: *@This() = undefined;
+
+        server: *Server,
+        listener: ?std.Io.net.Socket = null,
+        cron_started: bool = false,
+
         fn fail(_: ?*anyopaque, _: std.Io.net.Socket.Handle, _: std.Io.net.Server.AcceptOptions) std.Io.net.Server.AcceptError!std.Io.net.Socket {
+            active.listener = active.server._listener.?.socket;
+            active.cron_started = active.server._cron_thread != null;
             return error.ConnectionAborted;
         }
     };
     const server = try Server.create(testing.io, testing.allocator, .{ .port = 0 }, logging.NoopLogger.logger(), .{});
     defer server.destroy(.cleanup) catch unreachable;
+    var accept: Accept = .{ .server = server };
+    Accept.active = &accept;
     var vtable = testing.io.vtable.*;
     vtable.netAccept = Accept.fail;
     server._io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
     try testing.expectError(error.ConnectionAborted, server.run());
-    try testing.expect(server._listener.?.socket.address.getPort() != 0);
+    const listener = accept.listener orelse return error.AcceptNotCalled;
+    try testing.expect(listener.address.getPort() != 0);
+    try testing.expect(accept.cron_started);
     try testing.expect(server._cron_thread == null);
-    try testing.expectEqual(@as(c_int, -1), std.c.fcntl(server._listener.?.socket.handle, std.posix.F.GETFD));
+    try testing.expectEqual(@as(c_int, -1), std.c.fcntl(listener.handle, std.posix.F.GETFD));
 }
