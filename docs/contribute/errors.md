@@ -10,7 +10,7 @@ layer. A catch should recover, clean up, or pass that source onward.
 
 | Boundary | What it reports |
 | --- | --- |
-| Application | Invalid startup input, server creation, runtime, and shutdown failures; process exit is nonzero |
+| Application | Invalid startup input, server creation, dependency setup, runtime, and shutdown failures; process exit is nonzero |
 | Connection | Expected command errors as RESP replies; internal and unexpected transport failures once |
 | Cron | A failed automatic attempt, followed by a later retry when supported |
 | Parent persistence handling | Failed children, wait failures, and completion failures |
@@ -21,7 +21,7 @@ attempts are also separate operations. A busy save/rewrite is expected control
 flow. Malformed requests, command validation errors, peer resets, and broken
 pipes do not create internal error events.
 
-The main sources are [main.zig](../../src/main.zig),
+The main sources are [application.zig](../../src/application.zig),
 [session.zig](../../src/connection/session.zig),
 [cron.zig](../../src/cron.zig), and
 [drain.zig](../../src/persistence/drain.zig).

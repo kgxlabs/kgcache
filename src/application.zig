@@ -9,7 +9,8 @@ const healthcheck = @import("healthcheck.zig");
 const lifecycle = @import("lifecycle.zig");
 pub const LifecycleHooks = lifecycle.LifecycleHooks;
 
-// A one-time setup callback. The application retains ownership of Server.
+// One-time setup before supervision. Failure triggers cleanup.
+// Application owns Server. Keep context and dependencies alive through cleanup.
 pub const ConfigureServer = struct {
     context: *anyopaque,
     configure: *const fn (*anyopaque, *Server) anyerror!void,

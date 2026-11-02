@@ -81,6 +81,52 @@ report locks before sorting, formatting, or socket output. Each row is coherent
 at its capture time; LIST is not one global snapshot. Slow report readers do
 not retain the connection collection lock.
 
+## Application startup and hooks
+
+[main.zig](../../src/main.zig) creates the logger and calls
+[application.run](../../src/application.zig) with empty options. The application
+owns config loading, signal handling, supervision, and Server cleanup. It
+reports source errors. The entry wrapper maps success to exit 0 and failure
+to exit 1 without logging the error again.
+
+The controlled test entry calls the same application function. Both entries
+import the same application module and effective version input. See the
+[process harness](../../tests/integration/harness/README.md) for test adapters.
+
+`Options.configure_server` runs once after `Server.create` succeeds, before
+supervision starts. It can install caller-owned dependencies. The application
+keeps ownership of Server. If setup fails, it skips readiness, calls
+`destroy(.cleanup)` once, and returns the setup source error ahead of any
+cleanup error. Version and health modes return before Server creation, setup,
+or lifecycle callbacks.
+
+Each Server copies an optional [LifecycleHooks](../../src/lifecycle.zig) value
+from its creation options. It borrows the context at a stable address. Keep
+that context alive through `run` and `destroy`. The hooks are fixed optional
+functions. Compose several actions inside a caller-owned adapter when needed.
+
+| Callback | Phase and result |
+| --- | --- |
+| `on_ready` | After bind and cron startup, before accepting clients. Receives the actual listener address, including an OS-selected port. Its source error fails `run`. |
+| `on_persistence_draining` | Once per destroy attempt, after cron and workers join, before the first persistence drain. Returns void. See [shutdown order](persistence.md#shutdown-order). |
+
+The application calls the caller's ready hook before writing to its readiness
+pipe. A caller error prevents that write. A pipe-write error also fails startup.
+Both paths stop cron, close the listener, and reach normal application cleanup.
+`ReadyPipe` owns the adopted ready descriptor. It closes it after a write
+attempt, including failure. Application cleanup closes it if notification was
+skipped.
+
+Callbacks run synchronously in the parent process. Ready and drain callbacks
+can run on different OS threads. Callers serialize `run` and `destroy` and keep
+callbacks short. A callback must not re-enter those methods, free Server, or
+change its hooks. The application joins supervised tasks before destroy starts.
+
+Resolved cleanup consumes Server even if it returns an earlier error. An error
+alone does not make the pointer valid for another destroy call. Unresolved
+children or AOF state retain resources. A caller retaining that Server must
+also retain its hook context, logger, allocator, and adapter dependencies.
+
 ## Startup configuration
 
 CLI and file settings share the startup arena supplied by Zig. The arena owns
@@ -114,7 +160,7 @@ still changes the process result. The detailed rules are in
 
 | Area | Entry point |
 | --- | --- |
-| Process and server lifecycle | [main.zig](../../src/main.zig), [server.zig](../../src/server.zig) |
+| Process and server lifecycle | [main.zig](../../src/main.zig), [application.zig](../../src/application.zig), [server.zig](../../src/server.zig), [lifecycle.zig](../../src/lifecycle.zig) |
 | Connections and reports | [connection/](../../src/connection) |
 | Requests and wire replies | [protocol/](../../src/protocol) |
 | Commands and schemas | [commander/](../../src/commander) |
