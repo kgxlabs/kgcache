@@ -3,7 +3,7 @@ const harness = @import("server_process");
 const ServerProcess = harness.ServerProcess;
 const resp_client = @import("../harness/resp_client.zig");
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, fake_executable_path: []const u8, artifact_dir: ?[]const u8) !void {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8, fake_executable_path: []const u8, controlled_executable_path: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: process harness checks started", .{});
 
     var random_bytes: [8]u8 = undefined;
@@ -17,6 +17,7 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable_path: []const u8
     try checkStartupArguments(io, allocator, executable_path, artifact_dir);
     try checkReadinessArguments(io, allocator, executable_path, artifact_dir);
     try checkPortsAndRestarts(io, allocator, executable_path, artifact_dir);
+    try checkControlSetupFailure(io, allocator, controlled_executable_path, artifact_dir);
     try checkLogCaptureLimit(io, allocator, fake_executable_path);
     try checkHungProcess(io, allocator, fake_executable_path, artifact_root);
 
@@ -278,4 +279,25 @@ fn bundleHasText(io: std.Io, allocator: std.mem.Allocator, root: []const u8, nee
         if (std.mem.indexOf(u8, log, needle) != null) return true;
     }
     return false;
+}
+
+fn checkControlSetupFailure(io: std.Io, allocator: std.mem.Allocator, controlled: []const u8, artifact_dir: ?[]const u8) !void {
+    const server = try ServerProcess.createStopped(io, allocator, controlled, .{
+        .control_child = .kgc,
+        .control_stage = .reaped,
+        .artifact_dir = artifact_dir,
+        .report_failures = false,
+    });
+    defer server.destroy();
+    errdefer server.failed = true;
+    try std.testing.expectError(error.StartupExited, server.start());
+    if (server.pid != null) return error.UnreapedChild;
+    if (server.ready_bytes_read != 0) return error.UnexpectedReadyOutput;
+    const status = server.last_exit_status orelse return error.MissingExitStatus;
+    if (!std.c.W.IFEXITED(status) or std.c.W.EXITSTATUS(status) != 1) return error.WrongExitStatus;
+    const report = "app: failed to configure server: InvalidTestControl";
+    if (std.mem.count(u8, server.stderr.bytes(), report) != 1) return error.WrongControlSetupReport;
+    var byte: [1]u8 = undefined;
+    try std.testing.expectError(error.PrematureReplyEnd, server.readExact(server.control_events.?, &byte));
+    server.failed = false;
 }

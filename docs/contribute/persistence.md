@@ -62,18 +62,29 @@ releasing a claim that guards publication or accounting.
 1. Stop the accept loop and cron.
 2. Shut down client sockets and join all workers. A finishing worker can still
    have started persistence, so inspect children after joining.
-3. Drain tracked snapshot and rewrite children with backends and Logger alive.
-4. Settle a completed rewrite or snapshot, including rollback on failure.
-5. With AOF off, start a required final snapshot if dirty state and policy need
+3. Create the shared drain context, then call `on_persistence_draining` if set.
+4. Drain tracked snapshot and rewrite children with backends and Logger alive.
+5. Settle a completed rewrite or snapshot, including rollback on failure.
+6. With AOF off, start a required final snapshot if dirty state and policy need
    one and budget remains. Use the same context and deadline.
-6. Finish the journal's final flush and applicable sync after rewrite state is
+7. Finish the journal's final flush and applicable sync after rewrite state is
    settled, then close resources that no child or pending completion needs.
-7. Report the first shutdown error after remaining safe cleanup.
+8. Report the first shutdown error after remaining safe cleanup.
+
+The [drain hook](../../src/lifecycle.zig) runs once per destroy attempt, including
+an empty initial drain. It still runs if worker cleanup returned an error.
+Server, backends, storage, and Logger remain alive, and no persistence lock is
+held during the callback. Its void return cannot change cleanup or replace
+child result handling. A final snapshot's second drain adds no notification.
+
+This hook marks a phase. It does not prove that a child exists, was reaped, or
+published a file. Observe those child or file operations separately.
 
 The drain context starts one monotonic `persistence-shutdown-grace-ms` budget
-after worker joining. The default is 10000 ms. Repeated drain calls and a final
-snapshot do not restart it. Zero skips graceful waiting; completed children
-are still collected before termination.
+after worker joining and before the hook. Callback time uses that budget.
+The default is 10000 ms. Repeated drain calls and a final snapshot do not restart
+it. Zero skips graceful waiting; completed children are still collected before
+termination.
 
 At expiry, remaining children receive SIGKILL. A further 1000 ms permits reaping.
 If a child remains unresolved, report an error and retain its resources.

@@ -39,6 +39,11 @@ The unit root is [src/tests.zig](../../src/tests.zig). It imports the source and
 test modules whose tests run under `zig build test`. Add a new test module there
 once. Keep a direct source import when that source still has inline tests.
 
+Shared application tests stay in [application.zig](../../src/application.zig).
+Controller tests reuse the unit root's application types and shared protocol
+module. Keep each source file under one module owner so tests remain discovered
+once.
+
 Use inline tests for a small local behavior or a private declaration. Put a
 larger group in a nearby `*_tests.zig` file when that keeps the implementation
 readable. One module can use both forms. There is no required size threshold.
@@ -64,6 +69,22 @@ component boundaries. Keep test-only imports with their callers.
 
 Split production code around a responsibility and a useful interface. A large
 number of tests alone is not a reason to split it.
+
+## Control persistence in process tests
+
+The [controlled entry](../../src/tests/controlled_server.zig) calls the same
+application lifecycle as the normal executable. Its
+[controller](../../src/tests/persistence_controller.zig) installs lifecycle
+hooks and process/I/O adapters after Server creation and before startup.
+Keep child selection, gates, injected failures, and raw status reporting in
+these test sources. The [harness guide](../../tests/integration/harness/README.md#controlled-persistence-tests)
+defines the controls, stages, and descriptor owners.
+
+Use `on_persistence_draining` to observe the initial shutdown boundary. Use
+child gates, delegated process waits, or file observations for later progress.
+The drain callback does not prove child completion. Keep the real reap,
+publication, restart, deadline, and source-error assertions. Log counts are
+not a substitute for those events.
 
 ## Add a process or client case
 

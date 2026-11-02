@@ -1,5 +1,11 @@
+const application = @import("application.zig");
+// The controller's unit import uses this root's existing application types.
+pub const Server = application.Server;
+pub const Options = application.Options;
+
 test {
-    const testing = @import("std").testing;
+    const std = @import("std");
+    const testing = std.testing;
     const protocol = @import("protocol.zig");
     const connection = @import("connection.zig");
     testing.refAllDecls(@import("root.zig"));
@@ -66,5 +72,6 @@ test {
     _ = @import("server.zig");
     _ = @import("server_tests.zig");
     _ = @import("persistence_shutdown_tests.zig");
-    _ = @import("main.zig");
+    _ = application;
+    _ = @import("tests/persistence_controller.zig");
 }

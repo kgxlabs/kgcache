@@ -1,5 +1,6 @@
 const std = @import("std");
 const support = @import("server_process");
+const build_options = @import("build_options");
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, controlled_executable: []const u8, artifact_dir: ?[]const u8) !void {
     std.log.info("integration: health command started", .{});
@@ -61,6 +62,33 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, executable: []const u8, con
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     try checkResult(result, null);
+
+    for ([_][]const u8{ executable, controlled_executable }) |binary| {
+        const version = try std.process.run(allocator, io, .{
+            .argv = &.{ binary, "--version" },
+            .environ_map = &environment,
+            .stdout_limit = .limited(1024),
+            .stderr_limit = .limited(1024),
+            .timeout = deadline(io),
+        });
+        defer allocator.free(version.stdout);
+        defer allocator.free(version.stderr);
+        if (version.term != .exited or version.term.exited != 0) return error.VersionActivatedControls;
+        try std.testing.expectEqualStrings("kgcache " ++ build_options.version ++ "\n", version.stdout);
+        if (version.stderr.len != 0) return error.UnexpectedVersionDiagnostic;
+    }
+
+    // Normal server mode ignores a control setting rejected by the test entry.
+    const normal = try support.ServerProcess.create(io, allocator, executable, .{
+        .control_child = .kgc,
+        .control_stage = .reaped,
+        .artifact_dir = artifact_dir,
+    });
+    defer normal.destroy();
+    errdefer normal.failed = true;
+    try normal.stop();
+    var control_byte: [1]u8 = undefined;
+    try std.testing.expectError(error.PrematureReplyEnd, normal.readExact(normal.control_events.?, &control_byte));
 
     // A real inherited descriptor must receive no readiness bytes.
     const ready = try support.ServerProcess.createStopped(io, allocator, executable, .{

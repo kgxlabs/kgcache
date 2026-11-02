@@ -28,19 +28,23 @@ test "final snapshot follows the stop reason, AOF mode, dirty state, and opt-out
         var config = scratch.config(case.append_only);
         config.shutdown_save = case.enabled;
         config.persistence_shutdown_grace_ms = case.grace_ms;
-        const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        var observer: DrainObserver = .{};
+        const server = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{
+            .lifecycle_hooks = .{ .context = &observer, .on_persistence_draining = DrainObserver.draining },
+        });
         var needs_destroy = true;
         defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
         if (case.dirty) try setValue(server, "key", "latest");
         needs_destroy = false;
         try server.destroy(case.reason);
+        try testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
 
         if (case.saved) {
             try scratch.tmp.dir.access(testing.io, config.dbfilename, .{});
         } else {
             try testing.expectError(error.FileNotFound, scratch.tmp.dir.access(testing.io, config.dbfilename, .{}));
         }
-        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
         defer restarted.destroy(.cleanup) catch unreachable;
         if (case.saved or case.append_only) {
             try expectValue(restarted, "key", "latest");
@@ -66,7 +70,7 @@ test "zero grace fails a required final save without forking" {
     var config = scratch.config(false);
     config.persistence_shutdown_grace_ms = 0;
     var logger = logging.TestLogger.init();
-    const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), .{});
     var needs_destroy = true;
     defer if (needs_destroy) server.destroy(.cleanup) catch unreachable;
     try setValue(server, "key", "previous");
@@ -79,7 +83,7 @@ test "zero grace fails a required final save without forking" {
     try testing.expectEqual(1, logger.recordedEvents().len);
     try testing.expectEqual(error.PersistenceShutdownTimeout, logger.recordedEvents()[0].source.?);
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "key", "previous");
 }
@@ -107,7 +111,7 @@ test "final snapshot I/O failures preserve the previous file and report a parent
         defer scratch.deinit();
         const config = scratch.config(false);
         var logger = logging.TestLogger.init();
-        const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), .{});
         var needs_destroy = true;
         defer if (needs_destroy) server.destroy(.cleanup) catch {};
         try setValue(server, "key", "previous");
@@ -153,7 +157,7 @@ test "final snapshot I/O failures preserve the previous file and report a parent
         var files = dir.iterate();
         while (try files.next(testing.io)) |entry| try testing.expectEqualStrings(config.dbfilename, entry.name);
 
-        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
         defer restarted.destroy(.cleanup) catch unreachable;
         try expectValue(restarted, "key", "previous");
     }
@@ -409,8 +413,9 @@ test "final save uses the original deadline and preserves an earlier failure" {
 
         var config = scratch.config(false);
         config.persistence_shutdown_grace_ms = 40;
+        var observer: DrainObserver = .{};
         var logger = logging.TestLogger.init();
-        const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
         var needs_destroy = true;
         defer if (needs_destroy) {
             first_gate.release();
@@ -442,11 +447,12 @@ test "final save uses the original deadline and preserves an earlier failure" {
         };
         try testing.expectEqual(case.expected, result);
         try testing.expectEqual(case.finish_ms, ShutdownClock.ms);
+        try testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
         try expectReaped(ShutdownClock.first_pid);
         const final_pid = final_gate.pid.load(.acquire);
         if (final_pid > 0) try expectReaped(final_pid);
 
-        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
         defer restarted.destroy(.cleanup) catch unreachable;
         try expectValue(restarted, "key", case.restored);
         if (case.expected) |expected| {
@@ -461,29 +467,50 @@ test "final save uses the original deadline and preserves an earlier failure" {
     }
 }
 
-const WaitObserver = struct {
-    io: std.Io,
-    first_wait: std.Io.Event = .unset,
-    second_wait: std.Io.Event = .unset,
-    info_count: std.atomic.Value(usize) = .init(0),
-    errors: logging.TestLogger = .init(),
+const DrainObserver = struct {
+    io: std.Io = testing.io,
+    entered: std.Io.Event = .unset,
+    count: std.atomic.Value(usize) = .init(0),
 
-    fn logger(self: *WaitObserver) logging.Logger {
-        return .{ .ptr = self, .vtable = &vtable };
+    fn options(self: *DrainObserver) Server.Options {
+        return .{ .lifecycle_hooks = .{ .context = self, .on_persistence_draining = draining } };
     }
 
-    const vtable: logging.Logger.VTable = .{ .log = log, .err = err };
+    fn draining(context: *anyopaque) void {
+        const self: *DrainObserver = @ptrCast(@alignCast(context));
+        _ = self.count.fetchAdd(1, .acq_rel);
+        self.entered.set(self.io);
+    }
+};
 
-    fn log(ptr: *anyopaque, _: logging.Logger.Level, _: []const u8) void {
-        const self: *WaitObserver = @ptrCast(@alignCast(ptr));
-        const index = self.info_count.fetchAdd(1, .acq_rel);
-        if (index == 0) self.first_wait.set(self.io);
-        if (index == 1) self.second_wait.set(self.io);
+// The process interface has no context parameter. gate_mutex protects this fixture.
+const PollObserver = struct {
+    var active: *PollObserver = undefined;
+
+    original: PersistenceState.Process,
+    drain: *DrainObserver,
+    save_pid: std.posix.pid_t = 0,
+    rewrite_pid: std.posix.pid_t = 0,
+    save_reaped: bool = false,
+    rewrite_running_after_save: std.Io.Event = .unset,
+    polled_before_drain: bool = false,
+    polls: usize = 0,
+
+    fn install(self: *PollObserver, server: *Server) void {
+        active = self;
+        server._persistence_state._process.wait_pid = wait;
     }
 
-    fn err(ptr: *anyopaque, message: []const u8, source: anyerror, trace: logging.Logger.ErrorTrace) void {
-        const self: *WaitObserver = @ptrCast(@alignCast(ptr));
-        self.errors.logger().err(message, source, trace);
+    fn wait(pid: std.posix.pid_t) anyerror!?u32 {
+        const self = active;
+        self.polls += 1;
+        if (self.drain.count.load(.acquire) != 1) self.polled_before_drain = true;
+        const result = try self.original.wait_pid(pid);
+        if (pid == self.save_pid and result != null) self.save_reaped = true;
+        if (pid == self.rewrite_pid and result == null and self.save_reaped) {
+            self.rewrite_running_after_save.set(testing.io);
+        }
+        return result;
     }
 };
 
@@ -507,20 +534,30 @@ const DestroyTask = struct {
 const WaitRace = union(enum) {
     waiting: std.Io.Cancelable!void,
     finished: std.Io.Cancelable!void,
+    timeout: std.Io.Cancelable!void,
 };
 
 fn waitEvent(io: std.Io, event: *std.Io.Event) std.Io.Cancelable!void {
     try event.wait(io);
 }
 
+fn waitTimeout() std.Io.Cancelable!void {
+    try testing.io.sleep(.fromSeconds(5), .awake);
+}
+
 fn expectShutdownWaiting(wait_event: *std.Io.Event, task: *DestroyTask) !void {
-    var results: [2]WaitRace = undefined;
+    var results: [3]WaitRace = undefined;
     var select = std.Io.Select(WaitRace).init(testing.io, &results);
     defer select.cancelDiscard();
     try select.concurrent(.waiting, waitEvent, .{ testing.io, wait_event });
     try select.concurrent(.finished, waitEvent, .{ testing.io, &task.done });
+    try select.concurrent(.timeout, waitTimeout, .{});
     switch (try select.await()) {
         .waiting => |result| try result,
+        .timeout => |result| {
+            try result;
+            return error.ShutdownObservationTimeout;
+        },
         .finished => |result| {
             try result;
             return error.ShutdownReturnedBeforeChildRelease;
@@ -639,7 +676,6 @@ const BgsaveClientIo = struct {
     ) std.Io.net.ShutdownError!void {
         const self: *BgsaveClientIo = @ptrCast(@alignCast(userdata));
         self.shutdown_called.set(self.base_io);
-        self.release_write.set(self.base_io);
         if (self.fail_shutdown) return error.ConnectionAborted;
     }
 
@@ -677,8 +713,9 @@ test "clean shutdown waits for BGSAVE and saves only changes made after capture"
         defer if (SnapshotFileObserver.first_file) |file| file.close(testing.io);
 
         const config = scratch.config(false);
-        var observer: WaitObserver = .{ .io = testing.io };
-        const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
+        var observer: DrainObserver = .{};
+        var logger = logging.TestLogger.init();
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
         var server_destroyed = false;
         defer if (!server_destroyed) {
             gate.release();
@@ -695,7 +732,7 @@ test "clean shutdown waits for BGSAVE and saves only changes made after capture"
         server._kgc._fork = real_fork;
         if (write_after_capture) try setValue(server, "snapshot-key", "latest");
 
-        const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .clean_signal);
+        const result = try destroyAfterWait(server, &observer.entered, &gate, &server_destroyed, .clean_signal);
         try testing.expectEqual(null, result);
         try expectReaped(pid);
         if (SnapshotFileObserver.open_error) |err| return err;
@@ -706,7 +743,7 @@ test "clean shutdown waits for BGSAVE and saves only changes made after capture"
             try testing.expectEqual(first.inode, final.inode);
         }
 
-        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
         defer restarted.destroy(.cleanup) catch unreachable;
         try expectValue(restarted, "snapshot-key", if (write_after_capture) "latest" else "saved");
     }
@@ -724,8 +761,9 @@ test "shutdown waits for active BGREWRITEAOF and restart replays later writes" {
     defer aof_gate = null;
 
     const config = scratch.config(true);
-    var observer: WaitObserver = .{ .io = testing.io };
-    const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
+    var observer: DrainObserver = .{};
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
@@ -737,11 +775,11 @@ test "shutdown waits for active BGREWRITEAOF and restart replays later writes" {
     const pid = try gate.awaitReady();
     try setValue(server, "later-key", "later-value");
 
-    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .cleanup);
+    const result = try destroyAfterWait(server, &observer.entered, &gate, &server_destroyed, .cleanup);
     try testing.expectEqual(null, result);
     try expectReaped(pid);
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "base-key", "base-value");
     try expectValue(restarted, "later-key", "later-value");
@@ -765,8 +803,9 @@ test "failed BGSAVE during shutdown keeps the previous snapshot" {
     defer kgc_gate = null;
 
     const config = scratch.config(false);
-    var observer: WaitObserver = .{ .io = testing.io };
-    const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
+    var observer: DrainObserver = .{};
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
@@ -779,15 +818,20 @@ test "failed BGSAVE during shutdown keeps the previous snapshot" {
     try testing.expectEqual(PersistenceState.BackgroundStartOutcome.started, try server._store.bgsave(.manual));
     const pid = try gate.awaitReady();
 
-    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .cleanup);
+    const result = try destroyAfterWait(server, &observer.entered, &gate, &server_destroyed, .cleanup);
     try testing.expectEqual(error.BackgroundSaveFailed, result.?);
-    const events = observer.errors.recordedEvents();
-    try testing.expectEqual(1, events.len);
-    try testing.expectEqual(error.BackgroundSaveFailed, events[0].source.?);
-    try testing.expect(!events[0].has_trace);
+    var reports: usize = 0;
+    for (logger.recordedEvents()) |event| {
+        if (event.kind != .err) continue;
+        reports += 1;
+        try testing.expectEqual(error.BackgroundSaveFailed, event.source.?);
+        try testing.expect(!event.has_trace);
+    }
+    try testing.expectEqual(@as(usize, 1), reports);
+    try testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
     try expectReaped(pid);
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "snapshot-key", "previous");
 }
@@ -804,8 +848,9 @@ test "failed BGREWRITEAOF during shutdown keeps acknowledged writes" {
     defer aof_gate = null;
 
     const config = scratch.config(true);
-    var observer: WaitObserver = .{ .io = testing.io };
-    const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
+    var observer: DrainObserver = .{};
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
@@ -817,15 +862,20 @@ test "failed BGREWRITEAOF during shutdown keeps acknowledged writes" {
     const pid = try gate.awaitReady();
     try setValue(server, "after-key", "after-value");
 
-    const result = try destroyAfterWait(server, &observer.first_wait, &gate, &server_destroyed, .cleanup);
+    const result = try destroyAfterWait(server, &observer.entered, &gate, &server_destroyed, .cleanup);
     try testing.expectEqual(error.AofRewriteFailed, result.?);
-    const events = observer.errors.recordedEvents();
-    try testing.expectEqual(1, events.len);
-    try testing.expectEqual(error.AofRewriteFailed, events[0].source.?);
-    try testing.expect(!events[0].has_trace);
+    var reports: usize = 0;
+    for (logger.recordedEvents()) |event| {
+        if (event.kind != .err) continue;
+        reports += 1;
+        try testing.expectEqual(error.AofRewriteFailed, event.source.?);
+        try testing.expect(!event.has_trace);
+    }
+    try testing.expectEqual(@as(usize, 1), reports);
+    try testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
     try expectReaped(pid);
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "before-key", "before-value");
     try expectValue(restarted, "after-key", "after-value");
@@ -853,8 +903,9 @@ test "shutdown waits for both BGSAVE and BGREWRITEAOF children" {
     defer aof_gate = null;
 
     const config = scratch.config(true);
-    var observer: WaitObserver = .{ .io = testing.io };
-    const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
+    var observer: DrainObserver = .{};
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
     var server_destroyed = false;
     defer if (!server_destroyed) {
         save_gate.release();
@@ -870,6 +921,14 @@ test "shutdown waits for both BGSAVE and BGREWRITEAOF children" {
     const rewrite_pid = try rewrite_gate.awaitReady();
     try setValue(server, "both-key", "latest");
 
+    var poll: PollObserver = .{
+        .original = server._persistence_state._process,
+        .drain = &observer,
+        .save_pid = save_pid,
+        .rewrite_pid = rewrite_pid,
+    };
+    poll.install(server);
+
     var task: DestroyTask = .{ .server = server, .io = testing.io, .reason = .clean_signal };
     const thread = try std.Thread.spawn(.{}, DestroyTask.run, .{&task});
     var joined = false;
@@ -879,25 +938,28 @@ test "shutdown waits for both BGSAVE and BGREWRITEAOF children" {
         thread.join();
         server_destroyed = true;
     };
-    try expectShutdownWaiting(&observer.first_wait, &task);
+    try expectShutdownWaiting(&observer.entered, &task);
     save_gate.release();
-    try expectShutdownWaiting(&observer.second_wait, &task);
+    try expectShutdownWaiting(&poll.rewrite_running_after_save, &task);
     rewrite_gate.release();
     thread.join();
     joined = true;
     server_destroyed = true;
 
     try testing.expectEqual(null, task.err);
+    try testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
+    try testing.expect(!poll.polled_before_drain);
+    try testing.expect(poll.save_reaped);
     try expectReaped(save_pid);
     try expectReaped(rewrite_pid);
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "both-key", "latest");
 
     var snapshot_config = config;
     snapshot_config.append_only = false;
-    const from_snapshot = try Server.create(testing.io, testing.allocator, snapshot_config, logging.NoopLogger.logger());
+    const from_snapshot = try Server.create(testing.io, testing.allocator, snapshot_config, logging.NoopLogger.logger(), .{});
     defer from_snapshot.destroy(.cleanup) catch unreachable;
     try expectValue(from_snapshot, "both-key", "both-value");
 }
@@ -914,8 +976,9 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
     defer kgc_gate = null;
 
     const config = scratch.config(false);
-    var observer: WaitObserver = .{ .io = testing.io };
-    const server = try Server.create(testing.io, testing.allocator, config, observer.logger());
+    var observer: DrainObserver = .{};
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
     var server_destroyed = false;
     defer if (!server_destroyed) {
         gate.release();
@@ -927,6 +990,8 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
     try setValue(server, "worker-key", "from-worker");
     server._kgc._fork = forkKgc;
 
+    var poll: PollObserver = .{ .original = server._persistence_state._process, .drain = &observer };
+    poll.install(server);
     var client: BgsaveClientIo = .{ .base_io = testing.io, .fail_shutdown = fail_shutdown };
     defer client.release_write.set(testing.io);
     server._connection_manager._io = client.io();
@@ -944,15 +1009,28 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
         server_destroyed = true;
     };
 
-    client.shutdown_called.waitUncancelable(testing.io);
-    try testing.expect(!task.finished.load(.acquire));
+    try expectShutdownWaiting(&client.shutdown_called, &task);
+    try testing.expectEqual(@as(usize, 0), observer.count.load(.acquire));
+    client.release_write.set(testing.io);
     const pid = try gate.awaitReady();
-    try expectShutdownWaiting(&observer.first_wait, &task);
+    try expectShutdownWaiting(&observer.entered, &task);
     gate.release();
     thread.join();
     joined = true;
     server_destroyed = true;
 
+    try testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
+    try testing.expect(!poll.polled_before_drain);
+    try testing.expect(poll.polls > 0);
+    if (fail_child) {
+        var child_errors: usize = 0;
+        for (logger.recordedEvents()) |event| {
+            if (event.source) |source| {
+                if (source == error.BackgroundSaveFailed) child_errors += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 1), child_errors);
+    }
     if (fail_shutdown) {
         try testing.expectEqual(error.ConnectionAborted, task.err.?);
     } else {
@@ -960,7 +1038,7 @@ fn runWorkerBgsaveShutdown(fail_shutdown: bool, fail_child: bool) !void {
     }
     try expectReaped(pid);
 
-    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+    const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
     defer restarted.destroy(.cleanup) catch unreachable;
     try expectValue(restarted, "worker-key", if (fail_child) "previous" else "from-worker");
 }
@@ -990,7 +1068,7 @@ test "shutdown kills stuck persistence children and restart keeps committed data
         var config = scratch.config(append_only);
         config.persistence_shutdown_grace_ms = 0;
         var logger = logging.TestLogger.init();
-        const server = try Server.create(testing.io, testing.allocator, config, logger.logger());
+        const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), .{});
         var destroyed = false;
         defer if (!destroyed) {
             gate.release();
@@ -1015,9 +1093,65 @@ test "shutdown kills stuck persistence children and restart keeps committed data
         destroyed = true;
         try testing.expectEqual(error.PersistenceShutdownTimeout, result.?);
         try expectReaped(pid);
-        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger());
+        const restarted = try Server.create(testing.io, testing.allocator, config, logging.NoopLogger.logger(), .{});
         defer restarted.destroy(.cleanup) catch unreachable;
         try expectValue(restarted, "saved-key", if (append_only) "latest" else "previous");
         if (append_only) try expectValue(restarted, "later-key", "acknowledged");
     }
+}
+
+test "drain observation retains the server while child ownership is unresolved" {
+    const Fake = struct {
+        var ms: i64 = 0;
+        var resolved: bool = false;
+
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = @as(i96, ms) * std.time.ns_per_ms };
+        }
+
+        fn sleep(_: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+            ms += timeout.duration.raw.toMilliseconds();
+        }
+
+        fn wait(_: std.posix.pid_t) anyerror!?u32 {
+            return if (resolved) 0 else error.TestPollFailure;
+        }
+
+        fn kill(_: std.posix.pid_t) anyerror!void {
+            return error.TestKillFailure;
+        }
+    };
+    Fake.ms = 0;
+    Fake.resolved = false;
+    var scratch = try Scratch.init();
+    defer scratch.deinit();
+    var config = scratch.config(false);
+    config.persistence_shutdown_grace_ms = 0;
+    var observer: DrainObserver = .{};
+    var logger = logging.TestLogger.init();
+    const server = try Server.create(testing.io, testing.allocator, config, logger.logger(), observer.options());
+    defer {
+        // The fake process owns no OS child. Supply a resolved wait result for teardown.
+        Fake.resolved = true;
+        server._io = testing.io;
+        server.destroy(.cleanup) catch unreachable;
+    }
+    try setValue(server, "retained-key", "retained-value");
+    server._persistence_state.setInFlightKgcSave(.{ .pid = 101, .captured_change_count = 1, .origin = .manual });
+    server._persistence_state._process = .{ .wait_pid = Fake.wait, .kill_pid = Fake.kill };
+    var vtable = testing.io.vtable.*;
+    vtable.now = Fake.now;
+    vtable.sleep = Fake.sleep;
+    server._io = .{ .userdata = testing.io.userdata, .vtable = &vtable };
+    try testing.expectError(error.TestPollFailure, server.destroy(.cleanup));
+    try testing.expectEqual(@as(usize, 1), observer.count.load(.acquire));
+    try testing.expect(server._persistence_state.kgcShutdownState() == .child);
+    try expectValue(server, "retained-key", "retained-value");
+    var unresolved_reports: usize = 0;
+    for (logger.recordedEvents()) |event| {
+        if (event.source) |source| {
+            if (source == error.PersistenceChildrenUnresolved) unresolved_reports += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), unresolved_reports);
 }

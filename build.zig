@@ -1,5 +1,6 @@
 const std = @import("std");
 const semver = @import("tools/release/semver.zig");
+const package_info = @import("build.zig.zon");
 
 // Learn more about this file here: https://ziglang.org/learn/build-system
 pub fn build(b: *std.Build) void {
@@ -8,11 +9,18 @@ pub fn build(b: *std.Build) void {
     const execution_guard = executionGuard(b, target);
     const build_options = b.addOptions();
     const version = b.option([]const u8, "version", "Effective version (SemVer 2.0.0)") orelse
-        @import("build.zig.zon").version;
+        package_info.version;
     if (!semver.isValid(version)) std.process.fatal("version must be SemVer 2.0.0", .{});
 
     build_options.addOption([]const u8, "version", version);
-    build_options.addOption(bool, "persistence_test_controls", false);
+    const application = b.createModule(.{
+        .root_source_file = b.path("src/application.zig"),
+        .target = target,
+        .optimize = optimize,
+        .error_tracing = true,
+        .link_libc = true,
+    });
+    application.addOptions("build_options", build_options);
 
     const exe = b.addExecutable(.{
         .name = "kgcache",
@@ -24,7 +32,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    exe.root_module.addOptions("build_options", build_options);
+    exe.root_module.addImport("application", application);
 
     // Share the install step with the integration runner so it receives the
     // absolute path of the executable that was just built.
@@ -52,6 +60,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     unit_tests.root_module.addOptions("build_options", build_options);
+    unit_tests.root_module.addImport("application", unit_tests.root_module);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
@@ -73,8 +82,9 @@ pub fn build(b: *std.Build) void {
     }));
 
     const control_protocol = b.createModule(.{
-        .root_source_file = b.path("src/persistence/test_control_protocol.zig"),
+        .root_source_file = b.path("src/tests/test_control_protocol.zig"),
     });
+    unit_tests.root_module.addImport("persistence_test_protocol", control_protocol);
     const server_process = b.createModule(.{
         .root_source_file = b.path("tests/integration/harness/server_process.zig"),
         .target = target,
@@ -84,20 +94,18 @@ pub fn build(b: *std.Build) void {
     server_process.addImport("persistence_test_protocol", control_protocol);
     integration_runner.root_module.addImport("server_process", server_process);
 
-    const control_options = b.addOptions();
-    control_options.addOption([]const u8, "version", version);
-    control_options.addOption(bool, "persistence_test_controls", true);
     const controlled_server = b.addExecutable(.{
         .name = "kgcache-controlled-server",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/tests/controlled_server.zig"),
             .target = target,
             .optimize = optimize,
             .error_tracing = true,
             .link_libc = true,
         }),
     });
-    controlled_server.root_module.addOptions("build_options", control_options);
+    controlled_server.root_module.addImport("application", application);
+    controlled_server.root_module.addImport("persistence_test_protocol", control_protocol);
 
     const fake_server = b.addExecutable(.{
         .name = "kgcache-fake-server",
