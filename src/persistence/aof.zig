@@ -322,7 +322,6 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
     if (old_file) |file| file.close(self._io);
 
     // start the fork
-    const controlled = @import("test_control.zig").claim(.aof);
     const pid = try self._fork();
 
     if (pid == 0) {
@@ -334,15 +333,12 @@ fn startBackgroundRewrite(self: *AofBackend, storages: []const Storage, origin: 
 
         // The parent reports a generic failure until issue #118 adds source errors.
         // Logging here could wait forever on a mutex copied during fork.
-        @import("test_control.zig").childBeforeWrite(controlled) catch std.c._exit(1);
         self.writeBase(storages, base_seq) catch std.c._exit(1);
-        @import("test_control.zig").childSynced(controlled);
 
         // never reutrn . do not fall back into caller's connection loop since this is a child process now
         // using _exit to sidestep clearing the buffered data (at the time of fork) completely
         std.c._exit(0);
     }
-    @import("test_control.zig").track(controlled, pid);
 
     const previous_pending_base_seq = self._pending_base_seq;
     const previous_rewrite_settled = self._rewrite_settled;
@@ -889,7 +885,8 @@ fn ignoreAbort(_: *anyopaque, _: Journal.WriteEvent) void {
 }
 
 test "dueForRewrite backs off after a failed rewrite attempt" {
-    try @import("aof_test_helpers.zig").withScratchDir("scratch-aof-rewrite-backoff", struct {
+    const helpers = @import("aof_test_helpers.zig");
+    try helpers.withScratchDir("scratch-aof-rewrite-backoff", struct {
         fn run(io: std.Io, _: std.Io.Dir) !void {
             const testing = std.testing;
             var state = PersistenceState.init(io, .{ .mutual_exclusive = false });
@@ -917,7 +914,8 @@ test "dueForRewrite backs off after a failed rewrite attempt" {
 }
 
 test "writeBaseEntry buffers reconstruction commands and commits the selected db" {
-    try @import("aof_test_helpers.zig").withScratchDir("scratch-aof-write-base-entry", struct {
+    const helpers = @import("aof_test_helpers.zig");
+    try helpers.withScratchDir("scratch-aof-write-base-entry", struct {
         fn run(io: std.Io, dir: std.Io.Dir) !void {
             _ = dir;
             const testing = std.testing;

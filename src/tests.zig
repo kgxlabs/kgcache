@@ -1,5 +1,6 @@
 test {
-    const testing = @import("std").testing;
+    const std = @import("std");
+    const testing = std.testing;
     const protocol = @import("protocol.zig");
     const connection = @import("connection.zig");
     testing.refAllDecls(@import("root.zig"));
@@ -66,5 +67,5 @@ test {
     _ = @import("server.zig");
     _ = @import("server_tests.zig");
     _ = @import("persistence_shutdown_tests.zig");
-    _ = @import("main.zig");
+    _ = @import("application.zig");
 }

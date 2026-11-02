@@ -6,6 +6,29 @@
 reaping. Use it instead of creating a second process-control path in a test.
 Each instance gets a temporary working directory and its own selected port.
 
+## Controlled persistence tests
+
+`kgcache-controlled-server` starts from
+[controlled_server.zig](../../../src/tests/controlled_server.zig). It shares the
+normal application's startup, readiness, and cleanup code. Its
+[controller](../../../src/tests/persistence_controller.zig) installs test wrappers
+for fork, file sync, and child waiting before the server runs.
+
+Use `control_child` and `control_stage` to select one persistence operation.
+The wrappers call the real operations and preserve their source errors and raw
+child status. Parent I/O and later children pass through without a gate.
+
+| Stage | Meaning |
+| --- | --- |
+| `before_write` | The selected child is held before its output work. Release it or request failure. |
+| `synced` | The selected child's output sync succeeded and the child is still held alive. File close may follow. |
+| `draining` | Server reached its initial persistence drain while the selected child was still tracked. |
+| `reaped` | A real wait collected the selected child's raw exit status. Publication and cleanup may still follow. |
+
+The [pipe protocol](../../../src/tests/test_control_protocol.zig) belongs to the
+test sources. The normal executable does not parse `KGCACHE_TEST_CONTROL`.
+Version and health modes return before the controlled entry activates it.
+
 ## Start and connect
 
 The fixture writes a config, adds `--ready-fd`, starts the child, and reads:

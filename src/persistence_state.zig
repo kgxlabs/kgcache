@@ -97,11 +97,11 @@ _in_flight_kgc_save: ?KgcBackgroundSave = null,
 _in_flight_aof_rewrite: ?AofBackgroundRewrite = null,
 _completed_aof_rewrite: ?AofReapResult = null,
 _last_failed_save_ms: ?time.UnixMs = null,
-/// Number of writes (put/remove) since the last save.
+// Number of writes (put/remove) since the last save.
 _change_count: std.atomic.Value(u64) = .init(0),
-/// Timestamp of the last save, initialized to "now" at construction (not
-/// 0) so a freshly-started server with no save rules matching yet doesn't
-/// look like it's infinitely overdue.
+// Timestamp of the last save, initialized to "now" at construction (not
+// 0) so a freshly-started server with no save rules matching yet doesn't
+// look like it's infinitely overdue.
 _last_save_ms: std.atomic.Value(i64),
 
 pub fn init(io: std.Io, options: Options) PersistenceState {
@@ -156,8 +156,8 @@ pub fn canDispatchPendingKgc(self: *PersistenceState) bool {
     return has_pending_save and save_is_idle and aof_allows_start;
 }
 
-/// Register the child and release its pending reservation in one state change.
-/// On error, state is unchanged and the caller must terminate and reap the new child.
+// Register the child and release its pending reservation in one state change.
+// On error, state is unchanged and the caller must terminate and reap the new child.
 pub fn completePendingKgcStart(self: *PersistenceState, save: KgcBackgroundSave) PendingStartError!void {
     if (self._in_flight_kgc_save != null) return error.ChildAlreadyTracked;
     if (!self._pending_kgc or !self._kgc_in_progress) return error.InvalidPendingClaim;
@@ -165,7 +165,7 @@ pub fn completePendingKgcStart(self: *PersistenceState, save: KgcBackgroundSave)
     self.setInFlightKgcSave(save);
 }
 
-/// Leave the request queued after a launch failure before a child exists.
+// Leave the request queued after a launch failure before a child exists.
 pub fn failPendingKgcStart(self: *PersistenceState) PendingStartError!void {
     if (self._in_flight_kgc_save != null) return error.ChildAlreadyTracked;
     if (!self._pending_kgc or !self._kgc_in_progress) return error.InvalidPendingClaim;
@@ -208,7 +208,7 @@ pub fn tryStartAof(self: *PersistenceState, policy: StartPolicy) StartDecision {
     return .started;
 }
 
-/// Call while holding a PersistenceState session after storage and journal locks are held.
+// Call while holding a PersistenceState session after storage and journal locks are held.
 pub fn claimPendingAof(self: *PersistenceState) bool {
     if (!self.canDispatchPendingAof()) return false;
     self._aof_in_progress = true;
@@ -222,8 +222,8 @@ pub fn canDispatchPendingAof(self: *PersistenceState) bool {
     return has_pending_rewrite and rewrite_is_idle and save_allows_start;
 }
 
-/// Register the child and release its pending reservation in one state change.
-/// On error, state is unchanged and the caller must terminate and reap the new child.
+// Register the child and release its pending reservation in one state change.
+// On error, state is unchanged and the caller must terminate and reap the new child.
 pub fn completePendingAofStart(self: *PersistenceState, rewrite: AofBackgroundRewrite) PendingStartError!void {
     if (self._in_flight_aof_rewrite != null) return error.ChildAlreadyTracked;
     if (!self._pending_aof or !self._aof_in_progress) return error.InvalidPendingClaim;
@@ -231,7 +231,7 @@ pub fn completePendingAofStart(self: *PersistenceState, rewrite: AofBackgroundRe
     self.setInFlightAofRewrite(rewrite);
 }
 
-/// Leave the request queued after a launch failure before a child exists.
+// Leave the request queued after a launch failure before a child exists.
 pub fn failPendingAofStart(self: *PersistenceState) PendingStartError!void {
     if (self._in_flight_aof_rewrite != null) return error.ChildAlreadyTracked;
     if (!self._pending_aof or !self._aof_in_progress) return error.InvalidPendingClaim;
@@ -247,8 +247,8 @@ pub fn finishAof(self: *PersistenceState) void {
     self._aof_in_progress = false;
 }
 
-/// Claim under a state session, then log outside it. Keep the claim with the
-/// cached completion across settlement retries and the handoff to shutdown.
+// Claim under a state session, then log outside it. Keep the claim with the
+// cached completion across settlement retries and the handoff to shutdown.
 pub fn claimAofFailureReport(self: *PersistenceState) bool {
     if (self._completed_aof_rewrite) |*completed| {
         if (completed.status != .failed) return false;
@@ -373,11 +373,10 @@ fn waitPidSystem(pid: std.posix.pid_t) anyerror!?u32 {
         }
     }
 
-    @import("persistence/test_control.zig").reaped(pid, @bitCast(status));
     return @bitCast(status);
 }
 
-/// Signal only. The drain loop retains ownership until polling confirms exit.
+// Signal only. The drain loop retains ownership until polling confirms exit.
 pub fn killChild(self: *PersistenceState, pid: std.posix.pid_t) !void {
     try self._process.kill_pid(pid);
 }
@@ -420,8 +419,8 @@ pub fn captureSnapshotChangeCount(self: *PersistenceState) u64 {
     return self._change_count.load(.monotonic);
 }
 
-/// Returns true if ANY rule's condition is met
-/// rules are OR'd together,
+// Returns true if ANY rule's condition is met
+// rules are OR'd together,
 pub fn dueForSave(self: *PersistenceState, now_ms: i64, rules: []const Config.SaveRule) bool {
     const dirty = self._change_count.load(.monotonic);
     const last_save_ms = self._last_save_ms.load(.monotonic);
@@ -433,8 +432,8 @@ pub fn dueForSave(self: *PersistenceState, now_ms: i64, rules: []const Config.Sa
     return false;
 }
 
-/// Marks only the changes represented by a completed snapshot as saved.
-/// Changes recorded after the snapshot change count was captured remain dirty.
+// Marks only the changes represented by a completed snapshot as saved.
+// Changes recorded after the snapshot change count was captured remain dirty.
 pub fn markSaved(self: *PersistenceState, saved_change_count: u64, now_ms: i64) !void {
     const current_change_count = self._change_count.load(.monotonic);
     if (current_change_count < saved_change_count) return error.InvalidSavedChangeCount;
