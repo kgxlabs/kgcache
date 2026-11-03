@@ -44,6 +44,10 @@ pub const ClientWorker = struct {
         return .{ .id = id, .ptr = self, .vtable = &context_vtable };
     }
 
+    pub fn registerNewConnection(self: *ClientWorker, id: u64) !ConnectionContext {
+        return .{ .id = id, .ptr = self, .vtable = &context_vtable };
+    }
+
     const context_vtable: ConnectionContext.VTable = .{
         .snapshot_current = snapshotCurrent,
         .snapshot_live = ClientWorker.snapshotLive,
@@ -187,6 +191,32 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 
     worker.thread = try self._spawn_worker(self, worker);
     worker.lifecycle = .running;
+}
+
+pub fn scheduleWorker(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
+    errdefer stream.close(self._io);
+
+    const worker = try self.chooseWorker();
+    const local_endpoint = try self._local_endpoint(self._io, stream.socket.handle);
+    const registered_at = std.Io.Clock.awake.now(self._io);
+    const new_connection_config = .{
+        .stream = stream,
+        .peer_endpoint = stream.socket.address,
+        .local_endpoint = local_endpoint,
+        .descriptor = stream.socket.handle,
+        .registered_at = registered_at,
+        .report = ConnectionReport.init(self._io, self._allocator, registered_at),
+    };
+    const connection_context = try worker.registerNewConnection(new_connection_config);
+}
+
+// choose existing worker. if no existing worker, create it (two options: 1. create it here or 2. pre-create it when manager init)
+// then add the new connection to the FIFO Queue
+fn chooseWorker(self: *ConnectionManager) !ClientWorker {
+    const worker = try self._allocator.create(ClientWorker);
+    errdefer self._allocator.destroy(worker);
+
+    return worker;
 }
 
 pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
