@@ -1,4 +1,5 @@
 const std = @import("std");
+const ClientRegistry = @import("client_registry.zig");
 
 pub const Lifecycle = enum {
     starting,
@@ -7,14 +8,9 @@ pub const Lifecycle = enum {
     finished,
 };
 
-manager: *ConnectionManager,
+client_registy: *ClientRegistry,
 stream: std.Io.net.Stream,
 context: ConnectionContext,
-peer_endpoint: std.Io.net.IpAddress,
-local_endpoint: std.Io.net.IpAddress,
-descriptor: std.Io.net.Socket.Handle,
-registered_at: std.Io.Timestamp,
-report: ConnectionReport,
 thread: ?std.Thread = null,
 lifecycle: Lifecycle = .starting,
 
@@ -28,7 +24,7 @@ pub fn registerNewConnection(self: *ClientWorker, id: u64) !ConnectionContext {
 
 const context_vtable: ConnectionContext.VTable = .{
     .snapshot_current = snapshotCurrent,
-    .snapshot_live = ClientWorker.snapshotLive,
+    .snapshot_live = snapshotLive,
     .record_read = recordRead,
     .record_write = recordWrite,
     .record_dispatch = recordDispatch,
@@ -78,5 +74,5 @@ fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) Co
 
 fn snapshotLive(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
     const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-    return self.manager.snapshotLive(io, allocator);
+    return self.client_registy.snapshotLive(io, allocator);
 }
