@@ -6,7 +6,7 @@ const Lock = @import("../lock.zig");
 const ClientRegistry = @This();
 _allocator: std.mem.Allocator,
 _lock: Lock,
-_records: std.AutoHashMap(u64, *ClientRecord),
+records: std.AutoHashMap(u64, *ClientRecord),
 
 pub const ClientRecord = struct {
     id: u64,

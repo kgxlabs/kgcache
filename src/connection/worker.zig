@@ -1,5 +1,14 @@
 const std = @import("std");
+const ClientSession = @import("session.zig");
 const ClientRegistry = @import("client_registry.zig");
+
+const ClientWorker = @This();
+
+client_registy: *ClientRegistry,
+stream: std.Io.net.Stream,
+client_sessions: std.ArrayList(ClientSession) = .empty,
+thread: ?std.Thread = null,
+lifecycle: Lifecycle = .starting,
 
 pub const Lifecycle = enum {
     starting,
@@ -7,12 +16,6 @@ pub const Lifecycle = enum {
     stopping,
     finished,
 };
-
-client_registy: *ClientRegistry,
-stream: std.Io.net.Stream,
-context: ConnectionContext,
-thread: ?std.Thread = null,
-lifecycle: Lifecycle = .starting,
 
 pub fn connectionContext(self: *ClientWorker, id: u64) ConnectionContext {
     return .{ .id = id, .ptr = self, .vtable = &context_vtable };

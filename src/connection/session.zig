@@ -7,6 +7,11 @@ const ConnectionContext = @import("context.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 
+const ClientSession = @This();
+
+_stream: std.Io.net.Stream,
+_context: ConnectionContext,
+
 const ConnectionWriter = struct {
     io: std.Io,
     descriptor: std.Io.net.Socket.Handle,
@@ -85,6 +90,11 @@ pub fn serve(
     handleConnection(io, logger, connection, context, data_store, con_allocator, &buffer, stop_requested) catch |err| {
         logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
+}
+
+// exposing via getter since we dont want the caller to make overriding to the :worker
+pub fn context(self: *ClientSession) *const ConnectionContext {
+    return &self._context;
 }
 
 fn handleConnection(
