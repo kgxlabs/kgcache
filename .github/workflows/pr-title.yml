@@ -14,6 +14,7 @@ concurrency:
 jobs:
   pr-title:
     name: PR title
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-24.04
     timeout-minutes: 2
 
