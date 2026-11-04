@@ -12,57 +12,13 @@ const ClientSession = @This();
 _stream: std.Io.net.Stream,
 _context: ConnectionContext,
 
-const ConnectionWriter = struct {
-    io: std.Io,
-    descriptor: std.Io.net.Socket.Handle,
-    context: *const ConnectionContext,
-    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-    err: ?std.Io.net.Stream.Writer.Error = null,
+// TODO: Implement
+pub fn init() ClientSession {
+    return .{};
+}
 
-    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *ConnectionWriter = @alignCast(@fieldParentPtr("interface", writer));
-        const count = self.io.vtable.netWrite(self.io.userdata, self.descriptor, writer.buffered(), data, splat) catch |err| {
-            self.err = err;
-            return error.WriteFailed;
-        };
-
-        self.context.recordWrite(self.io, count);
-
-        return writer.consume(count);
-    }
-};
-
-const InputBuffer = struct {
-    bytes: []u8,
-    read_pos: usize = 0,
-    write_pos: usize = 0,
-
-    fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
-        return .{ .bytes = try allocator.alloc(u8, @min(capacity, request_decoder.network_limits.max_frame_bytes)) };
-    }
-
-    fn grow(self: *InputBuffer, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{FrameTooLarge})!void {
-        self.assertValid();
-        const max_capacity = request_decoder.network_limits.max_frame_bytes;
-        if (self.bytes.len >= max_capacity) return error.FrameTooLarge;
-
-        const doubled = std.math.mul(usize, @max(self.bytes.len, 1), 2) catch max_capacity;
-        const new_capacity = @min(doubled, max_capacity);
-        self.bytes = try allocator.realloc(self.bytes, new_capacity);
-        self.assertValid();
-    }
-
-    fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
-        self.assertValid();
-        allocator.free(self.bytes);
-        self.* = undefined;
-    }
-
-    fn assertValid(self: *const InputBuffer) void {
-        std.debug.assert(self.read_pos <= self.write_pos);
-        std.debug.assert(self.write_pos <= self.bytes.len);
-    }
-};
+// TODO: Implement
+pub fn deinit() !void {}
 
 /// Serves one client session using a borrowed stream.
 ///
@@ -269,6 +225,58 @@ fn handleCompleteFrame(
 
     return writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
 }
+
+const ConnectionWriter = struct {
+    io: std.Io,
+    descriptor: std.Io.net.Socket.Handle,
+    context: *const ConnectionContext,
+    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+    err: ?std.Io.net.Stream.Writer.Error = null,
+
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *ConnectionWriter = @alignCast(@fieldParentPtr("interface", writer));
+        const count = self.io.vtable.netWrite(self.io.userdata, self.descriptor, writer.buffered(), data, splat) catch |err| {
+            self.err = err;
+            return error.WriteFailed;
+        };
+
+        self.context.recordWrite(self.io, count);
+
+        return writer.consume(count);
+    }
+};
+
+const InputBuffer = struct {
+    bytes: []u8,
+    read_pos: usize = 0,
+    write_pos: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
+        return .{ .bytes = try allocator.alloc(u8, @min(capacity, request_decoder.network_limits.max_frame_bytes)) };
+    }
+
+    fn grow(self: *InputBuffer, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{FrameTooLarge})!void {
+        self.assertValid();
+        const max_capacity = request_decoder.network_limits.max_frame_bytes;
+        if (self.bytes.len >= max_capacity) return error.FrameTooLarge;
+
+        const doubled = std.math.mul(usize, @max(self.bytes.len, 1), 2) catch max_capacity;
+        const new_capacity = @min(doubled, max_capacity);
+        self.bytes = try allocator.realloc(self.bytes, new_capacity);
+        self.assertValid();
+    }
+
+    fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
+        self.assertValid();
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+
+    fn assertValid(self: *const InputBuffer) void {
+        std.debug.assert(self.read_pos <= self.write_pos);
+        std.debug.assert(self.write_pos <= self.bytes.len);
+    }
+};
 
 const internal_error_message = "ERR something went wrong";
 
