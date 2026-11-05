@@ -2,6 +2,7 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const request_decoder = protocol.request_decoder;
 const commander = @import("../commander.zig");
+const ClientRegistry = @import("client_registry.zig");
 const ClientState = @import("client_state.zig");
 const ConnectionContext = @import("context.zig");
 const store = @import("../store.zig");
@@ -9,16 +10,33 @@ const logging = @import("../logger.zig");
 
 const ClientSession = @This();
 
+_io: std.Io,
+_allocator: std.mem.Allocator,
 _stream: std.Io.net.Stream,
 _context: ConnectionContext,
+_buffer: InputBuffer,
+_registry: *ClientRegistry,
+// this is basically metada data of client session and registry owns it
+_record: *ClientRegistry.ClientRecord,
 
 // TODO: Implement
-pub fn init() ClientSession {
-    return .{};
+pub fn init(io: std.Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, registry: *ClientRegistry, buffer_size: usize) !ClientSession {
+    const buffer = InputBuffer.init(allocator, buffer_size);
+    var client_state = ClientState.initWithConnection(context);
+    const record = try registry.register(io, metadata);
+
+    return .{
+        ._stream = stream,
+        ._buffer = buffer,
+        ._registry = registry,
+        ._record = record,
+    };
 }
 
 // TODO: Implement
-pub fn deinit() !void {}
+pub fn deinit(self: *ClientSession) !void {
+    self._buffer.deinit(self._allocator);
+}
 
 /// Serves one client session using a borrowed stream.
 ///
