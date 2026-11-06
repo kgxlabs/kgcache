@@ -2,78 +2,58 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const request_decoder = protocol.request_decoder;
 const commander = @import("../commander.zig");
+const ClientRegistry = @import("client_registry.zig");
 const ClientState = @import("client_state.zig");
 const ConnectionContext = @import("context.zig");
+const ConnectionReport = @import("report.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 
-const ConnectionWriter = struct {
-    io: std.Io,
-    descriptor: std.Io.net.Socket.Handle,
-    context: *const ConnectionContext,
-    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-    err: ?std.Io.net.Stream.Writer.Error = null,
+const ClientSession = @This();
 
-    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *ConnectionWriter = @alignCast(@fieldParentPtr("interface", writer));
-        const count = self.io.vtable.netWrite(self.io.userdata, self.descriptor, writer.buffered(), data, splat) catch |err| {
-            self.err = err;
-            return error.WriteFailed;
-        };
+_io: std.Io,
+_allocator: std.mem.Allocator,
+_data_store: *store.Store,
+_stream: std.Io.net.Stream,
+_logger: logging.Logger,
+_context: ConnectionContext,
+_buffer_size: usize,
+_buffer: InputBuffer,
+_registry: *ClientRegistry,
+// this is basically metada data of client session and registry owns it
+_record: *ClientRegistry.ClientRecord,
 
-        self.context.recordWrite(self.io, count);
+// TODO: Implement
+pub fn init(self: *ClientSession, io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store, logger: logging.Logger, stream: std.Io.net.Stream, metadata: ClientRegistry.Metadata, registry: *ClientRegistry, buffer_size: usize) !void {
+    var buffer = try InputBuffer.init(allocator, buffer_size);
+    errdefer buffer.deinit(allocator);
+    const record = try registry.register(io, metadata);
 
-        return writer.consume(count);
-    }
-};
+    self.* = .{
+        ._io = io,
+        ._allocator = allocator,
+        ._data_store = data_store,
+        ._logger = logger,
+        ._stream = stream,
+        ._context = ConnectionContext.init(record.id, self, &context_vtable),
+        ._buffer = buffer,
+        ._buffer_size = buffer_size,
+        ._registry = registry,
+        ._record = record,
+    };
+}
 
-const InputBuffer = struct {
-    bytes: []u8,
-    read_pos: usize = 0,
-    write_pos: usize = 0,
-
-    fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
-        return .{ .bytes = try allocator.alloc(u8, @min(capacity, request_decoder.network_limits.max_frame_bytes)) };
-    }
-
-    fn grow(self: *InputBuffer, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{FrameTooLarge})!void {
-        self.assertValid();
-        const max_capacity = request_decoder.network_limits.max_frame_bytes;
-        if (self.bytes.len >= max_capacity) return error.FrameTooLarge;
-
-        const doubled = std.math.mul(usize, @max(self.bytes.len, 1), 2) catch max_capacity;
-        const new_capacity = @min(doubled, max_capacity);
-        self.bytes = try allocator.realloc(self.bytes, new_capacity);
-        self.assertValid();
-    }
-
-    fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
-        self.assertValid();
-        allocator.free(self.bytes);
-        self.* = undefined;
-    }
-
-    fn assertValid(self: *const InputBuffer) void {
-        std.debug.assert(self.read_pos <= self.write_pos);
-        std.debug.assert(self.write_pos <= self.bytes.len);
-    }
-};
+// TODO: Implement
+pub fn deinit(self: *ClientSession) !void {
+    self._buffer.deinit(self._allocator);
+}
 
 /// Serves one client session using a borrowed stream.
 ///
 /// The caller owns the stream and must close it after this function returns.
 /// Thread creation, shutdown, joining, and worker reaping belong outside this
 /// lower-level connection boundary.
-pub fn serve(
-    io: std.Io,
-    logger: logging.Logger,
-    connection: std.Io.net.Stream,
-    context: *const ConnectionContext,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    connection_buffer_size: usize,
-    stop_requested: *const std.atomic.Value(bool),
-) void {
+pub fn serve(stop_requested: *const std.atomic.Value(bool)) void {
     if (stop_requested.load(.acquire)) return;
 
     var buffer = InputBuffer.init(con_allocator, connection_buffer_size) catch |err| {
@@ -85,6 +65,67 @@ pub fn serve(
     handleConnection(io, logger, connection, context, data_store, con_allocator, &buffer, stop_requested) catch |err| {
         logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
+}
+
+// exposing via getter since we dont want the caller to make overriding to the :worker
+pub fn context(self: *ClientSession) *const ConnectionContext {
+    return &self._context;
+}
+
+const context_vtable: ConnectionContext.VTable = .{
+    .snapshot_current = snapshotCurrent,
+    .snapshot_live = snapshotLive,
+    .record_read = recordRead,
+    .record_write = recordWrite,
+    .record_dispatch = recordDispatch,
+    .record_db_and_proto = recordDbAndProto,
+    .set_library_info = setLibraryInfo,
+};
+
+fn recordRead(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
+    const self: *ClientSession = @ptrCast(@alignCast(ptr));
+    self._record.report.recordRead(byte_count, at);
+}
+
+fn recordWrite(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
+    const self: *ClientSession = @ptrCast(@alignCast(ptr));
+    self._record.report.recordWrite(byte_count, at);
+}
+
+fn recordDispatch(ptr: *anyopaque, canonical_name: []const u8) void {
+    const self: *ClientSession = @ptrCast(@alignCast(ptr));
+    self._record.report.recordDispatch(canonical_name);
+}
+
+fn recordDbAndProto(ptr: *anyopaque, db_index: u32, resp: protocol.Resp.Version) void {
+    const self: *ClientSession = @ptrCast(@alignCast(ptr));
+    self._record.report.recordDbAndProto(db_index, resp);
+}
+
+fn setLibraryInfo(ptr: *anyopaque, attribute: ConnectionReport.LibraryAttribute, value: []const u8) ConnectionContext.Error!void {
+    const self: *ClientSession = @ptrCast(@alignCast(ptr));
+    return self._record.report.setLibraryInfo(attribute, value);
+}
+
+fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
+    const self: *ClientSession = @ptrCast(@alignCast(ptr));
+    const record = self._record;
+    const sampled_at = std.Io.Clock.awake.now(io);
+
+    return .{
+        .id = record.id,
+        .peer_endpoint = record.peer_endpoint,
+        .local_endpoint = record.local_endpoint,
+        .descriptor = record.descriptor,
+        .registered_at = record.registered_at,
+        .sampled_at = sampled_at,
+        .report = try record.report.snapshot(allocator),
+    };
+}
+
+fn snapshotLive(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
+    const self: *ClientSession = @ptrCast(@alignCast(ptr));
+    return self._registry.snapshotLive(io, allocator);
 }
 
 fn handleConnection(
@@ -259,6 +300,58 @@ fn handleCompleteFrame(
 
     return writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
 }
+
+const ConnectionWriter = struct {
+    io: std.Io,
+    descriptor: std.Io.net.Socket.Handle,
+    context: *const ConnectionContext,
+    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+    err: ?std.Io.net.Stream.Writer.Error = null,
+
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *ConnectionWriter = @alignCast(@fieldParentPtr("interface", writer));
+        const count = self.io.vtable.netWrite(self.io.userdata, self.descriptor, writer.buffered(), data, splat) catch |err| {
+            self.err = err;
+            return error.WriteFailed;
+        };
+
+        self.context.recordWrite(self.io, count);
+
+        return writer.consume(count);
+    }
+};
+
+const InputBuffer = struct {
+    bytes: []u8,
+    read_pos: usize = 0,
+    write_pos: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
+        return .{ .bytes = try allocator.alloc(u8, @min(capacity, request_decoder.network_limits.max_frame_bytes)) };
+    }
+
+    fn grow(self: *InputBuffer, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{FrameTooLarge})!void {
+        self.assertValid();
+        const max_capacity = request_decoder.network_limits.max_frame_bytes;
+        if (self.bytes.len >= max_capacity) return error.FrameTooLarge;
+
+        const doubled = std.math.mul(usize, @max(self.bytes.len, 1), 2) catch max_capacity;
+        const new_capacity = @min(doubled, max_capacity);
+        self.bytes = try allocator.realloc(self.bytes, new_capacity);
+        self.assertValid();
+    }
+
+    fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
+        self.assertValid();
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+
+    fn assertValid(self: *const InputBuffer) void {
+        std.debug.assert(self.read_pos <= self.write_pos);
+        std.debug.assert(self.write_pos <= self.bytes.len);
+    }
+};
 
 const internal_error_message = "ERR something went wrong";
 
