@@ -46,6 +46,14 @@ pub const VTable = struct {
     set_library_info: *const fn (*anyopaque, ConnectionReport.LibraryAttribute, []const u8) Error!void,
 };
 
+pub fn init(id: u64, ptr: *anyopaque, vtable: *const VTable) ConnectionContext {
+    return .{
+        .id = id,
+        .ptr = ptr,
+        .vtable = vtable,
+    };
+}
+
 pub fn snapshotCurrent(self: *const ConnectionContext, io: std.Io, allocator: std.mem.Allocator) Error!Snapshot {
     return self.vtable.snapshot_current(self.ptr, io, allocator);
 }

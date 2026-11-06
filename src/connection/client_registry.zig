@@ -17,7 +17,7 @@ pub const ClientRecord = struct {
     report: ConnectionReport,
 };
 
-const Metadata = struct {
+pub const Metadata = struct {
     id: u64,
     peer_endpoint: std.Io.net.IpAddress,
     local_endpoint: std.Io.net.IpAddress,
