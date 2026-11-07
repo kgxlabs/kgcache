@@ -6,32 +6,6 @@ const ConnectionContext = @This();
 
 pub const Error = std.mem.Allocator.Error;
 
-pub const Snapshot = struct {
-    id: u64,
-    peer_endpoint: std.Io.net.IpAddress,
-    local_endpoint: std.Io.net.IpAddress,
-    descriptor: std.Io.net.Socket.Handle,
-    registered_at: std.Io.Timestamp,
-    sampled_at: std.Io.Timestamp,
-    report: ConnectionReport.Snapshot,
-
-    pub fn deinit(self: *Snapshot) void {
-        self.report.deinit();
-        self.* = undefined;
-    }
-};
-
-pub const LiveSnapshots = struct {
-    items: []Snapshot,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *LiveSnapshots) void {
-        for (self.items) |*snapshot| snapshot.deinit();
-        self.allocator.free(self.items);
-        self.* = undefined;
-    }
-};
-
 id: u64,
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -85,3 +59,29 @@ pub fn recordDbAndProto(self: *const ConnectionContext, db_index: u32, resp: pro
 pub fn setLibraryInfo(self: *const ConnectionContext, attribute: ConnectionReport.LibraryAttribute, value: []const u8) Error!void {
     return self.vtable.set_library_info(self.ptr, attribute, value);
 }
+
+pub const Snapshot = struct {
+    id: u64,
+    peer_endpoint: std.Io.net.IpAddress,
+    local_endpoint: std.Io.net.IpAddress,
+    descriptor: std.Io.net.Socket.Handle,
+    registered_at: std.Io.Timestamp,
+    sampled_at: std.Io.Timestamp,
+    report: ConnectionReport.Snapshot,
+
+    pub fn deinit(self: *Snapshot) void {
+        self.report.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const LiveSnapshots = struct {
+    items: []Snapshot,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *LiveSnapshots) void {
+        for (self.items) |*snapshot| snapshot.deinit();
+        self.allocator.free(self.items);
+        self.* = undefined;
+    }
+};

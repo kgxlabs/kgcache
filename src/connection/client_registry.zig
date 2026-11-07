@@ -1,50 +1,32 @@
 const std = @import("std");
-const ConnectionContext = @import("context.zig");
-const ConnectionReport = @import("report.zig");
+const ClientState = @import("client_state.zig");
 const Lock = @import("../lock.zig");
 
 const ClientRegistry = @This();
-_allocator: std.mem.Allocator,
 _lock: Lock,
-records: std.AutoHashMap(u64, *ClientRecord),
+// Borrows client pointers. Sessions unregister before freeing their clients.
+_clients: std.AutoHashMap(u64, *ClientState),
 
-pub const ClientRecord = struct {
-    id: u64,
-    peer_endpoint: std.Io.net.IpAddress,
-    local_endpoint: std.Io.net.IpAddress,
-    descriptor: std.Io.net.Socket.Handle,
-    registered_at: std.Io.Timestamp,
-    report: ConnectionReport,
-};
-
-pub const Metadata = struct {
-    id: u64,
-    peer_endpoint: std.Io.net.IpAddress,
-    local_endpoint: std.Io.net.IpAddress,
-    descriptor: std.Io.net.Socket.Handle,
-    registered_at: std.Io.Timestamp,
-};
-
-pub const RegisterError = std.mem.Allocator.Error || error{
+pub const RegisterError = std.mem.Allocator.Error || ClientState.ConnectionError || error{
     DuplicateConnectionId,
 };
+
+pub const SnapshotError = std.mem.Allocator.Error;
 
 pub fn init(
     io: std.Io,
     allocator: std.mem.Allocator,
 ) ClientRegistry {
     return .{
-        ._allocator = allocator,
         ._lock = Lock.init(io),
-        ._records = .init(allocator),
+        ._clients = .init(allocator),
     };
 }
 
 pub fn register(
     _: *ClientRegistry,
-    _: std.Io,
-    _: Metadata,
-) RegisterError!*ClientRecord {
+    _: *ClientState,
+) RegisterError!void {
     @panic("ClientRegistry.register is not implemented");
 }
 
@@ -59,7 +41,7 @@ pub fn snapshotLive(
     _: *ClientRegistry,
     _: std.Io,
     _: std.mem.Allocator,
-) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
+) SnapshotError!ClientState.LiveSnapshots {
     @panic("ClientRegistry.snapshotLive is not implemented");
 }
 

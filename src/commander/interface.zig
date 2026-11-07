@@ -3,7 +3,9 @@ const store = @import("../store.zig");
 const std = @import("std");
 const object = @import("../object.zig");
 
-pub const ClientState = @import("../connection.zig").ClientState;
+const connection = @import("../connection.zig");
+
+pub const ClientState = connection.LegacyClientState;
 
 const Commander = @This();
 

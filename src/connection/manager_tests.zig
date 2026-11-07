@@ -1,4 +1,5 @@
 const std = @import("std");
+const LegacyClientState = @import("legacy_client_state.zig");
 const logging = @import("../logger.zig");
 const store = @import("../store.zig");
 const TestNetwork = @import("test_network.zig");
@@ -342,7 +343,7 @@ test "current snapshots use request storage and survive manager destruction" {
         try worker.context.setLibraryInfo(.lib_name, "test-library");
         try worker.context.setLibraryInfo(.lib_ver, "1.2.3");
         network.registration_time = .fromNanoseconds(500);
-        const state = @import("client_state.zig").initWithConnection(&worker.context);
+        const state = LegacyClientState.initWithConnection(&worker.context);
         var owned = try state.connection_context.?.snapshotCurrent(io, request_arena.allocator());
         errdefer owned.deinit();
         var tx = worker.report._lock.tryBegin() orelse return error.ReportLockStillHeld;

@@ -2,8 +2,10 @@ const std = @import("std");
 const connection = @import("session.zig");
 const ConnectionContext = @import("context.zig");
 const ConnectionReport = @import("report.zig");
-const socket_metadata = @import("socket_metadata.zig");
+const ClientWorker = @import("worker.zig");
+const ClientRegistry = @import("client_registry.zig");
 const Lock = @import("../lock.zig");
+const socket_metadata = @import("socket_metadata.zig");
 const logging = @import("../logger.zig");
 const store = @import("../store.zig");
 const TestNetwork = @import("test_network.zig");
@@ -21,89 +23,6 @@ pub const Options = struct {
     local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint,
 };
 
-pub const ClientWorker = struct {
-    pub const Lifecycle = enum {
-        starting,
-        running,
-        stopping,
-        finished,
-    };
-
-    manager: *ConnectionManager,
-    stream: std.Io.net.Stream,
-    context: ConnectionContext,
-    peer_endpoint: std.Io.net.IpAddress,
-    local_endpoint: std.Io.net.IpAddress,
-    descriptor: std.Io.net.Socket.Handle,
-    registered_at: std.Io.Timestamp,
-    report: ConnectionReport,
-    thread: ?std.Thread = null,
-    lifecycle: Lifecycle = .starting,
-
-    pub fn connectionContext(self: *ClientWorker, id: u64) ConnectionContext {
-        return .{ .id = id, .ptr = self, .vtable = &context_vtable };
-    }
-
-    pub fn registerNewConnection(self: *ClientWorker, id: u64) !ConnectionContext {
-        return .{ .id = id, .ptr = self, .vtable = &context_vtable };
-    }
-
-    const context_vtable: ConnectionContext.VTable = .{
-        .snapshot_current = snapshotCurrent,
-        .snapshot_live = ClientWorker.snapshotLive,
-        .record_read = recordRead,
-        .record_write = recordWrite,
-        .record_dispatch = recordDispatch,
-        .record_db_and_proto = recordDbAndProto,
-        .set_library_info = setLibraryInfo,
-    };
-
-    fn recordRead(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordRead(byte_count, at);
-    }
-
-    fn recordWrite(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordWrite(byte_count, at);
-    }
-
-    fn recordDispatch(ptr: *anyopaque, canonical_name: []const u8) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordDispatch(canonical_name);
-    }
-
-    fn recordDbAndProto(ptr: *anyopaque, db_index: u32, resp: protocol.Resp.Version) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordDbAndProto(db_index, resp);
-    }
-
-    fn setLibraryInfo(ptr: *anyopaque, attribute: ConnectionReport.LibraryAttribute, value: []const u8) ConnectionContext.Error!void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        return self.report.setLibraryInfo(attribute, value);
-    }
-
-    fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        const sampled_at = std.Io.Clock.awake.now(io);
-
-        return .{
-            .id = self.context.id,
-            .peer_endpoint = self.peer_endpoint,
-            .local_endpoint = self.local_endpoint,
-            .descriptor = self.descriptor,
-            .registered_at = self.registered_at,
-            .sampled_at = sampled_at,
-            .report = try self.report.snapshot(allocator),
-        };
-    }
-
-    fn snapshotLive(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        return self.manager.snapshotLive(io, allocator);
-    }
-};
-
 _io: std.Io,
 _allocator: std.mem.Allocator,
 // Borrowed dependencies. Their owners must keep them alive until deinit returns.
@@ -112,6 +31,9 @@ _store: *store.Store,
 _connection_buffer_size: usize,
 // Coordinates worker registration, completion, shutdown, and stream close.
 _lock: Lock,
+// Owns registry storage. Sessions own the indexed clients.
+_registry: ClientRegistry,
+_registry_released: bool = false,
 _workers: std.ArrayList(*ClientWorker) = .empty,
 _next_connection_id: u64 = 1,
 _stopping: std.atomic.Value(bool) = .init(false),
@@ -150,6 +72,7 @@ pub fn initWithOptions(
         ._store = data_store,
         ._connection_buffer_size = connection_buffer_size,
         ._lock = Lock.init(io),
+        ._registry = ClientRegistry.init(io, allocator),
         ._spawn_worker = options.spawn_worker,
         ._local_endpoint = options.local_endpoint,
     };
@@ -207,7 +130,6 @@ pub fn scheduleWorker(self: *ConnectionManager, stream: std.Io.net.Stream) !void
         .registered_at = registered_at,
         .report = ConnectionReport.init(self._io, self._allocator, registered_at),
     };
-    const connection_context = try worker.registerNewConnection(new_connection_config);
 }
 
 // choose existing worker. if no existing worker, create it (two options: 1. create it here or 2. pre-create it when manager init)
@@ -316,7 +238,7 @@ pub fn deinit(self: *ConnectionManager) !void {
 }
 
 fn runWorker(self: *ConnectionManager, worker: *ClientWorker) void {
-    connection.serve(
+    connection.legacyServe(
         self._io,
         self._logger,
         worker.stream,

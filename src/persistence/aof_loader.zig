@@ -1,7 +1,8 @@
 const std = @import("std");
 const Manifest = @import("manifest.zig");
 const Config = @import("../config.zig");
-const ClientState = @import("../connection.zig").ClientState;
+const connection = @import("../connection.zig");
+const LegacyClientState = connection.LegacyClientState;
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 const commander = @import("../commander.zig");
@@ -34,7 +35,7 @@ pub const ReplayBytesFn = *const fn (
     allocator: std.mem.Allocator,
     contents: []const u8,
     data_store: *store.Store,
-    client_state: *ClientState,
+    client_state: *LegacyClientState,
     policy: ReplayPolicy,
 ) anyerror!ReplayOutcome;
 
@@ -43,7 +44,7 @@ pub fn replayBytes(
     allocator: std.mem.Allocator,
     contents: []const u8,
     data_store: *store.Store,
-    client_state: *ClientState,
+    client_state: *LegacyClientState,
     policy: ReplayPolicy,
 ) anyerror!ReplayOutcome {
     var cursor: usize = 0;
@@ -116,7 +117,7 @@ pub fn replay(io: std.Io, allocator: std.mem.Allocator, data_store: *store.Store
     )) orelse return .{};
     defer manifest.deinit(allocator);
 
-    var client_state = ClientState.init();
+    var client_state = LegacyClientState.init();
     var stats: ReplayStats = .{};
 
     if (manifest.base) |base| {
@@ -140,7 +141,7 @@ fn replayFile(
     io: std.Io,
     allocator: std.mem.Allocator,
     data_store: *store.Store,
-    client_state: *ClientState,
+    client_state: *LegacyClientState,
     config: Config,
     logger: logging.Logger,
     dir: std.Io.Dir,
@@ -460,7 +461,7 @@ test "known bad final bulk terminators fail replay without repairing bytes" {
 test "byte replay reports the last successful offset without executing the tail" {
     var mock = MockStore.init();
     var data_store = mock.store();
-    var state = ClientState.init();
+    var state = LegacyClientState.init();
     const policy: ReplayPolicy = .{ .role = .final_incremental, .recover_truncated_tail = true, .limits = request_decoder.aof_limits };
     const result = try replayBytes(testing.io, testing.allocator, set_key_final ++ truncated_set, &data_store, &state, policy);
     try testing.expectEqual(set_key_final.len, result.incomplete_tail.safe_offset);
@@ -478,7 +479,7 @@ test "byte replay releases frames commands and aggregate replies on allocation f
 fn replayWithCleanup(allocator: std.mem.Allocator) !void {
     var mock = MockStore.init();
     var data_store = mock.store();
-    var state = ClientState.init();
+    var state = LegacyClientState.init();
     const contents = set_key_final ++ "*3\r\n$7\r\nCOMMAND\r\n$4\r\nINFO\r\n$3\r\nGET\r\n";
     const result = try replayBytes(testing.io, allocator, contents, &data_store, &state, .{ .role = .base, .recover_truncated_tail = true, .limits = request_decoder.aof_limits });
     try testing.expectEqual(contents.len, result.complete);
@@ -491,7 +492,7 @@ test "clean EOF succeeds for every file role and recovery setting" {
             for ([_][]const u8{ "", set_key_final }) |contents| {
                 var mock = MockStore.init();
                 var data_store = mock.store();
-                var state = ClientState.init();
+                var state = LegacyClientState.init();
                 const result = try replayBytes(testing.io, testing.allocator, contents, &data_store, &state, .{
                     .role = role,
                     .recover_truncated_tail = recover,
@@ -572,7 +573,7 @@ test "replay returns frame and element limit failures without treating them as t
         const contents = try std.fmt.bufPrint(&buffer, "{s}{s}", .{ set_key_final, case.tail });
         var mock = MockStore.init();
         var data_store = mock.store();
-        var state = ClientState.init();
+        var state = LegacyClientState.init();
         try testing.expectError(case.err, replayBytes(testing.io, testing.allocator, contents, &data_store, &state, .{
             .role = .final_incremental,
             .recover_truncated_tail = true,

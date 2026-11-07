@@ -4,7 +4,8 @@ const std = @import("std");
 const commander = @import("../commander.zig");
 const CommandFrame = @import("../protocol/command_frame.zig");
 const store = @import("../store.zig");
-const ClientState = @import("../connection.zig").ClientState;
+const connection = @import("../connection.zig");
+const LegacyClientState = connection.LegacyClientState;
 const DefaultStorage = @import("../storage/default_storage.zig");
 const persistence = @import("../persistence.zig");
 const PersistenceState = @import("../persistence_state.zig");
@@ -20,7 +21,7 @@ pub fn executeWithMemoryStore(command: commander.Commander) anyerror!commander.C
     var memory_store = store.MemoryStore.init(testing.allocator, &.{default_storage.storage()}, kgc_backend.snapshot(), null);
     var data_store = memory_store.store();
     defer data_store.deinit();
-    var client_state: ClientState = .{};
+    var client_state: LegacyClientState = .{};
 
     return command.execute(testing.io, &data_store, &client_state);
 }
