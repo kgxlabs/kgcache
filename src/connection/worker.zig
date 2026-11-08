@@ -4,14 +4,12 @@ const ClientRegistry = @import("client_registry.zig");
 
 const ClientWorker = @This();
 
-client_registry: *ClientRegistry,
-stream: std.Io.net.Stream,
-// Moving these pointers does not move the allocated sessions.
+// array list of `Session pointers` to make sure that moving items around wont have unexpceted/invalid reads
 client_sessions: std.ArrayList(*ClientSession) = .empty,
-thread: ?std.Thread = null,
-lifecycle: Lifecycle = .starting,
-activation_event: std.Io.Event = .unset,
-activation_outcome: ActivationOutcome = .abort,
+// TODO: figure out if we need this here or in lifecycle
+_lifecycle: Lifecycle = .starting,
+_stream: std.Io.net.Stream,
+_registry: *ClientRegistry,
 
 pub const ActivationOutcome = enum {
     abort,
@@ -24,3 +22,10 @@ pub const Lifecycle = enum {
     stopping,
     finished,
 };
+
+pub fn init(io: std.Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, registry: *ClientRegistry) !ClientWorker {
+    return .{
+        ._registry = registry,
+        ._stream = stream,
+    };
+}

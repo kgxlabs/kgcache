@@ -16,13 +16,14 @@ pub const PublishError = ClientRegistry.RegisterError;
 
 _io: std.Io,
 _allocator: std.mem.Allocator,
-_data_store: *store.Store,
 _stream: std.Io.net.Stream,
-_logger: logging.Logger,
 _client_state: ClientState,
 _buffer_size: usize,
 _buffer: InputBuffer,
 _registry: *ClientRegistry,
+_thread: std.Thread,
+_data_store: *store.Store,
+_logger: logging.Logger,
 
 pub fn create(
     _: std.Io,

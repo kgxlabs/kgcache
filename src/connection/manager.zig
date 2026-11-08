@@ -40,6 +40,7 @@ _stopping: std.atomic.Value(bool) = .init(false),
 _spawn_worker: SpawnWorkerFn,
 _local_endpoint: LocalEndpointFn,
 
+// TODO: refactor so that we dont need another init method just for options
 pub fn init(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -78,6 +79,7 @@ pub fn initWithOptions(
     };
 }
 
+// LEGACY
 /// ConnectionManager consumes the stream on every return path. A successful
 /// start transfers the final close to the worker completion path. A failed
 /// start closes the stream before returning the source error.
@@ -114,6 +116,16 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 
     worker.thread = try self._spawn_worker(self, worker);
     worker.lifecycle = .running;
+}
+
+pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
+    errdefer stream.close(self._io);
+
+    const worker = try createWorker(stream);
+}
+
+fn createWorker(self: *ConnectionManager, stream: std.Io.net.Stream) !ClientWorker {
+    return .{};
 }
 
 pub fn scheduleWorker(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
