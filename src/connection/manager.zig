@@ -119,12 +119,28 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 }
 
 pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
-    errdefer stream.close(self._io);
-
-    const worker = try createWorker(stream);
+    const worker = try self.getWorker();
+    const session = try worker.register(stream);
 }
 
-fn createWorker(self: *ConnectionManager, stream: std.Io.net.Stream) !ClientWorker {
+fn getWorker(self: *ConnectionManager) !*ClientWorker {
+    // TODO: implement algorithm create new one or choose worker from existing worker pools
+    return try self.createWorker();
+}
+
+fn createWorker(self: *ConnectionManager) !*ClientWorker {
+    // TODO: figure out when to do stream.close
+    const worker = try self._allocator.create(ClientWorker);
+    errdefer self._allocator.destroy(worker);
+
+    worker.* = try ClientWorker.init(self._io, self._allocator, self._registry);
+    try self._workers.append(self._allocator, worker);
+
+    return worker;
+}
+
+// TODO: implement
+fn chooseWorker(self: *ConnectionManager) !*ClientWorker {
     return .{};
 }
 
@@ -142,15 +158,6 @@ pub fn scheduleWorker(self: *ConnectionManager, stream: std.Io.net.Stream) !void
         .registered_at = registered_at,
         .report = ConnectionReport.init(self._io, self._allocator, registered_at),
     };
-}
-
-// choose existing worker. if no existing worker, create it (two options: 1. create it here or 2. pre-create it when manager init)
-// then add the new connection to the FIFO Queue
-fn chooseWorker(self: *ConnectionManager) !ClientWorker {
-    const worker = try self._allocator.create(ClientWorker);
-    errdefer self._allocator.destroy(worker);
-
-    return worker;
 }
 
 pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
@@ -205,6 +212,7 @@ pub fn reapFinished(self: *ConnectionManager) !void {
     }
 }
 
+// TODO: replace with new design
 pub fn deinit(self: *ConnectionManager) !void {
     var first_error: ?anyerror = null;
     var draining_workers: std.ArrayList(*ClientWorker) = .empty;

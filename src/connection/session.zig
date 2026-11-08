@@ -16,25 +16,34 @@ pub const PublishError = ClientRegistry.RegisterError;
 
 _io: std.Io,
 _allocator: std.mem.Allocator,
+_data_store: *store.Store,
+_logger: logging.Logger,
 _stream: std.Io.net.Stream,
 _client_state: ClientState,
 _buffer_size: usize,
 _buffer: InputBuffer,
 _registry: *ClientRegistry,
-_thread: std.Thread,
-_data_store: *store.Store,
-_logger: logging.Logger,
+_lifecycle: Lifecycle = .starting,
 
-pub fn create(
-    _: std.Io,
-    _: std.mem.Allocator,
-    _: *store.Store,
-    _: logging.Logger,
-    _: std.Io.net.Stream,
-    _: ClientState.Metadata,
-    _: *ClientRegistry,
-    _: usize,
-) CreateError!*ClientSession {
+pub const Lifecycle = enum {
+    starting,
+    running,
+    stopping,
+    finished,
+};
+
+pub const InitConfig = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: *store.Store,
+    logger: logging.Logger,
+    stream: std.Io.net.Stream,
+    metadata: ClientState.Metadata,
+    registry: *ClientRegistry,
+    buffer_size: usize,
+};
+
+pub fn init(_: InitConfig) CreateError!*ClientSession {
     @panic("ClientSession.create is not implemented");
 }
 
@@ -50,7 +59,7 @@ pub fn serve(_: *ClientSession, _: *const std.atomic.Value(bool)) void {
     @panic("ClientSession.serve is not implemented");
 }
 
-pub fn destroy(_: *ClientSession) void {
+pub fn deinit(_: *ClientSession) void {
     @panic("ClientSession.destroy is not implemented");
 }
 
