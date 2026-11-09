@@ -19,8 +19,7 @@ _allocator: std.mem.Allocator,
 _data_store: *store.Store,
 _logger: logging.Logger,
 _stream: std.Io.net.Stream,
-_client_state: ClientState,
-_buffer_size: usize,
+_state: ClientState,
 _buffer: InputBuffer,
 _registry: *ClientRegistry,
 _lifecycle: Lifecycle = .starting,
@@ -37,30 +36,49 @@ pub const InitConfig = struct {
     allocator: std.mem.Allocator,
     store: *store.Store,
     logger: logging.Logger,
+    id: u64,
     stream: std.Io.net.Stream,
-    metadata: ClientState.Metadata,
     registry: *ClientRegistry,
     buffer_size: usize,
 };
 
-pub fn init(_: InitConfig) CreateError!*ClientSession {
-    @panic("ClientSession.create is not implemented");
-}
+pub fn init(config: InitConfig) !ClientSession {
+    const buffer = InputBuffer.init(config.allocator, config.buffer_size) catch |err| {
+        config.logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
+        return err;
+    };
 
-pub fn publish(_: *ClientSession) PublishError!void {
-    @panic("ClientSession.publish is not implemented");
-}
+    const state = try ClientState.init(.{ .live = .{
+        .io = config.io,
+        .allocator = config.allocator,
+    } });
 
-pub fn clientState(_: *ClientSession) *ClientState {
-    @panic("ClientSession.clientState is not implemented");
-}
-
-pub fn serve(_: *ClientSession, _: *const std.atomic.Value(bool)) void {
-    @panic("ClientSession.serve is not implemented");
+    return .{
+        ._io = config.io,
+        ._allocator = config.allocator,
+        ._data_store = config.store,
+        ._logger = config.logger,
+        ._stream = config.stream,
+        ._state = state,
+        ._buffer = buffer,
+        ._registry = config.registry,
+    };
 }
 
 pub fn deinit(_: *ClientSession) void {
-    @panic("ClientSession.destroy is not implemented");
+    @panic("ClientSession.deinit is not implemented");
+}
+
+pub fn serve(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) void {
+    if (stop_requested.load(.acquire)) return;
+
+    handleConnection(stop_requested) catch |err| {
+        self._logger.err("connection: request handling failed", err, @errorReturnTrace());
+    };
+}
+
+pub fn clientState(self: *ClientSession) *ClientState {
+    return &self._state;
 }
 
 // Serves one connection using a borrowed stream and context.
@@ -88,17 +106,8 @@ pub fn legacyServe(
     };
 }
 
-fn handleConnection(
-    io: std.Io,
-    logger: logging.Logger,
-    connection: std.Io.net.Stream,
-    context: *const ConnectionContext,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    buffer: *InputBuffer,
-    stop_requested: *const std.atomic.Value(bool),
-) !void {
-    var client_state = LegacyClientState.initWithConnection(context);
+// TODO: re-implement for worker progress and backpressure
+fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) !void {
     while (true) {
         if (stop_requested.load(.acquire)) return;
 

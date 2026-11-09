@@ -12,6 +12,7 @@ _store: *store.Store,
 client_sessions: std.ArrayList(*ClientSession) = .empty,
 _registry: *ClientRegistry,
 _thread: std.Thread,
+_buffer_size: usize,
 
 pub const ActivationOutcome = enum {
     abort,
@@ -26,12 +27,14 @@ pub fn init(
     allocator: std.mem.Allocator,
     data_store: *store.Store,
     registry: *ClientRegistry,
+    buffer_size: usize,
 ) !ClientWorker {
     return .{
         ._io = io,
         ._allocator = allocator,
         .store = data_store,
         ._registry = registry,
+        ._buffer_size = buffer_size,
     };
 }
 
@@ -42,14 +45,18 @@ pub fn deinit(self: *ClientWorker) !void {
 }
 
 // TODO: implement
-pub fn register(self: *ClientWorker, stream: std.Io.net.Stream) !*ClientSession {
+pub fn register(self: *ClientWorker, id: u64, stream: std.Io.net.Stream) !*ClientSession {
     const session = try self._allocator.create(ClientSession);
     errdefer self._allocator.destroy(session);
 
     session.* = ClientSession.init(.{
         .io = self._io,
         .allocator = self._allocator,
+        .store = self._store,
+        .id = id,
         .stream = stream,
+        .registry = self._registry,
+        .buffer_size = self._buffer_size,
     });
     return session;
 }

@@ -38,7 +38,7 @@ pub const InitConfig = union(enum) {
     live: LiveConfig,
 };
 
-pub fn init(_: *ClientState, _: InitConfig) void {
+pub fn init(_: InitConfig) void {
     @panic("ClientState.init is not implemented");
 }
 

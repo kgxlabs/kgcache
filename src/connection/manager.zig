@@ -120,7 +120,7 @@ pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 
 pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     const worker = try self.getWorker();
-    const session = try worker.register(stream);
+    const session = try worker.register(self._next_connection_id, stream);
 }
 
 fn getWorker(self: *ConnectionManager) !*ClientWorker {
@@ -133,7 +133,12 @@ fn createWorker(self: *ConnectionManager) !*ClientWorker {
     const worker = try self._allocator.create(ClientWorker);
     errdefer self._allocator.destroy(worker);
 
-    worker.* = try ClientWorker.init(self._io, self._allocator, self._registry);
+    worker.* = try ClientWorker.init(
+        self._io,
+        self._allocator,
+        self._registry,
+        self._connection_buffer_size,
+    );
     try self._workers.append(self._allocator, worker);
 
     return worker;
@@ -142,22 +147,6 @@ fn createWorker(self: *ConnectionManager) !*ClientWorker {
 // TODO: implement
 fn chooseWorker(self: *ConnectionManager) !*ClientWorker {
     return .{};
-}
-
-pub fn scheduleWorker(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
-    errdefer stream.close(self._io);
-
-    const worker = try self.chooseWorker();
-    const local_endpoint = try self._local_endpoint(self._io, stream.socket.handle);
-    const registered_at = std.Io.Clock.awake.now(self._io);
-    const new_connection_config = .{
-        .stream = stream,
-        .peer_endpoint = stream.socket.address,
-        .local_endpoint = local_endpoint,
-        .descriptor = stream.socket.handle,
-        .registered_at = registered_at,
-        .report = ConnectionReport.init(self._io, self._allocator, registered_at),
-    };
 }
 
 pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
