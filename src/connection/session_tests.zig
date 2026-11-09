@@ -1,4 +1,5 @@
 const std = @import("std");
+const LegacyClientState = @import("legacy_client_state.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 const serve = @import("../connection.zig").serve;
@@ -219,7 +220,7 @@ pub fn checkHandlerCreationFailures(comptime Writer: type, comptime handle_frame
             defer worker.report.deinit();
             worker.report.recordDispatch("echo");
             worker.report.recordDbAndProto(2, selected.version());
-            var state = @import("client_state.zig").initWithConnection(&worker.context);
+            var state = LegacyClientState.initWithConnection(&worker.context);
             state.db_index = 2;
             state.resp = selected;
             var mock = store.MockStore.init();

@@ -2,69 +2,88 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const request_decoder = protocol.request_decoder;
 const commander = @import("../commander.zig");
+const ClientRegistry = @import("client_registry.zig");
 const ClientState = @import("client_state.zig");
+const LegacyClientState = @import("legacy_client_state.zig");
 const ConnectionContext = @import("context.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 
-const ConnectionWriter = struct {
+const ClientSession = @This();
+
+pub const CreateError = std.mem.Allocator.Error;
+pub const PublishError = ClientRegistry.RegisterError;
+
+_io: std.Io,
+_allocator: std.mem.Allocator,
+_data_store: *store.Store,
+_logger: logging.Logger,
+_stream: std.Io.net.Stream,
+_state: ClientState,
+_buffer: InputBuffer,
+_registry: *ClientRegistry,
+_lifecycle: Lifecycle = .starting,
+
+pub const Lifecycle = enum {
+    starting,
+    running,
+    stopping,
+    finished,
+};
+
+pub const InitConfig = struct {
     io: std.Io,
-    descriptor: std.Io.net.Socket.Handle,
-    context: *const ConnectionContext,
-    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
-    err: ?std.Io.net.Stream.Writer.Error = null,
-
-    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *ConnectionWriter = @alignCast(@fieldParentPtr("interface", writer));
-        const count = self.io.vtable.netWrite(self.io.userdata, self.descriptor, writer.buffered(), data, splat) catch |err| {
-            self.err = err;
-            return error.WriteFailed;
-        };
-
-        self.context.recordWrite(self.io, count);
-
-        return writer.consume(count);
-    }
+    allocator: std.mem.Allocator,
+    store: *store.Store,
+    logger: logging.Logger,
+    id: u64,
+    stream: std.Io.net.Stream,
+    registry: *ClientRegistry,
+    buffer_size: usize,
 };
 
-const InputBuffer = struct {
-    bytes: []u8,
-    read_pos: usize = 0,
-    write_pos: usize = 0,
+pub fn init(config: InitConfig) !ClientSession {
+    const buffer = InputBuffer.init(config.allocator, config.buffer_size) catch |err| {
+        config.logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
+        return err;
+    };
 
-    fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
-        return .{ .bytes = try allocator.alloc(u8, @min(capacity, request_decoder.network_limits.max_frame_bytes)) };
-    }
+    const state = try ClientState.init(.{ .live = .{
+        .io = config.io,
+        .allocator = config.allocator,
+    } });
 
-    fn grow(self: *InputBuffer, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{FrameTooLarge})!void {
-        self.assertValid();
-        const max_capacity = request_decoder.network_limits.max_frame_bytes;
-        if (self.bytes.len >= max_capacity) return error.FrameTooLarge;
+    return .{
+        ._io = config.io,
+        ._allocator = config.allocator,
+        ._data_store = config.store,
+        ._logger = config.logger,
+        ._stream = config.stream,
+        ._state = state,
+        ._buffer = buffer,
+        ._registry = config.registry,
+    };
+}
 
-        const doubled = std.math.mul(usize, @max(self.bytes.len, 1), 2) catch max_capacity;
-        const new_capacity = @min(doubled, max_capacity);
-        self.bytes = try allocator.realloc(self.bytes, new_capacity);
-        self.assertValid();
-    }
+pub fn deinit(_: *ClientSession) void {
+    @panic("ClientSession.deinit is not implemented");
+}
 
-    fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
-        self.assertValid();
-        allocator.free(self.bytes);
-        self.* = undefined;
-    }
+pub fn serve(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) void {
+    if (stop_requested.load(.acquire)) return;
 
-    fn assertValid(self: *const InputBuffer) void {
-        std.debug.assert(self.read_pos <= self.write_pos);
-        std.debug.assert(self.write_pos <= self.bytes.len);
-    }
-};
+    handleConnection(stop_requested) catch |err| {
+        self._logger.err("connection: request handling failed", err, @errorReturnTrace());
+    };
+}
 
-/// Serves one client session using a borrowed stream.
-///
-/// The caller owns the stream and must close it after this function returns.
-/// Thread creation, shutdown, joining, and worker reaping belong outside this
-/// lower-level connection boundary.
-pub fn serve(
+pub fn clientState(self: *ClientSession) *ClientState {
+    return &self._state;
+}
+
+// Serves one connection using a borrowed stream and context.
+// The caller owns the stream and closes it after this function returns.
+pub fn legacyServe(
     io: std.Io,
     logger: logging.Logger,
     connection: std.Io.net.Stream,
@@ -87,17 +106,8 @@ pub fn serve(
     };
 }
 
-fn handleConnection(
-    io: std.Io,
-    logger: logging.Logger,
-    connection: std.Io.net.Stream,
-    context: *const ConnectionContext,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    buffer: *InputBuffer,
-    stop_requested: *const std.atomic.Value(bool),
-) !void {
-    var client_state = ClientState.initWithConnection(context);
+// TODO: re-implement for worker progress and backpressure
+fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) !void {
     while (true) {
         if (stop_requested.load(.acquire)) return;
 
@@ -216,7 +226,7 @@ fn handleCompleteFrame(
     logger: logging.Logger,
     writer: *ConnectionWriter,
     data_store: *store.Store,
-    client_state: *ClientState,
+    client_state: *LegacyClientState,
     allocator: std.mem.Allocator,
     frame: protocol.CommandFrame,
     stop_requested: *const std.atomic.Value(bool),
@@ -259,6 +269,58 @@ fn handleCompleteFrame(
 
     return writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
 }
+
+const ConnectionWriter = struct {
+    io: std.Io,
+    descriptor: std.Io.net.Socket.Handle,
+    context: *const ConnectionContext,
+    interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+    err: ?std.Io.net.Stream.Writer.Error = null,
+
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *ConnectionWriter = @alignCast(@fieldParentPtr("interface", writer));
+        const count = self.io.vtable.netWrite(self.io.userdata, self.descriptor, writer.buffered(), data, splat) catch |err| {
+            self.err = err;
+            return error.WriteFailed;
+        };
+
+        self.context.recordWrite(self.io, count);
+
+        return writer.consume(count);
+    }
+};
+
+const InputBuffer = struct {
+    bytes: []u8,
+    read_pos: usize = 0,
+    write_pos: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!InputBuffer {
+        return .{ .bytes = try allocator.alloc(u8, @min(capacity, request_decoder.network_limits.max_frame_bytes)) };
+    }
+
+    fn grow(self: *InputBuffer, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{FrameTooLarge})!void {
+        self.assertValid();
+        const max_capacity = request_decoder.network_limits.max_frame_bytes;
+        if (self.bytes.len >= max_capacity) return error.FrameTooLarge;
+
+        const doubled = std.math.mul(usize, @max(self.bytes.len, 1), 2) catch max_capacity;
+        const new_capacity = @min(doubled, max_capacity);
+        self.bytes = try allocator.realloc(self.bytes, new_capacity);
+        self.assertValid();
+    }
+
+    fn deinit(self: *InputBuffer, allocator: std.mem.Allocator) void {
+        self.assertValid();
+        allocator.free(self.bytes);
+        self.* = undefined;
+    }
+
+    fn assertValid(self: *const InputBuffer) void {
+        std.debug.assert(self.read_pos <= self.write_pos);
+        std.debug.assert(self.write_pos <= self.bytes.len);
+    }
+};
 
 const internal_error_message = "ERR something went wrong";
 

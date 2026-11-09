@@ -168,7 +168,7 @@ test "CLIENT INFO owns its snapshot text through output in both protocols" {
     for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
         var provider = Provider.init();
         const context = provider.context();
-        var state = connection.ClientState.initWithConnection(&context);
+        var state = connection.LegacyClientState.initWithConnection(&context);
         state.db_index = 2;
         state.resp = selected;
         var unused_store: @import("../store.zig").Store = undefined;
@@ -211,7 +211,7 @@ test "SETINFO retains exact printable bytes and clears each label independently"
         var provider = Provider.init();
         defer provider.report.deinit();
         const context: connection.ConnectionContext = .{ .id = 42, .ptr = &provider, .vtable = &Provider.vtable };
-        var state = connection.ClientState.initWithConnection(&context);
+        var state = connection.LegacyClientState.initWithConnection(&context);
         state.resp = resp;
         var unused_store: @import("../store.zig").Store = undefined;
         var value: [94]u8 = undefined;
@@ -252,7 +252,7 @@ test "SETINFO validates attributes and every invalid byte in its recognized hand
     try provider.report.setLibraryInfo(.lib_name, "OldName");
     try provider.report.setLibraryInfo(.lib_ver, "OldVersion");
     const context: connection.ConnectionContext = .{ .id = 42, .ptr = &provider, .vtable = &Provider.vtable };
-    var state = connection.ClientState.initWithConnection(&context);
+    var state = connection.LegacyClientState.initWithConnection(&context);
     var unused_store: @import("../store.zig").Store = undefined;
     for ([_][]const u8{ "", "UNKNOWN", "LIB-NAME\x00", "LIB-VER\xff" }) |attribute| {
         const command = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{ "SETINFO", attribute, "valid" } });
@@ -281,7 +281,7 @@ test "CLIENT INFO releases owners and report locks on every allocation failure" 
 fn infoAllocation(allocator: std.mem.Allocator) !void {
     var provider = Provider.init();
     const context = provider.context();
-    var state = connection.ClientState.initWithConnection(&context);
+    var state = connection.LegacyClientState.initWithConnection(&context);
     state.db_index = 2;
     state.resp = protocol.Resp3.resp();
     defer {
@@ -303,7 +303,7 @@ test "CLIENT INFO requires connection snapshot access" {
     var data_store = mock.store();
     const command = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{"INFO"} });
     defer command.deinit();
-    var state = connection.ClientState.init();
+    var state = connection.LegacyClientState.init();
     try testing.expectError(error.MissingConnectionContext, command.execute(testing.io, &data_store, &state));
 }
 
@@ -315,7 +315,7 @@ test "report formatting brackets IPv6 and clamps or truncates sampled durations"
     provider.registered_at = .fromNanoseconds(1_900_000_000);
     provider.sampled_at = .fromNanoseconds(2_100_000_000);
     provider.report._values.last_activity = .fromNanoseconds(2_200_000_000);
-    var state = connection.ClientState.initWithConnection(&context);
+    var state = connection.LegacyClientState.initWithConnection(&context);
     var unused_store: @import("../store.zig").Store = undefined;
     const command = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{"INFO"} });
     defer command.deinit();
@@ -339,7 +339,7 @@ test "CLIENT LIST sorts complete owned rows and encodes empty and populated list
             var provider = Provider.init();
             provider.live_ids = ids;
             const context = provider.context();
-            var state = connection.ClientState.initWithConnection(&context);
+            var state = connection.LegacyClientState.initWithConnection(&context);
             state.db_index = 2;
             state.resp = resp;
             var unused_store: @import("../store.zig").Store = undefined;
@@ -401,7 +401,7 @@ fn listAllocation(allocator: std.mem.Allocator) !void {
     var provider = Provider.init();
     provider.live_ids = &.{ 99, 42, 7 };
     const context = provider.context();
-    var state = connection.ClientState.initWithConnection(&context);
+    var state = connection.LegacyClientState.initWithConnection(&context);
     defer {
         var tx = provider.report._lock.tryBegin() orelse unreachable;
         tx.end();
@@ -416,7 +416,7 @@ fn listAllocation(allocator: std.mem.Allocator) !void {
 
 test "CLIENT LIST requires live snapshot access" {
     var unused_store: @import("../store.zig").Store = undefined;
-    var state = connection.ClientState.init();
+    var state = connection.LegacyClientState.init();
     const command = try commander.init(testing.allocator, .{ .name = "CLIENT", .arguments = &.{"LIST"} });
     defer command.deinit();
     try testing.expectError(error.MissingConnectionContext, command.execute(testing.io, &unused_store, &state));
