@@ -44,6 +44,7 @@ test "file and CLI numeric settings accept the same boundaries and reject invali
         .{ .name = "persistence-shutdown-grace-ms", .field = "persistence_shutdown_grace_ms", .minimum = @as(i128, 0), .maximum = std.math.maxInt(u32) },
         .{ .name = "port", .field = "port", .minimum = @as(i128, 0), .maximum = std.math.maxInt(u16) },
         .{ .name = "connection-buffer-size", .field = "connection_buffer_size", .minimum = @as(i128, 1), .maximum = std.math.maxInt(usize) },
+        .{ .name = "maxclients", .field = "max_clients", .minimum = @as(i128, 1), .maximum = std.math.maxInt(u32) },
         .{ .name = "databases", .field = "num_databases", .minimum = @as(i128, 1), .maximum = @min(std.math.maxInt(u32), std.math.maxInt(usize)) },
         .{ .name = "cron-interval-ms", .field = "cron_interval_ms", .minimum = @as(i128, 1), .maximum = std.math.maxInt(i64) },
         .{ .name = "active-expire-budget-ms", .field = "active_expire_budget_ms", .minimum = @as(i128, 1), .maximum = std.math.maxInt(i8) },

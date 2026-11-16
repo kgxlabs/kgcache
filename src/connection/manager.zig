@@ -148,6 +148,11 @@ fn chooseWorker(self: *ConnectionManager) !*ClientWorker {
     return .{};
 }
 
+fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
+    // TODO: schedule sessions and call ClientSession.serve.
+    @panic("ConnectionManager.runWorker is not implemented");
+}
+
 pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
     // Membership and record lifetime stay protected until every row is copied.
     var tx = self._lock.beginUncancelable();
@@ -243,11 +248,6 @@ pub fn deinit(self: *ConnectionManager) !void {
     draining_workers.deinit(self._allocator);
 
     if (first_error) |err| return err;
-}
-
-fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
-    // TODO: schedule sessions and call ClientSession.serve.
-    @panic("ConnectionManager.runWorker is not implemented");
 }
 
 fn spawnWorkerThread(self: *ConnectionManager, worker: *ClientWorker) std.Thread.SpawnError!std.Thread {

@@ -27,6 +27,7 @@ CLI settings. Settings are read once at startup; there is no live CONFIG API.
 | `port` | `6379` | 0 through 65535; 0 requests an OS-selected port |
 | `reuse-address` | `yes` | `yes` or `no`; controls SO_REUSEADDR |
 | `connection-buffer-size` | `1024` | Bytes, 1 through the maximum machine word; initial capacity is clamped to 1 MiB |
+| `maxclients` | `10000` | 1 through 4294967295; accepted and stored, but does not currently limit live connections |
 | `databases` | `16` | 1 through 4294967295; valid SELECT indices are 0 through count minus 1 |
 
 The buffer setting does not change the fixed

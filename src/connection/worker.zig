@@ -12,7 +12,14 @@ _store: *store.Store,
 client_sessions: std.ArrayList(*ClientSession) = .empty,
 _registry: *ClientRegistry,
 _thread: std.Thread,
+_queue: SessionQueue,
 _buffer_size: usize,
+
+pub const SessionQueue = std.Io.Queue(PendingSession);
+pub const PendingSession = struct {
+    id: u64,
+    stream: std.Io.net.Stream,
+};
 
 pub const ActivationOutcome = enum {
     abort,
@@ -58,8 +65,12 @@ pub fn register(self: *ClientWorker, id: u64, stream: std.Io.net.Stream) !*Clien
         .registry = self._registry,
         .buffer_size = self._buffer_size,
     });
+
     return session;
 }
+
+// Long running event loop to process owned sessions one by one
+pub fn run(self: *ClientWorker) !void {}
 
 // Whether or not worker is handling client sessions
 pub fn isIdle() !bool {
