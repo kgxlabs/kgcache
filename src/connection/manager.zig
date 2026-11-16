@@ -1,5 +1,4 @@
 const std = @import("std");
-const connection = @import("session.zig");
 const ConnectionContext = @import("context.zig");
 const ConnectionReport = @import("report.zig");
 const ClientWorker = @import("worker.zig");
@@ -246,18 +245,9 @@ pub fn deinit(self: *ConnectionManager) !void {
     if (first_error) |err| return err;
 }
 
-fn runWorker(self: *ConnectionManager, worker: *ClientWorker) void {
-    connection.legacyServe(
-        self._io,
-        self._logger,
-        worker.stream,
-        &worker.context,
-        self._store,
-        self._allocator,
-        self._connection_buffer_size,
-        &self._stopping,
-    );
-    self.finishWorker(worker);
+fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
+    // TODO: schedule sessions and call ClientSession.serve.
+    @panic("ConnectionManager.runWorker is not implemented");
 }
 
 fn spawnWorkerThread(self: *ConnectionManager, worker: *ClientWorker) std.Thread.SpawnError!std.Thread {

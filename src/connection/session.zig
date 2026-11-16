@@ -4,8 +4,6 @@ const request_decoder = protocol.request_decoder;
 const commander = @import("../commander.zig");
 const ClientRegistry = @import("client_registry.zig");
 const ClientState = @import("client_state.zig");
-const LegacyClientState = @import("legacy_client_state.zig");
-const ConnectionContext = @import("context.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
 
@@ -72,7 +70,7 @@ pub fn deinit(_: *ClientSession) void {
 pub fn serve(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) void {
     if (stop_requested.load(.acquire)) return;
 
-    handleConnection(stop_requested) catch |err| {
+    self.handleConnection(stop_requested) catch |err| {
         self._logger.err("connection: request handling failed", err, @errorReturnTrace());
     };
 }
@@ -81,33 +79,11 @@ pub fn clientState(self: *ClientSession) *ClientState {
     return &self._state;
 }
 
-// Serves one connection using a borrowed stream and context.
-// The caller owns the stream and closes it after this function returns.
-pub fn legacyServe(
-    io: std.Io,
-    logger: logging.Logger,
-    connection: std.Io.net.Stream,
-    context: *const ConnectionContext,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    connection_buffer_size: usize,
-    stop_requested: *const std.atomic.Value(bool),
-) void {
-    if (stop_requested.load(.acquire)) return;
-
-    var buffer = InputBuffer.init(con_allocator, connection_buffer_size) catch |err| {
-        logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
-        return;
-    };
-    defer buffer.deinit(con_allocator);
-
-    handleConnection(io, logger, connection, context, data_store, con_allocator, &buffer, stop_requested) catch |err| {
-        logger.err("connection: request handling failed", err, @errorReturnTrace());
-    };
-}
-
 // TODO: re-implement for worker progress and backpressure
 fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) !void {
+    const buffer = &self._buffer;
+    const client_state = self.clientState();
+
     while (true) {
         if (stop_requested.load(.acquire)) return;
 
@@ -127,25 +103,25 @@ fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Valu
         }
 
         var connection_writer: ConnectionWriter = .{
-            .io = io,
-            .descriptor = connection.socket.handle,
-            .context = context,
+            .io = self._io,
+            .descriptor = self._stream.socket.handle,
+            .client_state = client_state,
         };
 
         if (buffer.write_pos == buffer.bytes.len) {
-            buffer.grow(con_allocator) catch |err| {
+            buffer.grow(self._allocator) catch |err| {
                 if (err == error.OutOfMemory) {
-                    logger.err("connection: input buffer growth failed", err, @errorReturnTrace());
-                    _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = internal_error_message }, stop_requested);
+                    self._logger.err("connection: input buffer growth failed", err, @errorReturnTrace());
+                    _ = writeResponse(self._logger, client_state.resp(), &connection_writer, .{ .error_reply = internal_error_message }, stop_requested);
                 } else {
-                    _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
+                    _ = writeResponse(self._logger, client_state.resp(), &connection_writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
                 }
                 return;
             };
         }
 
         var data = [_][]u8{buffer.bytes[buffer.write_pos..]};
-        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| {
+        const bytes_read = self._io.vtable.netRead(self._io.userdata, self._stream.socket.handle, &data) catch |err| {
             if (stop_requested.load(.acquire)) return;
             switch (err) {
                 error.ConnectionResetByPeer => return,
@@ -155,7 +131,7 @@ fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Valu
 
         if (bytes_read == 0) return;
         // record successfully read bytes
-        context.recordRead(io, bytes_read);
+        client_state.recordRead(self._io, bytes_read);
 
         buffer.write_pos = std.math.add(usize, buffer.write_pos, bytes_read) catch return error.LengthOverflow;
         buffer.assertValid();
@@ -174,18 +150,18 @@ fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Valu
                     request_decoder.network_limits,
                 ) catch |err| {
                     if (err == error.OutOfMemory) {
-                        logger.err("connection: request parsing failed", err, @errorReturnTrace());
+                        self._logger.err("connection: request parsing failed", err, @errorReturnTrace());
                         _ = writeResponse(
-                            logger,
-                            client_state.resp,
+                            self._logger,
+                            client_state.resp(),
                             &connection_writer,
                             .{ .error_reply = internal_error_message },
                             stop_requested,
                         );
                     } else {
                         _ = writeResponse(
-                            logger,
-                            client_state.resp,
+                            self._logger,
+                            client_state.resp(),
                             &connection_writer,
                             .{ .error_reply = parseErrorResponse(err) },
                             stop_requested,
@@ -201,11 +177,11 @@ fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Valu
                 defer decoded.deinit(allocator);
 
                 const successful = handleCompleteFrame(
-                    io,
-                    logger,
+                    self._io,
+                    self._logger,
                     &connection_writer,
-                    data_store,
-                    &client_state,
+                    self._data_store,
+                    client_state,
                     allocator,
                     decoded.frame,
                     stop_requested,
@@ -226,7 +202,7 @@ fn handleCompleteFrame(
     logger: logging.Logger,
     writer: *ConnectionWriter,
     data_store: *store.Store,
-    client_state: *LegacyClientState,
+    client_state: *ClientState,
     allocator: std.mem.Allocator,
     frame: protocol.CommandFrame,
     stop_requested: *const std.atomic.Value(bool),
@@ -234,46 +210,36 @@ fn handleCompleteFrame(
     const command = commander.init(allocator, frame) catch |err| {
         const message = initErrorResponse(err) orelse {
             logger.err("connection: command initialization failed", err, @errorReturnTrace());
-            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
+            _ = writeResponse(logger, client_state.resp(), writer, .{ .error_reply = internal_error_message }, stop_requested);
             return false;
         };
 
-        return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);
+        return writeResponse(logger, client_state.resp(), writer, .{ .error_reply = message }, stop_requested);
     };
     defer command.deinit();
 
     // record command count
-    if (client_state.connection_context) |context| context.recordDispatch(command.canonical_name);
+    client_state.recordDispatch(command.canonical_name);
 
     var result = command.execute(io, data_store, client_state) catch |err| {
         if (executeErrorResponse(err)) |message| {
-            if (client_state.connection_context) |context| context.recordDbAndProto(
-                client_state.db_index,
-                client_state.resp.version(),
-            );
-
-            return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);
+            return writeResponse(logger, client_state.resp(), writer, .{ .error_reply = message }, stop_requested);
         }
 
         logger.err("connection: command execution failed", err, @errorReturnTrace());
-        _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
+        _ = writeResponse(logger, client_state.resp(), writer, .{ .error_reply = internal_error_message }, stop_requested);
 
         return false;
     };
     defer result.deinit();
 
-    if (client_state.connection_context) |context| context.recordDbAndProto(
-        client_state.db_index,
-        client_state.resp.version(),
-    );
-
-    return writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
+    return writeResponse(logger, client_state.resp(), writer, result.value, stop_requested);
 }
 
 const ConnectionWriter = struct {
     io: std.Io,
     descriptor: std.Io.net.Socket.Handle,
-    context: *const ConnectionContext,
+    client_state: *ClientState,
     interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
     err: ?std.Io.net.Stream.Writer.Error = null,
 
@@ -284,7 +250,7 @@ const ConnectionWriter = struct {
             return error.WriteFailed;
         };
 
-        self.context.recordWrite(self.io, count);
+        self.client_state.recordWrite(self.io, count);
 
         return writer.consume(count);
     }
@@ -420,5 +386,6 @@ fn executeErrorResponse(err: anyerror) ?[]const u8 {
 }
 
 test "handler creation failures preserve the previous session dispatch" {
-    try @import("session_tests.zig").checkHandlerCreationFailures(ConnectionWriter, handleCompleteFrame);
+    const session_tests = @import("session_tests.zig");
+    try session_tests.checkHandlerCreationFailures(ConnectionWriter, handleCompleteFrame);
 }
