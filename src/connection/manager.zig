@@ -27,6 +27,7 @@ _allocator: std.mem.Allocator,
 // Borrowed dependencies. Their owners must keep them alive until deinit returns.
 _logger: logging.Logger,
 _store: *store.Store,
+_worker_count: u16,
 _connection_buffer_size: usize,
 // Coordinates worker registration, completion, shutdown, and stream close.
 _lock: Lock,
@@ -78,43 +79,16 @@ pub fn initWithOptions(
     };
 }
 
-// LEGACY
-/// ConnectionManager consumes the stream on every return path. A successful
-/// start transfers the final close to the worker completion path. A failed
-/// start closes the stream before returning the source error.
-pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
-    errdefer stream.close(self._io);
+// ConnectionManager will start the workers to a defined limit and make them start and list for events in their own threads
+pub fn start(self: *ConnectionManager) !void {
+    for (0..4) |_| {
+        const worker = try self.createWorker();
 
-    const worker = try self._allocator.create(ClientWorker);
-    errdefer self._allocator.destroy(worker);
-
-    const local_endpoint = try self._local_endpoint(self._io, stream.socket.handle);
-
-    var lock_tx = try self._lock.begin();
-    defer lock_tx.end();
-
-    if (self._stopping.load(.acquire)) return error.ConnectionManagerStopping;
-    if (self._next_connection_id > std.math.maxInt(i64)) return error.ConnectionIdExhausted;
-
-    const registered_at = std.Io.Clock.awake.now(self._io);
-    worker.* = .{
-        .manager = self,
-        .stream = stream,
-        .context = worker.connectionContext(self._next_connection_id),
-        .peer_endpoint = stream.socket.address,
-        .local_endpoint = local_endpoint,
-        .descriptor = stream.socket.handle,
-        .registered_at = registered_at,
-        .report = ConnectionReport.init(self._io, self._allocator, registered_at),
-    };
-    errdefer worker.report.deinit();
-    self._next_connection_id += 1;
-
-    try self._workers.append(self._allocator, worker);
-    errdefer std.debug.assert(self._workers.pop().? == worker);
-
-    worker.thread = try self._spawn_worker(self, worker);
-    worker.lifecycle = .running;
+        // start worker thread
+        try worker.start();
+        // append worker to list
+        try self._workers.append(self._allocator, worker);
+    }
 }
 
 pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
@@ -138,7 +112,6 @@ fn createWorker(self: *ConnectionManager) !*ClientWorker {
         self._registry,
         self._connection_buffer_size,
     );
-    try self._workers.append(self._allocator, worker);
 
     return worker;
 }

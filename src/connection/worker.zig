@@ -51,6 +51,8 @@ pub fn deinit(self: *ClientWorker) !void {
     }
 }
 
+pub fn start(self: *ClientWorker) !void {}
+
 // TODO: implement
 pub fn register(self: *ClientWorker, id: u64, stream: std.Io.net.Stream) !*ClientSession {
     const session = try self._allocator.create(ClientSession);
