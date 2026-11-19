@@ -35,7 +35,7 @@ _lock: Lock,
 _registry: ClientRegistry,
 _registry_released: bool = false,
 _workers: std.ArrayList(*ClientWorker) = .empty,
-_next_connection_id: u64 = 1,
+_next_connection_id: ClientWorker.SessionId = 1,
 _stopping: std.atomic.Value(bool) = .init(false),
 _spawn_worker: SpawnWorkerFn,
 _local_endpoint: LocalEndpointFn,
@@ -81,19 +81,40 @@ pub fn initWithOptions(
 
 // ConnectionManager will start the workers to a defined limit and make them start and list for events in their own threads
 pub fn start(self: *ConnectionManager) !void {
+    const previous_worker_count = self._workers.items.len;
+
+    errdefer {
+        while (self._workers.items.len > previous_worker_count) {
+            const worker = self._workers.pop().?;
+            self.destroyWorker(worker);
+        }
+    }
+
     for (0..4) |_| {
         const worker = try self.createWorker();
+        errdefer self.destroyWorker(worker);
 
-        // start worker thread
         try worker.start();
-        // append worker to list
         try self._workers.append(self._allocator, worker);
     }
 }
 
 pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
-    const worker = try self.getWorker();
-    const session = try worker.register(self._next_connection_id, stream);
+    const pending_connection: ClientWorker.PendingSession = .{
+        .id = self.nextConnectionId(),
+        .stream = stream,
+    };
+
+    const workers = try self.getAllWorkersByCapacity();
+    for (workers) |worker| {}
+
+    // no worker accepted the conenction
+    stream.close(self._io);
+    return error.ServerBusy;
+}
+
+fn getAllWorkersByCapacity(self: *ConnectionManager) ![]*ClientWorker {
+    return &.{};
 }
 
 fn getWorker(self: *ConnectionManager) !*ClientWorker {
@@ -126,6 +147,16 @@ fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
     @panic("ConnectionManager.runWorker is not implemented");
 }
 
+// TODO: destroy the provided worker, both unstarted or started
+// For a started worker, this must request shutdown and join the thread
+fn destroyWorker(self: *ConnectionManager, worker: *ClientWorker) void {}
+
+fn nextConnectionId(self: *ConnectionManager) ClientWorker.SessionId {
+    const current_id = self._next_connection_id;
+    self._next_connection_id += 1;
+    return current_id;
+}
+
 pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
     // Membership and record lifetime stay protected until every row is copied.
     var tx = self._lock.beginUncancelable();
@@ -148,34 +179,6 @@ pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.All
         captured += 1;
     }
     return .{ .items = items, .allocator = allocator };
-}
-
-pub fn reapFinished(self: *ConnectionManager) !void {
-    var finished_workers: [max_reaped_workers_per_pass]*ClientWorker = undefined;
-    var finished_count: usize = 0;
-
-    {
-        var lock_tx = try self._lock.begin();
-        defer lock_tx.end();
-
-        var index: usize = 0;
-        while (index < self._workers.items.len and finished_count < max_reaped_workers_per_pass) {
-            const worker = self._workers.items[index];
-
-            if (worker.lifecycle == .finished) {
-                finished_workers[finished_count] = self._workers.swapRemove(index);
-                finished_count += 1;
-            } else {
-                index += 1;
-            }
-        }
-    }
-
-    for (finished_workers[0..finished_count]) |finished_worker| {
-        finished_worker.thread.?.join();
-        finished_worker.report.deinit();
-        self._allocator.destroy(finished_worker);
-    }
 }
 
 // TODO: replace with new design

@@ -22,6 +22,8 @@ _buffer: InputBuffer,
 _registry: *ClientRegistry,
 _lifecycle: Lifecycle = .starting,
 
+pub const SessionId = u64;
+
 pub const Lifecycle = enum {
     starting,
     running,
@@ -34,7 +36,7 @@ pub const InitConfig = struct {
     allocator: std.mem.Allocator,
     store: *store.Store,
     logger: logging.Logger,
-    id: u64,
+    id: SessionId,
     stream: std.Io.net.Stream,
     registry: *ClientRegistry,
     buffer_size: usize,
