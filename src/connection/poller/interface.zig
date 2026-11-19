@@ -13,7 +13,20 @@ pub const Interests = struct {
 };
 
 pub const EventBuffer = [64]Event;
-pub const Event = struct {};
+pub const Event = union(enum) {
+    wakeup,
+    socket_ready: SocketReady,
+
+    pub const SocketReady = struct {
+        token: u64,
+        readable: bool = false,
+        writable: bool = false,
+        // The read side reported closure. Buffered data may still remain.
+        read_closed: bool = false,
+        // The socket reported an error that needs handling.
+        has_error: bool = false,
+    };
+};
 
 pub const VTable = struct {
     add: *const fn (*anyopaque, std.Io.net.Stream, ClientSession.SessionId, Interests) anyerror!void,
