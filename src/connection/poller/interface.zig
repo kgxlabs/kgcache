@@ -36,12 +36,12 @@ pub const VTable = struct {
     // NOTE: The array has room for 64 event records. The poller does not need to wait until all 64 slots are filled.
     // If count is 3, only these entries contain returned results: events[0], events[1], events[2]
     // Those results might mean: Session 9001 can be read. Session 9002 can be written. A Wakeup notification arrived.
-    wait: *const fn (*anyopaque, *EventBuffer, ?time.DurationMs) anyerror!void,
+    wait: *const fn (*anyopaque, *EventBuffer, ?time.DurationMs) anyerror![]Event,
     // NOTE: If the worker is waiting, the notification makes its wait return.
     // If the notification arrives before it starts waiting, the notification must remain pending until consumed.
     // On Linux, wake() writes 1 to the internal eventfd.
     // On macOS, wake() triggers the internal user event.
-    wake: *const fn (*anyopaque) anyerror!usize,
+    wake: *const fn (*anyopaque) anyerror!void,
     // On Linux, it closes the internal epoll and eventfd resources. On macOS, it closes the kqueue.
     // But it won't close the client sockets
     deinit: *const fn (*anyopaque) void,
@@ -59,11 +59,11 @@ pub fn remove(self: *Poller, socket: std.Io.net.Stream) !void {
     return self.vtable.remove(self.ptr, socket);
 }
 
-pub fn wait(self: *Poller, event_buffer: *EventBuffer, timeout: ?time.DurationMs) !void {
+pub fn wait(self: *Poller, event_buffer: *EventBuffer, timeout: ?time.DurationMs) ![]Event {
     return self.vtable.wait(self.ptr, event_buffer, timeout);
 }
 
-pub fn wake(self: *Poller) !usize {
+pub fn wake(self: *Poller) !void {
     return self.vtable.wake(self.ptr);
 }
 

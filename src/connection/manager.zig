@@ -96,15 +96,21 @@ pub fn start(self: *ConnectionManager) !void {
 }
 
 pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
-    const pending_connection: ClientWorker.PendingSession = .{
+    const pending_session: ClientWorker.PendingSession = .{
         .id = self.nextConnectionId(),
         .stream = stream,
     };
 
     const workers = try self.getAllWorkersByCapacity();
-    for (workers) |worker| {}
+    for (workers) |worker| {
+        worker.register(pending_session) catch |err| {
+            // TODO: Decide which error should retry with next worker instead of returning
+        };
+        // a worker took in the session and manager job is done here
+        return;
+    }
 
-    // no worker accepted the conenction
+    // no worker accepted the conenction so close the connection
     stream.close(self._io);
     return error.ServerBusy;
 }
