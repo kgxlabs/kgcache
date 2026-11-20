@@ -16,11 +16,7 @@ const max_reaped_workers_per_pass: usize = 64;
 
 pub const SpawnWorkerFn = *const fn (*ConnectionManager, *ClientWorker) std.Thread.SpawnError!std.Thread;
 pub const LocalEndpointFn = *const fn (std.Io, std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress;
-
-pub const Options = struct {
-    spawn_worker: SpawnWorkerFn = spawnWorkerThread,
-    local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint,
-};
+pub const Options = struct { local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint };
 
 _io: std.Io,
 _allocator: std.mem.Allocator,
@@ -224,10 +220,6 @@ pub fn deinit(self: *ConnectionManager) !void {
     draining_workers.deinit(self._allocator);
 
     if (first_error) |err| return err;
-}
-
-fn spawnWorkerThread(self: *ConnectionManager, worker: *ClientWorker) std.Thread.SpawnError!std.Thread {
-    return std.Thread.spawn(.{}, runWorker, .{ self, worker });
 }
 
 // This runs on the worker thread, so joining here would wait on itself.
