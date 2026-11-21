@@ -28,14 +28,11 @@ pub const PendingSession = struct {
     stream: std.Io.net.Stream,
 };
 pub const SessionId = ClientSession.SessionId;
-
 pub const ActivationOutcome = enum {
     abort,
     run,
 };
-
 pub const LifeCycle = enum { not_started, initialized, started, stop_requested, closing, closed };
-
 pub const SpawnWorkerFn = *const fn (*ClientWorker) std.Thread.SpawnError!std.Thread;
 
 pub const InitConfig = struct {
@@ -104,6 +101,11 @@ pub fn run(self: *ClientWorker) !void {
             },
         }
     }
+}
+
+// TODO: Implement
+pub fn availableCapacity(self: *ClientWorker) i8 {
+    return 100;
 }
 
 // Whether or not worker is handling client sessions

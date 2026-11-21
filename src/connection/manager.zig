@@ -76,7 +76,7 @@ pub fn initWithOptions(
 }
 
 // ConnectionManager will start the workers to a defined limit and make them start and list for events in their own threads
-pub fn start(self: *ConnectionManager) !void {
+pub fn start(self: *ConnectionManager, thread_count: u16) !void {
     const previous_worker_count = self._workers.items.len;
 
     errdefer {
@@ -86,7 +86,7 @@ pub fn start(self: *ConnectionManager) !void {
         }
     }
 
-    for (0..4) |_| {
+    for (0..thread_count) |_| {
         const worker = try self.createWorker();
         errdefer self.destroyWorker(worker);
 
@@ -104,7 +104,11 @@ pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     const workers = try self.getAllWorkersByCapacity();
     for (workers) |worker| {
         worker.register(pending_session) catch |err| {
-            // TODO: Decide which error should retry with next worker instead of returning
+            switch (err) {
+                // TODO: figure for what other errors should we retry with next worker
+                error.WorkerBusy => continue,
+                else => break,
+            }
         };
         // a worker took in the session and manager job is done here
         return;
