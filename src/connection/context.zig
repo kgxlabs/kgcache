@@ -6,32 +6,6 @@ const ConnectionContext = @This();
 
 pub const Error = std.mem.Allocator.Error;
 
-pub const Snapshot = struct {
-    id: u64,
-    peer_endpoint: std.Io.net.IpAddress,
-    local_endpoint: std.Io.net.IpAddress,
-    descriptor: std.Io.net.Socket.Handle,
-    registered_at: std.Io.Timestamp,
-    sampled_at: std.Io.Timestamp,
-    report: ConnectionReport.Snapshot,
-
-    pub fn deinit(self: *Snapshot) void {
-        self.report.deinit();
-        self.* = undefined;
-    }
-};
-
-pub const LiveSnapshots = struct {
-    items: []Snapshot,
-    allocator: std.mem.Allocator,
-
-    pub fn deinit(self: *LiveSnapshots) void {
-        for (self.items) |*snapshot| snapshot.deinit();
-        self.allocator.free(self.items);
-        self.* = undefined;
-    }
-};
-
 id: u64,
 ptr: *anyopaque,
 vtable: *const VTable,
@@ -45,6 +19,14 @@ pub const VTable = struct {
     record_db_and_proto: *const fn (*anyopaque, u32, protocol.Resp.Version) void,
     set_library_info: *const fn (*anyopaque, ConnectionReport.LibraryAttribute, []const u8) Error!void,
 };
+
+pub fn init(id: u64, ptr: *anyopaque, vtable: *const VTable) ConnectionContext {
+    return .{
+        .id = id,
+        .ptr = ptr,
+        .vtable = vtable,
+    };
+}
 
 pub fn snapshotCurrent(self: *const ConnectionContext, io: std.Io, allocator: std.mem.Allocator) Error!Snapshot {
     return self.vtable.snapshot_current(self.ptr, io, allocator);
@@ -77,3 +59,29 @@ pub fn recordDbAndProto(self: *const ConnectionContext, db_index: u32, resp: pro
 pub fn setLibraryInfo(self: *const ConnectionContext, attribute: ConnectionReport.LibraryAttribute, value: []const u8) Error!void {
     return self.vtable.set_library_info(self.ptr, attribute, value);
 }
+
+pub const Snapshot = struct {
+    id: u64,
+    peer_endpoint: std.Io.net.IpAddress,
+    local_endpoint: std.Io.net.IpAddress,
+    descriptor: std.Io.net.Socket.Handle,
+    registered_at: std.Io.Timestamp,
+    sampled_at: std.Io.Timestamp,
+    report: ConnectionReport.Snapshot,
+
+    pub fn deinit(self: *Snapshot) void {
+        self.report.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const LiveSnapshots = struct {
+    items: []Snapshot,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *LiveSnapshots) void {
+        for (self.items) |*snapshot| snapshot.deinit();
+        self.allocator.free(self.items);
+        self.* = undefined;
+    }
+};

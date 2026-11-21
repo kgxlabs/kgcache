@@ -62,6 +62,8 @@ test "parse leaves directives absent from a partial file at their defaults" {
     try testing.expectEqualStrings(defaults.bind_address, config.bind_address);
     try testing.expectEqual(defaults.reuse_address, config.reuse_address);
     try testing.expectEqual(defaults.connection_buffer_size, config.connection_buffer_size);
+    try testing.expectEqual(@as(u32, 10_000), config.max_clients);
+    try testing.expectEqual(@as(u16, 4), config.threads);
     try testing.expectEqual(defaults.num_databases, config.num_databases);
     try testing.expectEqualStrings(defaults.dir, config.dir);
     try testing.expectEqualStrings(defaults.dbfilename, config.dbfilename);

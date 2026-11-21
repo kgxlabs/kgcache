@@ -41,6 +41,14 @@
 # Range: 1 to the maximum usize value for this build.
 # connection-buffer-size 1024
 
+# Configured client limit. Range: 1 to 4294967295.
+# This value is accepted but does not currently limit live connections.
+# maxclients 10000
+
+# Configured connection worker count. Range: 1 to 128.
+# This value is accepted but does not currently control worker creation.
+# threads 4
+
 # Number of selectable databases: SELECT 0 through databases - 1.
 # Range: 1 to 4294967295.
 # databases 16

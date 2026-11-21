@@ -205,10 +205,11 @@ pub fn run(self: *Server) !void {
         try hooks.notifyReady(self._listener.?.socket.address);
     }
 
+    try self._connection_manager.start(self._config.threads);
+
     while (true) {
-        const client_stream = try self._listener.?.accept(self._io);
-        try self._connection_manager.start(client_stream);
-        try self._connection_manager.reapFinished();
+        const stream = try self._listener.?.accept(self._io);
+        try self._connection_manager.register(stream);
     }
 }
 

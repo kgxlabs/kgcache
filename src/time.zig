@@ -4,6 +4,7 @@ const std = @import("std");
 ///
 /// This is an absolute timestamp, not a relative duration such as `EX 10`.
 pub const UnixMs = i64;
+pub const DurationMs = u32;
 
 pub fn nowMs(io: std.Io) i64 {
     return std.Io.Clock.real.now(io).toMilliseconds();

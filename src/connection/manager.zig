@@ -1,9 +1,11 @@
 const std = @import("std");
-const connection = @import("session.zig");
 const ConnectionContext = @import("context.zig");
 const ConnectionReport = @import("report.zig");
-const socket_metadata = @import("socket_metadata.zig");
+const ClientWorker = @import("worker.zig");
+const ClientRegistry = @import("client_registry.zig");
+const WorkerSelector = @import("worker_selector.zig");
 const Lock = @import("../lock.zig");
+const socket_metadata = @import("socket_metadata.zig");
 const logging = @import("../logger.zig");
 const store = @import("../store.zig");
 const TestNetwork = @import("test_network.zig");
@@ -15,105 +17,29 @@ const max_reaped_workers_per_pass: usize = 64;
 
 pub const SpawnWorkerFn = *const fn (*ConnectionManager, *ClientWorker) std.Thread.SpawnError!std.Thread;
 pub const LocalEndpointFn = *const fn (std.Io, std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress;
-
-pub const Options = struct {
-    spawn_worker: SpawnWorkerFn = spawnWorkerThread,
-    local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint,
-};
-
-pub const ClientWorker = struct {
-    pub const Lifecycle = enum {
-        starting,
-        running,
-        stopping,
-        finished,
-    };
-
-    manager: *ConnectionManager,
-    stream: std.Io.net.Stream,
-    context: ConnectionContext,
-    peer_endpoint: std.Io.net.IpAddress,
-    local_endpoint: std.Io.net.IpAddress,
-    descriptor: std.Io.net.Socket.Handle,
-    registered_at: std.Io.Timestamp,
-    report: ConnectionReport,
-    thread: ?std.Thread = null,
-    lifecycle: Lifecycle = .starting,
-
-    pub fn connectionContext(self: *ClientWorker, id: u64) ConnectionContext {
-        return .{ .id = id, .ptr = self, .vtable = &context_vtable };
-    }
-
-    const context_vtable: ConnectionContext.VTable = .{
-        .snapshot_current = snapshotCurrent,
-        .snapshot_live = ClientWorker.snapshotLive,
-        .record_read = recordRead,
-        .record_write = recordWrite,
-        .record_dispatch = recordDispatch,
-        .record_db_and_proto = recordDbAndProto,
-        .set_library_info = setLibraryInfo,
-    };
-
-    fn recordRead(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordRead(byte_count, at);
-    }
-
-    fn recordWrite(ptr: *anyopaque, byte_count: u64, at: std.Io.Timestamp) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordWrite(byte_count, at);
-    }
-
-    fn recordDispatch(ptr: *anyopaque, canonical_name: []const u8) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordDispatch(canonical_name);
-    }
-
-    fn recordDbAndProto(ptr: *anyopaque, db_index: u32, resp: protocol.Resp.Version) void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        self.report.recordDbAndProto(db_index, resp);
-    }
-
-    fn setLibraryInfo(ptr: *anyopaque, attribute: ConnectionReport.LibraryAttribute, value: []const u8) ConnectionContext.Error!void {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        return self.report.setLibraryInfo(attribute, value);
-    }
-
-    fn snapshotCurrent(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.Snapshot {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        const sampled_at = std.Io.Clock.awake.now(io);
-
-        return .{
-            .id = self.context.id,
-            .peer_endpoint = self.peer_endpoint,
-            .local_endpoint = self.local_endpoint,
-            .descriptor = self.descriptor,
-            .registered_at = self.registered_at,
-            .sampled_at = sampled_at,
-            .report = try self.report.snapshot(allocator),
-        };
-    }
-
-    fn snapshotLive(ptr: *anyopaque, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
-        const self: *ClientWorker = @ptrCast(@alignCast(ptr));
-        return self.manager.snapshotLive(io, allocator);
-    }
-};
+pub const Options = struct { local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint };
 
 _io: std.Io,
 _allocator: std.mem.Allocator,
 // Borrowed dependencies. Their owners must keep them alive until deinit returns.
 _logger: logging.Logger,
 _store: *store.Store,
+_worker_count: u16,
 _connection_buffer_size: usize,
 // Coordinates worker registration, completion, shutdown, and stream close.
 _lock: Lock,
+// Owns registry storage. Sessions own the indexed clients.
+_registry: ClientRegistry,
+_registry_released: bool = false,
 _workers: std.ArrayList(*ClientWorker) = .empty,
-_next_connection_id: u64 = 1,
+// Owns selector state. Borrowed handles are created after the manager is placed.
+_worker_selector: WorkerSelector.LinearScan,
+_next_connection_id: ClientWorker.SessionId = 1,
 _stopping: std.atomic.Value(bool) = .init(false),
 _spawn_worker: SpawnWorkerFn,
 _local_endpoint: LocalEndpointFn,
 
+// TODO: refactor so that we dont need another init method just for options
 pub fn init(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -146,47 +72,100 @@ pub fn initWithOptions(
         ._store = data_store,
         ._connection_buffer_size = connection_buffer_size,
         ._lock = Lock.init(io),
+        ._registry = ClientRegistry.init(io, allocator),
+        ._worker_selector = WorkerSelector.LinearScan.init(io, allocator),
         ._spawn_worker = options.spawn_worker,
         ._local_endpoint = options.local_endpoint,
     };
 }
 
-/// ConnectionManager consumes the stream on every return path. A successful
-/// start transfers the final close to the worker completion path. A failed
-/// start closes the stream before returning the source error.
-pub fn start(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
-    errdefer stream.close(self._io);
+// ConnectionManager will start the workers to a defined limit and make them start and list for events in their own threads
+pub fn start(self: *ConnectionManager, thread_count: u16) !void {
+    const previous_worker_count = self._workers.items.len;
+    if (thread_count == 0 or thread_count > WorkerSelector.Interface.max_workers - previous_worker_count) {
+        return error.InvalidWorkerCount;
+    }
+    const selector = self._worker_selector.selector();
 
+    errdefer {
+        while (self._workers.items.len > previous_worker_count) {
+            const worker = self._workers.pop().?;
+            self.destroyWorker(worker);
+        }
+    }
+
+    for (0..thread_count) |_| {
+        const worker_id: WorkerSelector.Interface.WorkerId = @intCast(self._workers.items.len);
+        const worker = try self.createWorker(worker_id);
+        errdefer self.destroyWorker(worker);
+
+        try selector.addWorker(worker.selectionSource());
+        try worker.start();
+        try self._workers.append(self._allocator, worker);
+    }
+}
+
+pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
+    const pending_session: ClientWorker.PendingSession = .{
+        .id = self.nextConnectionId(),
+        .stream = stream,
+    };
+
+    const selector = self._worker_selector.selector();
+    var tried_workers = WorkerSelector.Interface.ExcludedWorkers.initEmpty();
+    while (selector.choose(tried_workers)) |worker_id| {
+        tried_workers.set(worker_id);
+
+        const worker = self._workers.items[worker_id];
+        worker.register(pending_session) catch |err| {
+            switch (err) {
+                // TODO: figure for what other errors should we retry with next worker
+                error.WorkerBusy => continue,
+                else => break,
+            }
+        };
+        // a worker took in the session and manager job is done here
+        return;
+    }
+
+    // no worker accepted the conenction so close the connection
+    stream.close(self._io);
+    return error.ServerBusy;
+}
+
+fn createWorker(self: *ConnectionManager, worker_id: WorkerSelector.Interface.WorkerId) !*ClientWorker {
+    // TODO: figure out when to do stream.close
     const worker = try self._allocator.create(ClientWorker);
     errdefer self._allocator.destroy(worker);
 
-    const local_endpoint = try self._local_endpoint(self._io, stream.socket.handle);
+    worker.* = try ClientWorker.init(.{
+        .io = self._io,
+        .allocator = self._allocator,
+        .store = self._store,
+        .registry = &self._registry,
+        .buffer_size = self._connection_buffer_size,
+        .worker_id = worker_id,
+        .worker_selector = self._worker_selector.selector(),
+    });
 
-    var lock_tx = try self._lock.begin();
-    defer lock_tx.end();
+    return worker;
+}
 
-    if (self._stopping.load(.acquire)) return error.ConnectionManagerStopping;
-    if (self._next_connection_id > std.math.maxInt(i64)) return error.ConnectionIdExhausted;
+fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
+    // TODO: schedule sessions and call ClientSession.serve.
+    @panic("ConnectionManager.runWorker is not implemented");
+}
 
-    const registered_at = std.Io.Clock.awake.now(self._io);
-    worker.* = .{
-        .manager = self,
-        .stream = stream,
-        .context = worker.connectionContext(self._next_connection_id),
-        .peer_endpoint = stream.socket.address,
-        .local_endpoint = local_endpoint,
-        .descriptor = stream.socket.handle,
-        .registered_at = registered_at,
-        .report = ConnectionReport.init(self._io, self._allocator, registered_at),
-    };
-    errdefer worker.report.deinit();
+// TODO: destroy the provided worker, both unstarted or started
+// For a started worker, this must request shutdown and join the thread
+fn destroyWorker(self: *ConnectionManager, worker: *ClientWorker) void {
+    self._worker_selector.selector().removeWorker(worker._worker_id);
+}
+
+fn nextConnectionId(self: *ConnectionManager) ClientWorker.SessionId {
+    const current_id = self._next_connection_id;
     self._next_connection_id += 1;
-
-    try self._workers.append(self._allocator, worker);
-    errdefer std.debug.assert(self._workers.pop().? == worker);
-
-    worker.thread = try self._spawn_worker(self, worker);
-    worker.lifecycle = .running;
+    return current_id;
 }
 
 pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
@@ -213,35 +192,9 @@ pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.All
     return .{ .items = items, .allocator = allocator };
 }
 
-pub fn reapFinished(self: *ConnectionManager) !void {
-    var finished_workers: [max_reaped_workers_per_pass]*ClientWorker = undefined;
-    var finished_count: usize = 0;
-
-    {
-        var lock_tx = try self._lock.begin();
-        defer lock_tx.end();
-
-        var index: usize = 0;
-        while (index < self._workers.items.len and finished_count < max_reaped_workers_per_pass) {
-            const worker = self._workers.items[index];
-
-            if (worker.lifecycle == .finished) {
-                finished_workers[finished_count] = self._workers.swapRemove(index);
-                finished_count += 1;
-            } else {
-                index += 1;
-            }
-        }
-    }
-
-    for (finished_workers[0..finished_count]) |finished_worker| {
-        finished_worker.thread.?.join();
-        finished_worker.report.deinit();
-        self._allocator.destroy(finished_worker);
-    }
-}
-
+// TODO: replace with new design
 pub fn deinit(self: *ConnectionManager) !void {
+    defer self._worker_selector.selector().deinit();
     var first_error: ?anyerror = null;
     var draining_workers: std.ArrayList(*ClientWorker) = .empty;
 
@@ -252,6 +205,7 @@ pub fn deinit(self: *ConnectionManager) !void {
         self._stopping.store(true, .release);
 
         for (self._workers.items) |worker| {
+            self._worker_selector.selector().removeWorker(worker._worker_id);
             switch (worker.lifecycle) {
                 .starting, .running => worker.lifecycle = .stopping,
                 .stopping, .finished => {},
@@ -285,30 +239,13 @@ pub fn deinit(self: *ConnectionManager) !void {
     if (first_error) |err| return err;
 }
 
-fn runWorker(self: *ConnectionManager, worker: *ClientWorker) void {
-    connection.serve(
-        self._io,
-        self._logger,
-        worker.stream,
-        &worker.context,
-        self._store,
-        self._allocator,
-        self._connection_buffer_size,
-        &self._stopping,
-    );
-    self.finishWorker(worker);
-}
-
-fn spawnWorkerThread(self: *ConnectionManager, worker: *ClientWorker) std.Thread.SpawnError!std.Thread {
-    return std.Thread.spawn(.{}, runWorker, .{ self, worker });
-}
-
 // This runs on the worker thread, so joining here would wait on itself.
 // The accept-loop reaper or deinit joins and frees the finished record.
 fn finishWorker(self: *ConnectionManager, worker: *ClientWorker) void {
     var lock_tx = self._lock.beginUncancelable();
     defer lock_tx.end();
 
+    self._worker_selector.selector().removeWorker(worker._worker_id);
     worker.stream.close(self._io);
     worker.lifecycle = .finished;
 }

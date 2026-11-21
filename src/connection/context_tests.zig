@@ -78,7 +78,7 @@ test "session state exposes current snapshots through a borrowed report provider
     };
     context.recordDbAndProto(7, .resp3);
     context.recordDispatch("client|info");
-    const state = connection.ClientState.initWithConnection(&context);
+    const state = connection.LegacyClientState.initWithConnection(&context);
     var request_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer request_arena.deinit();
     var snapshot = try state.connection_context.?.snapshotCurrent(io, request_arena.allocator());
