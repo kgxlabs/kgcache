@@ -14,7 +14,7 @@ pub const Interests = struct {
 
 pub const EventBuffer = [64]Event;
 pub const Event = union(enum) {
-    wakeup,
+    worker_notified,
     socket_ready: SocketReady,
 
     pub const SocketReady = struct {
@@ -35,7 +35,7 @@ pub const VTable = struct {
     // timeout: 0 = Check now and return immediately, 1000 = Wait up to one second. Return sooner if event arrives , null = Wait indefinitely until an event arrives
     // NOTE: The array has room for 64 event records. The poller does not need to wait until all 64 slots are filled.
     // If count is 3, only these entries contain returned results: events[0], events[1], events[2]
-    // Those results might mean: Session 9001 can be read. Session 9002 can be written. A Wakeup notification arrived.
+    // Those results might mean: Session 9001 can be read. Session 9002 can be written. A worker notification arrived.
     wait: *const fn (*anyopaque, *EventBuffer, ?time.DurationMs) anyerror![]Event,
     // NOTE: If the worker is waiting, the notification makes its wait return.
     // If the notification arrives before it starts waiting, the notification must remain pending until consumed.

@@ -99,7 +99,7 @@ pub fn run(self: *ClientWorker) !void {
             .socket_ready => |ready| {
                 try self.handleSocketReady(ready);
             },
-            .wakeup => {
+            .worker_notified => {
                 try self.registerPendingSessions();
             },
         }
