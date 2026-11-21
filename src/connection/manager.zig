@@ -3,6 +3,7 @@ const ConnectionContext = @import("context.zig");
 const ConnectionReport = @import("report.zig");
 const ClientWorker = @import("worker.zig");
 const ClientRegistry = @import("client_registry.zig");
+const WorkerSelector = @import("worker_selector.zig");
 const Lock = @import("../lock.zig");
 const socket_metadata = @import("socket_metadata.zig");
 const logging = @import("../logger.zig");
@@ -31,6 +32,8 @@ _lock: Lock,
 _registry: ClientRegistry,
 _registry_released: bool = false,
 _workers: std.ArrayList(*ClientWorker) = .empty,
+// Owns selector state. Borrowed handles are created after the manager is placed.
+_worker_selector: WorkerSelector.LinearScan,
 _next_connection_id: ClientWorker.SessionId = 1,
 _stopping: std.atomic.Value(bool) = .init(false),
 _spawn_worker: SpawnWorkerFn,
@@ -70,6 +73,7 @@ pub fn initWithOptions(
         ._connection_buffer_size = connection_buffer_size,
         ._lock = Lock.init(io),
         ._registry = ClientRegistry.init(io, allocator),
+        ._worker_selector = WorkerSelector.LinearScan.init(io, allocator),
         ._spawn_worker = options.spawn_worker,
         ._local_endpoint = options.local_endpoint,
     };
@@ -78,6 +82,10 @@ pub fn initWithOptions(
 // ConnectionManager will start the workers to a defined limit and make them start and list for events in their own threads
 pub fn start(self: *ConnectionManager, thread_count: u16) !void {
     const previous_worker_count = self._workers.items.len;
+    if (thread_count == 0 or thread_count > WorkerSelector.Interface.max_workers - previous_worker_count) {
+        return error.InvalidWorkerCount;
+    }
+    const selector = self._worker_selector.selector();
 
     errdefer {
         while (self._workers.items.len > previous_worker_count) {
@@ -87,9 +95,11 @@ pub fn start(self: *ConnectionManager, thread_count: u16) !void {
     }
 
     for (0..thread_count) |_| {
-        const worker = try self.createWorker();
+        const worker_id: WorkerSelector.Interface.WorkerId = @intCast(self._workers.items.len);
+        const worker = try self.createWorker(worker_id);
         errdefer self.destroyWorker(worker);
 
+        try selector.addWorker(worker.selectionSource());
         try worker.start();
         try self._workers.append(self._allocator, worker);
     }
@@ -101,8 +111,12 @@ pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
         .stream = stream,
     };
 
-    const workers = try self.getAllWorkersByCapacity();
-    for (workers) |worker| {
+    const selector = self._worker_selector.selector();
+    var tried_workers = WorkerSelector.Interface.ExcludedWorkers.initEmpty();
+    while (selector.choose(tried_workers)) |worker_id| {
+        tried_workers.set(worker_id);
+
+        const worker = self._workers.items[worker_id];
         worker.register(pending_session) catch |err| {
             switch (err) {
                 // TODO: figure for what other errors should we retry with next worker
@@ -119,33 +133,22 @@ pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
     return error.ServerBusy;
 }
 
-fn getAllWorkersByCapacity(self: *ConnectionManager) ![]*ClientWorker {
-    return &.{};
-}
-
-fn getWorker(self: *ConnectionManager) !*ClientWorker {
-    // TODO: implement algorithm create new one or choose worker from existing worker pools
-    return try self.createWorker();
-}
-
-fn createWorker(self: *ConnectionManager) !*ClientWorker {
+fn createWorker(self: *ConnectionManager, worker_id: WorkerSelector.Interface.WorkerId) !*ClientWorker {
     // TODO: figure out when to do stream.close
     const worker = try self._allocator.create(ClientWorker);
     errdefer self._allocator.destroy(worker);
 
-    worker.* = try ClientWorker.init(
-        self._io,
-        self._allocator,
-        self._registry,
-        self._connection_buffer_size,
-    );
+    worker.* = try ClientWorker.init(.{
+        .io = self._io,
+        .allocator = self._allocator,
+        .store = self._store,
+        .registry = &self._registry,
+        .buffer_size = self._connection_buffer_size,
+        .worker_id = worker_id,
+        .worker_selector = self._worker_selector.selector(),
+    });
 
     return worker;
-}
-
-// TODO: implement
-fn chooseWorker(self: *ConnectionManager) !*ClientWorker {
-    return .{};
 }
 
 fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
@@ -155,7 +158,9 @@ fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
 
 // TODO: destroy the provided worker, both unstarted or started
 // For a started worker, this must request shutdown and join the thread
-fn destroyWorker(self: *ConnectionManager, worker: *ClientWorker) void {}
+fn destroyWorker(self: *ConnectionManager, worker: *ClientWorker) void {
+    self._worker_selector.selector().removeWorker(worker._worker_id);
+}
 
 fn nextConnectionId(self: *ConnectionManager) ClientWorker.SessionId {
     const current_id = self._next_connection_id;
@@ -189,6 +194,7 @@ pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.All
 
 // TODO: replace with new design
 pub fn deinit(self: *ConnectionManager) !void {
+    defer self._worker_selector.selector().deinit();
     var first_error: ?anyerror = null;
     var draining_workers: std.ArrayList(*ClientWorker) = .empty;
 
@@ -199,6 +205,7 @@ pub fn deinit(self: *ConnectionManager) !void {
         self._stopping.store(true, .release);
 
         for (self._workers.items) |worker| {
+            self._worker_selector.selector().removeWorker(worker._worker_id);
             switch (worker.lifecycle) {
                 .starting, .running => worker.lifecycle = .stopping,
                 .stopping, .finished => {},
@@ -238,6 +245,7 @@ fn finishWorker(self: *ConnectionManager, worker: *ClientWorker) void {
     var lock_tx = self._lock.beginUncancelable();
     defer lock_tx.end();
 
+    self._worker_selector.selector().removeWorker(worker._worker_id);
     worker.stream.close(self._io);
     worker.lifecycle = .finished;
 }

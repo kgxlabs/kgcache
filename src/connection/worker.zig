@@ -4,6 +4,7 @@ const store = @import("../store.zig");
 const ClientSession = @import("session.zig");
 const ClientRegistry = @import("client_registry.zig");
 const Poller = @import("poller.zig");
+const WorkerSelector = @import("worker_selector.zig");
 
 const ClientWorker = @This();
 
@@ -14,6 +15,8 @@ _store: *store.Store,
 client_sessions: std.ArrayList(*ClientSession) = .empty,
 _poller: Poller.Interface,
 _registry: *ClientRegistry,
+_worker_id: WorkerSelector.Interface.WorkerId,
+_worker_selector: WorkerSelector.Interface,
 _thread: std.Thread,
 _queue: SessionQueue,
 _buffer_size: usize,
@@ -41,6 +44,8 @@ pub const InitConfig = struct {
     store: *store.Store,
     registry: *ClientRegistry,
     buffer_size: usize,
+    worker_id: WorkerSelector.Interface.WorkerId,
+    worker_selector: WorkerSelector.Interface,
     spawn_worker: spawnWorkerThread,
 };
 
@@ -56,6 +61,8 @@ pub fn init(config: InitConfig) !ClientWorker {
         .store = config.store,
         ._poller = poller,
         ._registry = config.registry,
+        ._worker_id = config.worker_id,
+        ._worker_selector = config.worker_selector,
         ._buffer_size = config.buffer_size,
         ._event_buffer = undefined,
         .lifecycle = .initialized,
@@ -82,11 +89,31 @@ pub fn start(self: *ClientWorker) !void {
 // TODO: implement
 // enqueue the incoming session to the fifo queue and wake the poller
 pub fn register(self: *ClientWorker, session: PendingSession) !*ClientSession {
-    const put_count = try self._queue.put(self.io, &.{session}, 0);
+    const put_count = try self._queue.put(self._io, &.{session}, 0);
     // 0 means no capacity in queue yet hence busy worker
     if (put_count == 0) return error.WorkerBusy;
 
+    self.notifyCapacityChanged();
     try self._poller.wake();
+}
+
+pub fn selectionSource(self: *ClientWorker) WorkerSelector.Interface.Worker {
+    return .{
+        .id = self._worker_id,
+        .ptr = self,
+        .available_capacity = readAvailableCapacity,
+    };
+}
+
+fn readAvailableCapacity(ptr: *anyopaque) usize {
+    const self: *ClientWorker = @ptrCast(@alignCast(ptr));
+    return self.availableCapacity();
+}
+
+// Call after admission state changes, including queue drain and session close.
+// Do not hold a worker lock here. The selector may read capacity immediately.
+fn notifyCapacityChanged(self: *ClientWorker) void {
+    self._worker_selector.capacityChanged(self._worker_id);
 }
 
 pub fn run(self: *ClientWorker) !void {
@@ -104,7 +131,7 @@ pub fn run(self: *ClientWorker) !void {
 }
 
 // TODO: Implement
-pub fn availableCapacity(self: *ClientWorker) i8 {
+pub fn availableCapacity(_: *ClientWorker) usize {
     return 100;
 }
 
