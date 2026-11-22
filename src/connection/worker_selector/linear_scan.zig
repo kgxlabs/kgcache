@@ -145,6 +145,8 @@ pub const Selection = struct {
         };
     }
 
+    // NOTE: Capacity may be stale when next() runs.
+    // TODO: Reduce stale capacity data where possible (#284).
     fn next(_: *anyopaque) ?WorkerSelector.WorkerId {
         @panic("LinearScan.Selection.next is not implemented");
     }
