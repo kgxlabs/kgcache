@@ -19,22 +19,40 @@ pub const SpawnWorkerFn = *const fn (*ConnectionManager, *ClientWorker) std.Thre
 pub const LocalEndpointFn = *const fn (std.Io, std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress;
 pub const Options = struct { local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint };
 
+// TODO: Implement
+// NOTE: Event thoug this is named `ServerBudget`, Server should not own this since this is implementation details
+pub const ServerBudget = struct {
+    pub fn init() ServerBudget {
+        return .{};
+    }
+
+    pub fn reserveNewSession(self: *ServerBudget) !Reservation {
+        return .{};
+    }
+
+    pub const Reservation = struct {
+        // TODO: give back the budget to ServerBudget pool
+        pub fn release(self: *Reservation) !void {}
+    };
+};
+
 _io: std.Io,
 _allocator: std.mem.Allocator,
 // Borrowed dependencies. Their owners must keep them alive until deinit returns.
 _logger: logging.Logger,
 _store: *store.Store,
-_worker_count: u16,
-_connection_buffer_size: usize,
+_budget: ServerBudget,
 // Coordinates worker registration, completion, shutdown, and stream close.
 _lock: Lock,
 // Owns registry storage. Sessions own the indexed clients.
 _registry: ClientRegistry,
-_registry_released: bool = false,
 _workers: std.ArrayList(*ClientWorker) = .empty,
 // Owns selector state. Borrowed handles are created after the manager is placed.
 _worker_selector: WorkerSelector.LinearScan,
+_worker_count: u16,
+_registry_released: bool = false,
 _next_connection_id: ClientWorker.SessionId = 1,
+_connection_buffer_size: usize,
 _stopping: std.atomic.Value(bool) = .init(false),
 _spawn_worker: SpawnWorkerFn,
 _local_endpoint: LocalEndpointFn,
@@ -70,6 +88,7 @@ pub fn initWithOptions(
         ._allocator = allocator,
         ._logger = logger,
         ._store = data_store,
+        ._budget = ServerBudget.init(),
         ._connection_buffer_size = connection_buffer_size,
         ._lock = Lock.init(io),
         ._registry = ClientRegistry.init(io, allocator),
@@ -106,16 +125,25 @@ pub fn start(self: *ConnectionManager, thread_count: u16) !void {
 }
 
 pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
+    var reservation = self._budget.reserveNewSession() catch {
+        stream.close(self._io);
+        return error.OutOfBudget;
+    };
+
     const pending_session: ClientWorker.PendingSession = .{
         .id = self.nextConnectionId(),
         .stream = stream,
     };
 
     const selector = self._worker_selector.selector();
-    var tried_workers = WorkerSelector.Interface.ExcludedWorkers.initEmpty();
-    while (selector.choose(tried_workers)) |worker_id| {
-        tried_workers.set(worker_id);
+    var selection = selector.selection() catch |err| {
+        stream.close(self._io);
+        try reservation.release();
+        return err;
+    };
+    defer selection.deinit();
 
+    while (selection.next()) |worker_id| {
         const worker = self._workers.items[worker_id];
         worker.register(pending_session) catch |err| {
             switch (err) {
@@ -130,6 +158,7 @@ pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
 
     // no worker accepted the conenction so close the connection
     stream.close(self._io);
+    try reservation.release();
     return error.ServerBusy;
 }
 

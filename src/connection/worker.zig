@@ -5,6 +5,7 @@ const ClientSession = @import("session.zig");
 const ClientRegistry = @import("client_registry.zig");
 const Poller = @import("poller.zig");
 const WorkerSelector = @import("worker_selector.zig");
+const CapacityCalculator = @import("capacity.zig");
 
 const ClientWorker = @This();
 
@@ -17,6 +18,7 @@ _poller: Poller.Interface,
 _registry: *ClientRegistry,
 _worker_id: WorkerSelector.Interface.WorkerId,
 _worker_selector: WorkerSelector.Interface,
+_capacity: CapacityCalculator,
 _thread: std.Thread,
 _queue: SessionQueue,
 _buffer_size: usize,
@@ -37,6 +39,7 @@ pub const ActivationOutcome = enum {
 };
 pub const LifeCycle = enum { not_started, initialized, started, stop_requested, closing, closed };
 pub const SpawnWorkerFn = *const fn (*ClientWorker) std.Thread.SpawnError!std.Thread;
+pub const CapacityAssessment = struct {};
 
 pub const InitConfig = struct {
     io: std.Io,
@@ -63,6 +66,7 @@ pub fn init(config: InitConfig) !ClientWorker {
         ._registry = config.registry,
         ._worker_id = config.worker_id,
         ._worker_selector = config.worker_selector,
+        ._capacity = CapacityCalculator.init(),
         ._buffer_size = config.buffer_size,
         ._event_buffer = undefined,
         .lifecycle = .initialized,
@@ -130,7 +134,10 @@ pub fn run(self: *ClientWorker) !void {
     }
 }
 
-// TODO: Implement
+pub fn getCapacityAssessment(_: *ClientWorker) !CapacityAssessment {
+    return .{};
+}
+
 pub fn availableCapacity(_: *ClientWorker) usize {
     return 100;
 }

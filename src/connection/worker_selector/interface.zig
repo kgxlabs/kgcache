@@ -14,6 +14,26 @@ pub const Worker = struct {
     available_capacity: *const fn (*anyopaque) usize,
 };
 
+// Owns one selection state. Copies share the same state.
+// Call deinit exactly once, even when iteration stops early.
+pub const Selection = struct {
+    ptr: *anyopaque,
+    vtable: *const SelectionVTable,
+
+    pub const SelectionVTable = struct {
+        next: *const fn (*anyopaque) ?WorkerId,
+        deinit: *const fn (*anyopaque) void,
+    };
+
+    pub fn next(self: *Selection) ?WorkerId {
+        return self.vtable.next(self.ptr);
+    }
+
+    pub fn deinit(self: *Selection) void {
+        self.vtable.deinit(self.ptr);
+    }
+};
+
 // This handle borrows its implementation. Workers must stop using it before
 // the implementation is destroyed. Implementations synchronize shared state.
 ptr: *anyopaque,
@@ -22,7 +42,7 @@ vtable: *const VTable,
 pub const VTable = struct {
     addWorker: *const fn (*anyopaque, Worker) anyerror!void,
     removeWorker: *const fn (*anyopaque, WorkerId) void,
-    choose: *const fn (*anyopaque, ExcludedWorkers) ?WorkerId,
+    selection: *const fn (*anyopaque) anyerror!Selection,
     capacityChanged: *const fn (*anyopaque, WorkerId) void,
     deinit: *const fn (*anyopaque) void,
 };
@@ -38,10 +58,9 @@ pub fn removeWorker(self: WorkerSelector, worker_id: WorkerId) void {
     self.vtable.removeWorker(self.ptr, worker_id);
 }
 
-// Choose one worker without reserving capacity. Registration enforces limits.
-// Excluded workers and workers with zero capacity must not be selected.
-pub fn choose(self: WorkerSelector, excluded: ExcludedWorkers) ?WorkerId {
-    return self.vtable.choose(self.ptr, excluded);
+// Get a "selection handle" which you can use to iterate through the worker lists in order of highest "capacity" to lowest "capacity"
+pub fn selection(self: WorkerSelector) !Selection {
+    return self.vtable.selection(self.ptr);
 }
 
 // Publish a capacity change after updating the worker's admission state.
