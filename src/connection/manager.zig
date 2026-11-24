@@ -19,6 +19,15 @@ pub const SpawnWorkerFn = *const fn (*ConnectionManager, *ClientWorker) std.Thre
 pub const LocalEndpointFn = *const fn (std.Io, std.Io.net.Socket.Handle) anyerror!std.Io.net.IpAddress;
 pub const Options = struct { local_endpoint: LocalEndpointFn = socket_metadata.localEndpoint };
 
+pub const AdmissionOutcome = union(enum) {
+    accepted,
+    refused: RefusalReason,
+};
+pub const RefusalReason = enum {
+    budget_exhausted,
+    no_worker_capacity,
+};
+
 // TODO: Implement
 // NOTE: Event thoug this is named `ServerBudget`, Server should not own this since this is implementation details
 pub const ServerBudget = struct {
@@ -98,129 +107,6 @@ pub fn initWithOptions(
     };
 }
 
-// ConnectionManager will start the workers to a defined limit and make them start and list for events in their own threads
-pub fn start(self: *ConnectionManager, thread_count: u16) !void {
-    const previous_worker_count = self._workers.items.len;
-    if (thread_count == 0 or thread_count > WorkerSelector.Interface.max_workers - previous_worker_count) {
-        return error.InvalidWorkerCount;
-    }
-    const selector = self._worker_selector.selector();
-
-    errdefer {
-        while (self._workers.items.len > previous_worker_count) {
-            const worker = self._workers.pop().?;
-            self.destroyWorker(worker);
-        }
-    }
-
-    for (0..thread_count) |_| {
-        const worker_id: WorkerSelector.Interface.WorkerId = @intCast(self._workers.items.len);
-        const worker = try self.createWorker(worker_id);
-        errdefer self.destroyWorker(worker);
-
-        try selector.addWorker(worker.selectionSource());
-        try worker.start();
-        try self._workers.append(self._allocator, worker);
-    }
-}
-
-pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !void {
-    var reservation = self._budget.reserveNewSession() catch {
-        stream.close(self._io);
-        return error.OutOfBudget;
-    };
-
-    const pending_session: ClientWorker.PendingSession = .{
-        .id = self.nextConnectionId(),
-        .stream = stream,
-    };
-
-    const selector = self._worker_selector.selector();
-    var selection = selector.selection() catch |err| {
-        stream.close(self._io);
-        try reservation.release();
-        return err;
-    };
-    defer selection.deinit();
-
-    while (selection.next()) |worker_id| {
-        const worker = self._workers.items[worker_id];
-        worker.register(pending_session) catch |err| {
-            switch (err) {
-                // TODO: figure for what other errors should we retry with next worker
-                error.WorkerBusy => continue,
-                else => break,
-            }
-        };
-        // a worker took in the session and manager job is done here
-        return;
-    }
-
-    // no worker accepted the conenction so close the connection
-    stream.close(self._io);
-    try reservation.release();
-    return error.ServerBusy;
-}
-
-fn createWorker(self: *ConnectionManager, worker_id: WorkerSelector.Interface.WorkerId) !*ClientWorker {
-    // TODO: figure out when to do stream.close
-    const worker = try self._allocator.create(ClientWorker);
-    errdefer self._allocator.destroy(worker);
-
-    worker.* = try ClientWorker.init(.{
-        .io = self._io,
-        .allocator = self._allocator,
-        .store = self._store,
-        .registry = &self._registry,
-        .buffer_size = self._connection_buffer_size,
-        .worker_id = worker_id,
-        .worker_selector = self._worker_selector.selector(),
-    });
-
-    return worker;
-}
-
-fn runWorker(_: *ConnectionManager, _: *ClientWorker) void {
-    // TODO: schedule sessions and call ClientSession.serve.
-    @panic("ConnectionManager.runWorker is not implemented");
-}
-
-// TODO: destroy the provided worker, both unstarted or started
-// For a started worker, this must request shutdown and join the thread
-fn destroyWorker(self: *ConnectionManager, worker: *ClientWorker) void {
-    self._worker_selector.selector().removeWorker(worker._worker_id);
-}
-
-fn nextConnectionId(self: *ConnectionManager) ClientWorker.SessionId {
-    const current_id = self._next_connection_id;
-    self._next_connection_id += 1;
-    return current_id;
-}
-
-pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
-    // Membership and record lifetime stay protected until every row is copied.
-    var tx = self._lock.beginUncancelable();
-    defer tx.end();
-
-    var count: usize = 0;
-    for (self._workers.items) |worker| {
-        if (worker.lifecycle == .running or worker.lifecycle == .stopping) count += 1;
-    }
-    const items = try allocator.alloc(ConnectionContext.Snapshot, count);
-    var captured: usize = 0;
-    errdefer {
-        for (items[0..captured]) |*snapshot| snapshot.deinit();
-        allocator.free(items);
-    }
-
-    for (self._workers.items) |worker| {
-        if (worker.lifecycle != .running and worker.lifecycle != .stopping) continue;
-        items[captured] = try worker.context.snapshotCurrent(io, allocator);
-        captured += 1;
-    }
-    return .{ .items = items, .allocator = allocator };
-}
-
 // TODO: replace with new design
 pub fn deinit(self: *ConnectionManager) !void {
     defer self._worker_selector.selector().deinit();
@@ -266,6 +152,124 @@ pub fn deinit(self: *ConnectionManager) !void {
     draining_workers.deinit(self._allocator);
 
     if (first_error) |err| return err;
+}
+
+// ConnectionManager will start the workers to a defined limit and make them start and list for events in their own threads
+pub fn start(self: *ConnectionManager, thread_count: u16) !void {
+    const previous_worker_count = self._workers.items.len;
+    if (thread_count == 0 or thread_count > WorkerSelector.Interface.max_workers - previous_worker_count) {
+        return error.InvalidWorkerCount;
+    }
+    const selector = self._worker_selector.selector();
+
+    errdefer {
+        while (self._workers.items.len > previous_worker_count) {
+            const worker = self._workers.pop().?;
+            self.destroyWorker(worker);
+        }
+    }
+
+    for (0..thread_count) |_| {
+        const worker_id: WorkerSelector.Interface.WorkerId = @intCast(self._workers.items.len);
+        const worker = try self.createWorker(worker_id);
+        errdefer self.destroyWorker(worker);
+
+        try selector.addWorker(worker.selectionSource());
+        try worker.start();
+        try self._workers.append(self._allocator, worker);
+    }
+}
+
+// Consumes the stream on every return. Once queued, the worker owns the stream,
+// including when waking the worker fails.
+pub fn register(self: *ConnectionManager, stream: std.Io.net.Stream) !AdmissionOutcome {
+    var queued = false;
+    defer if (!queued) stream.close(self._io);
+
+    var reservation = self._budget.reserveNewSession() catch {
+        return .{ .refused = .budget_exhausted };
+    };
+    defer if (!queued) {
+        reservation.release() catch |err| {
+            self._logger.err("connection manager: failed to release session budget reservation", err, @errorReturnTrace());
+        };
+    };
+
+    const pending_session: ClientWorker.PendingSession = .{
+        .id = self.nextConnectionId(),
+        .stream = stream,
+    };
+
+    const selector = self._worker_selector.selector();
+    var selection = try selector.selection();
+    defer selection.deinit();
+
+    while (selection.next()) |worker_id| {
+        const worker = self._workers.items[worker_id];
+        worker.register(pending_session) catch |err| switch (err) {
+            error.WorkerBusy => continue,
+            else => return err,
+        };
+
+        queued = true;
+        try worker.wake();
+        return .accepted;
+    }
+
+    return .{ .refused = .no_worker_capacity };
+}
+
+fn createWorker(self: *ConnectionManager, worker_id: WorkerSelector.Interface.WorkerId) !*ClientWorker {
+    const worker = try self._allocator.create(ClientWorker);
+    errdefer self._allocator.destroy(worker);
+
+    worker.* = try ClientWorker.init(.{
+        .io = self._io,
+        .allocator = self._allocator,
+        .store = self._store,
+        .registry = &self._registry,
+        .buffer_size = self._connection_buffer_size,
+        .worker_id = worker_id,
+        .worker_selector = self._worker_selector.selector(),
+    });
+
+    return worker;
+}
+
+// TODO: destroy the provided worker, both unstarted or started
+// For a started worker, this must request shutdown and join the thread
+fn destroyWorker(self: *ConnectionManager, worker: *ClientWorker) void {
+    self._worker_selector.selector().removeWorker(worker._worker_id);
+}
+
+fn nextConnectionId(self: *ConnectionManager) ClientWorker.SessionId {
+    const current_id = self._next_connection_id;
+    self._next_connection_id += 1;
+    return current_id;
+}
+
+pub fn snapshotLive(self: *ConnectionManager, io: std.Io, allocator: std.mem.Allocator) ConnectionContext.Error!ConnectionContext.LiveSnapshots {
+    // Membership and record lifetime stay protected until every row is copied.
+    var tx = self._lock.beginUncancelable();
+    defer tx.end();
+
+    var count: usize = 0;
+    for (self._workers.items) |worker| {
+        if (worker.lifecycle == .running or worker.lifecycle == .stopping) count += 1;
+    }
+    const items = try allocator.alloc(ConnectionContext.Snapshot, count);
+    var captured: usize = 0;
+    errdefer {
+        for (items[0..captured]) |*snapshot| snapshot.deinit();
+        allocator.free(items);
+    }
+
+    for (self._workers.items) |worker| {
+        if (worker.lifecycle != .running and worker.lifecycle != .stopping) continue;
+        items[captured] = try worker.context.snapshotCurrent(io, allocator);
+        captured += 1;
+    }
+    return .{ .items = items, .allocator = allocator };
 }
 
 // This runs on the worker thread, so joining here would wait on itself.

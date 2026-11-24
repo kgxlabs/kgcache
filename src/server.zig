@@ -209,7 +209,21 @@ pub fn run(self: *Server) !void {
 
     while (true) {
         const stream = try self._listener.?.accept(self._io);
-        try self._connection_manager.register(stream);
+        const admission_outcome = self._connection_manager.register(stream) catch |err| {
+            self._logger.err(
+                "server: failed to register incoming connection",
+                err,
+                @errorReturnTrace(),
+            );
+            continue;
+        };
+        switch (admission_outcome) {
+            .accepted => {},
+            .refused => |reason| self._logger.warn(switch (reason) {
+                .budget_exhausted => "server: connection refused: session budget exhausted",
+                .no_worker_capacity => "server: connection refused: no worker capacity available",
+            }),
+        }
     }
 }
 

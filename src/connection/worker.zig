@@ -84,20 +84,21 @@ pub fn deinit(self: *ClientWorker) !void {
 }
 
 pub fn start(self: *ClientWorker) !void {
-    // start thread
     self._thread = try self.spawnWorkerThread();
-
     self.lifecycle = .started;
 }
 
-// TODO: implement
-// enqueue the incoming session to the fifo queue and wake the poller
-pub fn register(self: *ClientWorker, session: PendingSession) !*ClientSession {
+// Success transfers stream ownership to the queue. Errors leave ownership
+// with the caller. Wake the worker separately after a successful enqueue.
+pub fn register(self: *ClientWorker, session: PendingSession) !void {
     const put_count = try self._queue.put(self._io, &.{session}, 0);
     // 0 means no capacity in queue yet hence busy worker
     if (put_count == 0) return error.WorkerBusy;
 
     self.notifyCapacityChanged();
+}
+
+pub fn wake(self: *ClientWorker) !void {
     try self._poller.wake();
 }
 
