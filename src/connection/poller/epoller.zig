@@ -7,8 +7,8 @@ pub fn init() !EPoller {
     return .{};
 }
 
-pub fn deinit(ptr: *anyopaque) void {
-    const self: *EPoller = @ptrCast(@alignCast(ptr));
+pub fn deinit(_: *anyopaque) void {
+    @panic("EPoller.deinit is not implemented");
 }
 
 pub fn poller(self: *EPoller) Poller {

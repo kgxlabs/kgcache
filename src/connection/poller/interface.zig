@@ -32,7 +32,7 @@ pub const VTable = struct {
     add: *const fn (*anyopaque, std.Io.net.Stream, ClientSession.SessionId, Interests) anyerror!void,
     modify: *const fn (*anyopaque, std.Io.net.Stream, Interests) anyerror!void,
     remove: *const fn (*anyopaque, std.Io.net.Stream) anyerror!void,
-    // timeout: 0 = Check now and return immediately, 1000 = Wait up to one second. Return sooner if event arrives , null = Wait indefinitely until an event arrives
+    // timeout_ms: 0 checks immediately, 1000 waits up to one second, null waits indefinitely.
     // NOTE: The array has room for 64 event records. The poller does not need to wait until all 64 slots are filled.
     // If count is 3, only these entries contain returned results: events[0], events[1], events[2]
     // Those results might mean: Session 9001 can be read. Session 9002 can be written. A worker notification arrived.
@@ -59,8 +59,8 @@ pub fn remove(self: *Poller, socket: std.Io.net.Stream) !void {
     return self.vtable.remove(self.ptr, socket);
 }
 
-pub fn wait(self: *Poller, event_buffer: *EventBuffer, timeout: ?time.DurationMs) ![]Event {
-    return self.vtable.wait(self.ptr, event_buffer, timeout);
+pub fn wait(self: *Poller, event_buffer: *EventBuffer, timeout_ms: ?time.DurationMs) ![]Event {
+    return self.vtable.wait(self.ptr, event_buffer, timeout_ms);
 }
 
 pub fn wake(self: *Poller) !void {

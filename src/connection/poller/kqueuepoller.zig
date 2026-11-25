@@ -7,8 +7,8 @@ pub fn init() !KqueuePoller {
     return .{};
 }
 
-pub fn deinit(ptr: *anyopaque) void {
-    const self: *KqueuePoller = @ptrCast(@alignCast(ptr));
+pub fn deinit(_: *anyopaque) void {
+    @panic("KqueuePoller.deinit is not implemented");
 }
 
 pub fn poller(self: *KqueuePoller) Poller {

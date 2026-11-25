@@ -141,13 +141,13 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
         maybe_aof_journal,
     );
     self._store = self._mem_store.store();
-    self._connection_manager = ConnectionManager.init(
-        io,
-        allocator,
-        logger,
-        &self._store,
-        config.connection_buffer_size,
-    );
+    self._connection_manager = ConnectionManager.init(.{ .default = .{
+        .io = io,
+        .allocator = allocator,
+        .logger = logger,
+        .data_store = &self._store,
+        .connection_buffer_size = config.connection_buffer_size,
+    } });
     errdefer self._connection_manager.deinit() catch |err| {
         logger.err("server: failed to deinitialize connection manager after startup failure", err, @errorReturnTrace());
     };
@@ -239,6 +239,7 @@ pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
 
     var cleanup_error: ?anyerror = null;
     self._connection_manager.deinit() catch |err| {
+        if (!self._connection_manager.isClosed()) return err;
         cleanup_error = err;
     };
 

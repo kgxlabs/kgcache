@@ -6,6 +6,7 @@ const ClientRegistry = @import("client_registry.zig");
 const ClientState = @import("client_state.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
+const ServerBudget = @import("server_budget.zig");
 
 const ClientSession = @This();
 
@@ -21,8 +22,45 @@ _state: ClientState,
 _buffer: InputBuffer,
 _registry: *ClientRegistry,
 _lifecycle: Lifecycle = .starting,
+// Setup moves these charges only after all fallible publication succeeds.
+_server_reservation: ?ServerBudget.Reservation = null,
+_worker_buffer_charge: usize = 0,
+_ready: ReadyState = .{},
 
 pub const SessionId = u64;
+
+pub const ReadySignals = struct {
+    readable: bool = false,
+    writable: bool = false,
+    read_closed: bool = false,
+    has_error: bool = false,
+    local_work: bool = false,
+};
+
+pub const ReadyState = struct {
+    previous: ?*ClientSession = null,
+    next: ?*ClientSession = null,
+    since_ns: ?std.Io.Timestamp = null,
+    signals: ReadySignals = .{},
+};
+
+pub const TurnBudget = struct {
+    max_commands: usize,
+    max_read_bytes: usize,
+    max_write_bytes: usize,
+    max_duration_ns: std.Io.Duration,
+};
+
+pub const WaitInterests = struct {
+    read: bool,
+    write: bool,
+};
+
+pub const TurnOutcome = union(enum) {
+    runnable: ReadySignals,
+    waiting: WaitInterests,
+    closed,
+};
 
 pub const Lifecycle = enum {
     starting,
@@ -67,6 +105,17 @@ pub fn init(config: InitConfig) !ClientSession {
 
 pub fn deinit(_: *ClientSession) void {
     @panic("ClientSession.deinit is not implemented");
+}
+
+// Nonblocking worker service. Preserve partial input/output and command order.
+// The existing blocking serve method is not used by the fixed-worker scheduler.
+pub fn serviceTurn(self: *ClientSession, signals: ReadySignals, budget: TurnBudget) anyerror!TurnOutcome {
+    _ = .{ self, signals, budget };
+    @panic("ClientSession.serviceTurn is not implemented");
+}
+
+pub fn stream(self: *const ClientSession) std.Io.net.Stream {
+    return self._stream;
 }
 
 pub fn serve(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) void {
