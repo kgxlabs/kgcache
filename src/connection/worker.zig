@@ -201,6 +201,7 @@ pub fn run(self: *ClientWorker) !void {
         const now_ns = std.Io.Clock.awake.now(self._io);
         self._capacity.schedulerBoundary(now_ns);
         self._capacity.updateRecovery(now_ns);
+
         const timeout_ms = self.nextPollTimeout(now_ns);
         if (timeout_ms == null or timeout_ms.? > 0) {
             self._capacity.setPhase(.waiting, std.Io.Clock.awake.now(self._io));

@@ -4,8 +4,10 @@ const Lock = @import("../lock.zig");
 const CapacityCalculator = @This();
 
 pub const Config = struct {
+    // Max cap of worker occupancy
     utilization_target: f64,
     occupancy_tau_ns: std.Io.Duration,
+    // Max cap of the wait/delay time of work that are ready
     ready_target_ns: std.Io.Duration,
     ready_peak_tau_ns: std.Io.Duration,
     ready_close_limit_ns: std.Io.Duration,
@@ -131,8 +133,9 @@ pub fn setPhase(self: *CapacityCalculator, phase: Phase, now_ns: std.Io.Timestam
 }
 
 pub fn schedulerBoundary(self: *CapacityCalculator, now_ns: std.Io.Timestamp) void {
-    _ = .{ self, now_ns };
-    @panic("CapacityCalculator.schedulerBoundary is not implemented");
+    var tx = self._lock.beginUncancelable();
+    defer tx.end();
+    self._state.last_scheduler_boundary_ns = now_ns;
 }
 
 // Publish the replacement head and served wait together under one lock.
@@ -147,8 +150,59 @@ pub fn setupFinished(self: *CapacityCalculator, elapsed_ns: std.Io.Duration, now
 }
 
 pub fn updateRecovery(self: *CapacityCalculator, now_ns: std.Io.Timestamp) void {
-    _ = .{ self, now_ns };
-    @panic("CapacityCalculator.updateRecovery is not implemented");
+    var tx = self._lock.beginUncancelable();
+    defer tx.end();
+
+    // Recent waits still count, even if no ready work is waiting now.
+    const ready_delay_ns = self.readyDelay(now_ns);
+    const recovery = &self._state.recovery;
+
+    // Admission is open. If ready delay reaches the close limit,
+    // close admission and start the minimum closed timer.
+    if (!recovery.closed) {
+        const close_limit_ns: f64 = @floatFromInt(self._config.ready_close_limit_ns.toNanoseconds());
+        if (ready_delay_ns >= close_limit_ns) {
+            recovery.* = .{
+                .closed = true,
+                .min_closed_until_ns = now_ns.addDuration(self._config.min_closed_time_ns),
+            };
+        }
+        return;
+    }
+
+    const reopen_limit_ns: f64 = @floatFromInt(self._config.ready_reopen_limit_ns.toNanoseconds());
+    if (ready_delay_ns >= reopen_limit_ns) {
+        // Admission is already closed, and the worker is not healthy yet.
+        // Clear the healthy window so it can start again when delay improves.
+        recovery.healthy_since_ns = null;
+        return;
+    }
+
+    // Ready delay is below the reopen limit, so the worker is healthy now.
+    // It must stay healthy for the recovery window and wait for the minimum closed time to pass.
+    if (recovery.healthy_since_ns == null) recovery.healthy_since_ns = now_ns;
+
+    const healthy_for_ns = recovery.healthy_since_ns.?.durationTo(now_ns).toNanoseconds();
+    const min_closed_time_passed = now_ns.toNanoseconds() >= recovery.min_closed_until_ns.?.toNanoseconds();
+    const healthy_window_passed = healthy_for_ns >= self._config.recovery_window_ns.toNanoseconds();
+
+    // Both timers must pass before the worker can accept new connections.
+    if (min_closed_time_passed and healthy_window_passed) {
+        recovery.* = .{};
+    }
+}
+
+// Project delay without changing the published ready head or recent peak.
+fn readyDelay(self: *const CapacityCalculator, now_ns: std.Io.Timestamp) f64 {
+    const oldest_wait_ns: f64 = if (self._state.oldest_ready_since_ns) |since_ns|
+        @floatFromInt(@max(0, since_ns.durationTo(now_ns).toNanoseconds()))
+    else
+        0;
+    const peak = self._state.recent_wait_peak;
+    const peak_age_ns: f64 = @floatFromInt(@max(0, peak.at_ns.durationTo(now_ns).toNanoseconds()));
+    const peak_tau_ns: f64 = @floatFromInt(self._config.ready_peak_tau_ns.toNanoseconds());
+    const recent_wait_ns = peak.value_ns * @exp(-peak_age_ns / peak_tau_ns);
+    return @max(oldest_wait_ns, recent_wait_ns);
 }
 
 pub fn nextUpdateAt(self: *CapacityCalculator, now_ns: std.Io.Timestamp) ?std.Io.Timestamp {
