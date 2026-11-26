@@ -54,7 +54,7 @@ pub const InitParams = struct {
 
 pub const InitConfig = union(enum) {
     default: InitParams,
-    with_options: struct {
+    with_runtime_config: struct {
         params: InitParams,
         options: Options,
     },
@@ -98,7 +98,7 @@ _local_endpoint: LocalEndpointFn,
 pub fn init(config: InitConfig) ConnectionManager {
     const params, const options = switch (config) {
         .default => |params| .{ params, Options{} },
-        .with_options => |custom| .{ custom.params, custom.options },
+        .with_runtime_config => |custom| .{ custom.params, custom.options },
     };
     return .{
         ._io = params.io,
@@ -344,7 +344,7 @@ test "thread spawn failure consumes its ID and closes the stream once" {
     var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -376,7 +376,7 @@ test "ID exhaustion rejects registration without wrapping or closing twice" {
     var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -414,7 +414,7 @@ test "worker and collection allocation failures close the consumed stream once" 
         var mock = store.MockStore.init();
         var data_store = mock.store();
         var failing_allocator = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
-        var manager = ConnectionManager.init(.{ .with_options = .{
+        var manager = ConnectionManager.init(.{ .with_runtime_config = .{
             .params = .{
                 .io = network.io(),
                 .allocator = failing_allocator.allocator(),

@@ -15,7 +15,7 @@ test "live snapshots own identity and reports across label replacement and manag
     var snapshots: Context.LiveSnapshots = captured: {
         var mock = store.MockStore.init();
         var data_store = mock.store();
-        var manager = ConnectionManager.init(.{ .with_options = .{
+        var manager = ConnectionManager.init(.{ .with_runtime_config = .{
             .params = .{
                 .io = network.io(),
                 .allocator = testing.allocator,
@@ -78,7 +78,7 @@ test "live snapshots exclude finished records before and after reaping" {
     network.immediate_eof_handle = 7;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -116,7 +116,7 @@ fn liveAllocation(allocator: std.mem.Allocator) !void {
     var network = TestNetwork.init(testing.io, 2);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -176,7 +176,7 @@ test "live snapshot copies remain coherent while labels and manager membership c
     network.immediate_eof_handle = 7;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -335,7 +335,7 @@ test "connection IDs and borrowed contexts stay stable as the collection grows" 
     var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -382,7 +382,7 @@ test "current snapshots use request storage and survive manager destruction" {
     var snapshot = captured: {
         var mock = store.MockStore.init();
         var data_store = mock.store();
-        var manager = ConnectionManager.init(.{ .with_options = .{
+        var manager = ConnectionManager.init(.{ .with_runtime_config = .{
             .params = .{
                 .io = io,
                 .allocator = testing.allocator,
@@ -439,7 +439,7 @@ test "owned labels are freed during repeated reaping and shutdown" {
     network.immediate_eof_handle = 7;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -485,7 +485,7 @@ test "worker registration captures endpoint metadata and one monotonic time samp
         network.local_endpoint_value = case.local;
         var mock = store.MockStore.init();
         var data_store = mock.store();
-        var manager = ConnectionManager.init(.{ .with_options = .{
+        var manager = ConnectionManager.init(.{ .with_runtime_config = .{
             .params = .{
                 .io = network.io(),
                 .allocator = testing.allocator,
@@ -576,7 +576,7 @@ test "metadata failure frees the unpublished record and closes the consumed stre
     network.local_endpoint_error = error.TestEndpointFailure;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -634,7 +634,7 @@ test "connection IDs are never reused after finished workers are reaped" {
     network.immediate_eof_handle = 1;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -666,7 +666,7 @@ test "deinit wakes an idle worker and closes its stream once" {
     var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -693,7 +693,7 @@ test "deinit wakes every idle worker before any worker closes" {
     var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
@@ -829,7 +829,7 @@ test "reapFinished reclaims a completed worker without closing an active worker"
     network.immediate_eof_handle = @intCast(1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(.{ .with_options = .{
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
         .params = .{
             .io = network.io(),
             .allocator = testing.allocator,
