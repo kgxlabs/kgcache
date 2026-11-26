@@ -13,6 +13,8 @@ bind_address: []const u8 = "127.0.0.1",
 port: u16 = 6379,
 reuse_address: bool = true,
 connection_buffer_size: usize = 1024,
+max_clients: u32 = 10_000,
+threads: u16 = 4,
 num_databases: usize = 16,
 // Shared persistence directory, resolved from the process working directory.
 dir: []const u8 = ".",

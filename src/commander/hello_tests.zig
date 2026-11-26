@@ -13,7 +13,7 @@ test "HELLO reports the caller's metadata in the current protocol" {
     var data_store = mock.store();
     for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |selected| {
         for ([_][]const u8{ "HELLO", "hello", "hElLo" }) |name| {
-            var state = connection.ClientState.initWithConnection(&context);
+            var state = connection.LegacyClientState.initWithConnection(&context);
             state.db_index = 7;
             state.resp = selected;
             const command = try commander.init(testing.allocator, .{ .name = name, .arguments = &.{} });
@@ -34,7 +34,7 @@ test "HELLO reports the caller's metadata in the current protocol" {
 
 test "HELLO switches repeatedly and versionless requests keep the selected handle" {
     const context = TestNetwork.identityContext(42);
-    var state = connection.ClientState.initWithConnection(&context);
+    var state = connection.LegacyClientState.initWithConnection(&context);
     state.db_index = 7;
     var mock = MockStore.init();
     var data_store = mock.store();
@@ -70,7 +70,7 @@ test "HELLO metadata allocation failures release owners and preserve the prior h
 
 fn metadataAllocation(allocator: std.mem.Allocator, current: protocol.Resp, arguments: []const []const u8, selected: protocol.Resp) !void {
     const context = TestNetwork.identityContext(42);
-    var state = connection.ClientState.initWithConnection(&context);
+    var state = connection.LegacyClientState.initWithConnection(&context);
     state.db_index = 2;
     state.resp = current;
     var succeeded = false;
@@ -113,7 +113,7 @@ test "invalid HELLO requests preserve state and are rejected before metadata all
     };
     for ([_]protocol.Resp{ protocol.Resp2.resp(), protocol.Resp3.resp() }) |current| {
         for (cases) |case| {
-            var state = connection.ClientState.initWithConnection(&context);
+            var state = connection.LegacyClientState.initWithConnection(&context);
             state.db_index = 2;
             state.resp = current;
             var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
@@ -158,7 +158,7 @@ fn expectMetadata(selected: protocol.Resp, result: commander.Commander.Result, i
 }
 
 test "HELLO rejects execution without a connection context" {
-    var state = connection.ClientState.init();
+    var state = connection.LegacyClientState.init();
     var mock = MockStore.init();
     var data_store = mock.store();
     for ([_][]const []const u8{ &.{}, &.{"2"}, &.{"3"} }) |arguments| {

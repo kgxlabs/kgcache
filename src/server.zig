@@ -141,13 +141,13 @@ pub fn create(io: std.Io, allocator: std.mem.Allocator, config: Config, logger: 
         maybe_aof_journal,
     );
     self._store = self._mem_store.store();
-    self._connection_manager = ConnectionManager.init(
-        io,
-        allocator,
-        logger,
-        &self._store,
-        config.connection_buffer_size,
-    );
+    self._connection_manager = ConnectionManager.init(.{ .default = .{
+        .io = io,
+        .allocator = allocator,
+        .logger = logger,
+        .data_store = &self._store,
+        .connection_buffer_size = config.connection_buffer_size,
+    } });
     errdefer self._connection_manager.deinit() catch |err| {
         logger.err("server: failed to deinitialize connection manager after startup failure", err, @errorReturnTrace());
     };
@@ -205,10 +205,25 @@ pub fn run(self: *Server) !void {
         try hooks.notifyReady(self._listener.?.socket.address);
     }
 
+    try self._connection_manager.start(self._config.threads);
+
     while (true) {
-        const client_stream = try self._listener.?.accept(self._io);
-        try self._connection_manager.start(client_stream);
-        try self._connection_manager.reapFinished();
+        const stream = try self._listener.?.accept(self._io);
+        const admission_outcome = self._connection_manager.register(stream) catch |err| {
+            self._logger.err(
+                "server: failed to register incoming connection",
+                err,
+                @errorReturnTrace(),
+            );
+            continue;
+        };
+        switch (admission_outcome) {
+            .accepted => {},
+            .refused => |reason| self._logger.warn(switch (reason) {
+                .budget_exhausted => "server: connection refused: session budget exhausted",
+                .no_worker_capacity => "server: connection refused: no worker capacity available",
+            }),
+        }
     }
 }
 
@@ -224,6 +239,7 @@ pub fn destroy(self: *Server, reason: StopReason) anyerror!void {
 
     var cleanup_error: ?anyerror = null;
     self._connection_manager.deinit() catch |err| {
+        if (!self._connection_manager.isClosed()) return err;
         cleanup_error = err;
     };
 

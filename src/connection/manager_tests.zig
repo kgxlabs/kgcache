@@ -1,4 +1,5 @@
 const std = @import("std");
+const LegacyClientState = @import("legacy_client_state.zig");
 const logging = @import("../logger.zig");
 const store = @import("../store.zig");
 const TestNetwork = @import("test_network.zig");
@@ -14,7 +15,16 @@ test "live snapshots own identity and reports across label replacement and manag
     var snapshots: Context.LiveSnapshots = captured: {
         var mock = store.MockStore.init();
         var data_store = mock.store();
-        var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+        var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+            .params = .{
+                .io = network.io(),
+                .allocator = testing.allocator,
+                .logger = logging.NoopLogger.logger(),
+                .data_store = &data_store,
+                .connection_buffer_size = 1024,
+            },
+            .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+        } });
         defer manager.deinit() catch unreachable;
         try manager.start(TestNetwork.stream(7));
         try manager.start(TestNetwork.stream(8));
@@ -68,7 +78,16 @@ test "live snapshots exclude finished records before and after reaping" {
     network.immediate_eof_handle = 7;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     defer manager.deinit() catch unreachable;
     try manager.start(TestNetwork.stream(7));
     try manager.start(TestNetwork.stream(8));
@@ -97,7 +116,16 @@ fn liveAllocation(allocator: std.mem.Allocator) !void {
     var network = TestNetwork.init(testing.io, 2);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     defer manager.deinit() catch unreachable;
     try manager.start(TestNetwork.stream(7));
     try manager.start(TestNetwork.stream(8));
@@ -148,7 +176,16 @@ test "live snapshot copies remain coherent while labels and manager membership c
     network.immediate_eof_handle = 7;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     defer manager.deinit() catch unreachable;
     try manager.start(TestNetwork.stream(8));
     network.all_reads_started.waitUncancelable(testing.io);
@@ -198,7 +235,13 @@ test "a blocked CLIENT LIST writer releases collection and report locks and join
     var mock = store.MockStore.init();
     var data_store = mock.store();
     var logger = logging.TestLogger.init();
-    var manager = ConnectionManager.init(testing.io, testing.allocator, logger.logger(), &data_store, 128);
+    var manager = ConnectionManager.init(.{ .default = .{
+        .io = testing.io,
+        .allocator = testing.allocator,
+        .logger = logger.logger(),
+        .data_store = &data_store,
+        .connection_buffer_size = 128,
+    } });
     var stopped = false;
     defer if (!stopped) manager.deinit() catch {};
     const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
@@ -292,7 +335,16 @@ test "connection IDs and borrowed contexts stay stable as the collection grows" 
     var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     defer manager.deinit() catch unreachable;
 
     try manager.start(TestNetwork.stream(1));
@@ -330,7 +382,16 @@ test "current snapshots use request storage and survive manager destruction" {
     var snapshot = captured: {
         var mock = store.MockStore.init();
         var data_store = mock.store();
-        var manager = ConnectionManager.initWithOptions(io, testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+        var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+            .params = .{
+                .io = io,
+                .allocator = testing.allocator,
+                .logger = logging.NoopLogger.logger(),
+                .data_store = &data_store,
+                .connection_buffer_size = 1024,
+            },
+            .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+        } });
         defer manager.deinit() catch unreachable;
         try manager.start(TestNetwork.stream(7));
         network.all_reads_started.waitUncancelable(testing.io);
@@ -342,7 +403,7 @@ test "current snapshots use request storage and survive manager destruction" {
         try worker.context.setLibraryInfo(.lib_name, "test-library");
         try worker.context.setLibraryInfo(.lib_ver, "1.2.3");
         network.registration_time = .fromNanoseconds(500);
-        const state = @import("client_state.zig").initWithConnection(&worker.context);
+        const state = LegacyClientState.initWithConnection(&worker.context);
         var owned = try state.connection_context.?.snapshotCurrent(io, request_arena.allocator());
         errdefer owned.deinit();
         var tx = worker.report._lock.tryBegin() orelse return error.ReportLockStillHeld;
@@ -378,7 +439,16 @@ test "owned labels are freed during repeated reaping and shutdown" {
     network.immediate_eof_handle = 7;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     defer manager.deinit() catch unreachable;
     try manager.start(TestNetwork.stream(7));
     const first = manager._workers.items[0];
@@ -415,7 +485,16 @@ test "worker registration captures endpoint metadata and one monotonic time samp
         network.local_endpoint_value = case.local;
         var mock = store.MockStore.init();
         var data_store = mock.store();
-        var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+        var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+            .params = .{
+                .io = network.io(),
+                .allocator = testing.allocator,
+                .logger = logging.NoopLogger.logger(),
+                .data_store = &data_store,
+                .connection_buffer_size = 1024,
+            },
+            .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+        } });
         defer manager.deinit() catch unreachable;
 
         var stream = TestNetwork.stream(7);
@@ -467,7 +546,13 @@ test "accepted sockets report actual local endpoints from wildcard listeners" {
 
         var mock = store.MockStore.init();
         var data_store = mock.store();
-        var manager = ConnectionManager.init(testing.io, testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+        var manager = ConnectionManager.init(.{ .default = .{
+            .io = testing.io,
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        } });
         defer manager.deinit() catch unreachable;
         const before = std.Io.Clock.awake.now(testing.io);
         try manager.start(accepted);
@@ -491,7 +576,16 @@ test "metadata failure frees the unpublished record and closes the consumed stre
     network.local_endpoint_error = error.TestEndpointFailure;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     errdefer manager.deinit() catch {};
 
     try testing.expectError(error.TestEndpointFailure, manager.start(TestNetwork.stream(1)));
@@ -516,7 +610,13 @@ test "native local endpoint lookup errors use the existing start failure cleanup
     var network = TestNetwork.init(testing.io, 0);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.init(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024);
+    var manager = ConnectionManager.init(.{ .default = .{
+        .io = network.io(),
+        .allocator = testing.allocator,
+        .logger = logging.NoopLogger.logger(),
+        .data_store = &data_store,
+        .connection_buffer_size = 1024,
+    } });
     errdefer manager.deinit() catch {};
     const stream: std.Io.net.Stream = .{ .socket = .{ .handle = -1, .address = .{ .ip4 = .loopback(40000) } } };
 
@@ -534,7 +634,16 @@ test "connection IDs are never reused after finished workers are reaped" {
     network.immediate_eof_handle = 1;
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(network.io(), testing.allocator, logging.NoopLogger.logger(), &data_store, 1024, .{ .local_endpoint = TestNetwork.localEndpoint });
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     defer manager.deinit() catch unreachable;
 
     for (1..4) |expected_id| {
@@ -557,14 +666,16 @@ test "deinit wakes an idle worker and closes its stream once" {
     var network = TestNetwork.init(testing.io, 1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(
-        network.io(),
-        testing.allocator,
-        logging.NoopLogger.logger(),
-        &data_store,
-        1024,
-        .{ .local_endpoint = TestNetwork.localEndpoint },
-    );
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     errdefer manager.deinit() catch {};
 
     try manager.start(TestNetwork.stream(1));
@@ -582,14 +693,16 @@ test "deinit wakes every idle worker before any worker closes" {
     var network = TestNetwork.init(testing.io, worker_count);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(
-        network.io(),
-        testing.allocator,
-        logging.NoopLogger.logger(),
-        &data_store,
-        1024,
-        .{ .local_endpoint = TestNetwork.localEndpoint },
-    );
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     errdefer manager.deinit() catch {};
 
     for (1..worker_count + 1) |handle| {
@@ -631,7 +744,13 @@ test "deinit wakes a real blocked writer and idle reader before joining" {
     _ = try data_store.set(.{ .key = "fruit", .value = value, .condition = null, .expires_at = null, .response = null }, 0);
 
     var test_logger = logging.TestLogger.init();
-    var manager = ConnectionManager.init(testing.io, testing.allocator, test_logger.logger(), &data_store, 128);
+    var manager = ConnectionManager.init(.{ .default = .{
+        .io = testing.io,
+        .allocator = testing.allocator,
+        .logger = test_logger.logger(),
+        .data_store = &data_store,
+        .connection_buffer_size = 128,
+    } });
     var stopped = false;
     defer if (!stopped) manager.deinit() catch {};
 
@@ -710,14 +829,16 @@ test "reapFinished reclaims a completed worker without closing an active worker"
     network.immediate_eof_handle = @intCast(1);
     var mock = store.MockStore.init();
     var data_store = mock.store();
-    var manager = ConnectionManager.initWithOptions(
-        network.io(),
-        testing.allocator,
-        logging.NoopLogger.logger(),
-        &data_store,
-        1024,
-        .{ .local_endpoint = TestNetwork.localEndpoint },
-    );
+    var manager = ConnectionManager.init(.{ .with_runtime_config = .{
+        .params = .{
+            .io = network.io(),
+            .allocator = testing.allocator,
+            .logger = logging.NoopLogger.logger(),
+            .data_store = &data_store,
+            .connection_buffer_size = 1024,
+        },
+        .options = .{ .local_endpoint = TestNetwork.localEndpoint },
+    } });
     errdefer manager.deinit() catch {};
 
     try manager.start(TestNetwork.stream(1));

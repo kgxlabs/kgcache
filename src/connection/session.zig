@@ -2,15 +2,295 @@ const std = @import("std");
 const protocol = @import("../protocol.zig");
 const request_decoder = protocol.request_decoder;
 const commander = @import("../commander.zig");
+const ClientRegistry = @import("client_registry.zig");
 const ClientState = @import("client_state.zig");
-const ConnectionContext = @import("context.zig");
 const store = @import("../store.zig");
 const logging = @import("../logger.zig");
+const ServerBudget = @import("server_budget.zig");
+
+const ClientSession = @This();
+
+pub const CreateError = std.mem.Allocator.Error;
+pub const PublishError = ClientRegistry.RegisterError;
+
+_io: std.Io,
+_allocator: std.mem.Allocator,
+_data_store: *store.Store,
+_logger: logging.Logger,
+_stream: std.Io.net.Stream,
+_state: ClientState,
+_buffer: InputBuffer,
+_registry: *ClientRegistry,
+_lifecycle: Lifecycle = .starting,
+// Setup moves these charges only after all fallible publication succeeds.
+_server_reservation: ?ServerBudget.Reservation = null,
+_worker_buffer_charge: usize = 0,
+_ready: ReadyState = .{},
+
+pub const SessionId = u64;
+
+pub const ReadySignals = struct {
+    readable: bool = false,
+    writable: bool = false,
+    read_closed: bool = false,
+    has_error: bool = false,
+    local_work: bool = false,
+};
+
+pub const ReadyState = struct {
+    previous: ?*ClientSession = null,
+    next: ?*ClientSession = null,
+    since_ns: ?std.Io.Timestamp = null,
+    signals: ReadySignals = .{},
+};
+
+pub const TurnBudget = struct {
+    max_commands: usize,
+    max_read_bytes: usize,
+    max_write_bytes: usize,
+    max_duration_ns: std.Io.Duration,
+};
+
+pub const WaitInterests = struct {
+    read: bool,
+    write: bool,
+};
+
+pub const TurnOutcome = union(enum) {
+    runnable: ReadySignals,
+    waiting: WaitInterests,
+    closed,
+};
+
+pub const Lifecycle = enum {
+    starting,
+    running,
+    stopping,
+    finished,
+};
+
+pub const InitConfig = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    store: *store.Store,
+    logger: logging.Logger,
+    id: SessionId,
+    stream: std.Io.net.Stream,
+    registry: *ClientRegistry,
+    buffer_size: usize,
+};
+
+pub fn init(config: InitConfig) !ClientSession {
+    const buffer = InputBuffer.init(config.allocator, config.buffer_size) catch |err| {
+        config.logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
+        return err;
+    };
+
+    const state = try ClientState.init(.{ .live = .{
+        .io = config.io,
+        .allocator = config.allocator,
+    } });
+
+    return .{
+        ._io = config.io,
+        ._allocator = config.allocator,
+        ._data_store = config.store,
+        ._logger = config.logger,
+        ._stream = config.stream,
+        ._state = state,
+        ._buffer = buffer,
+        ._registry = config.registry,
+    };
+}
+
+pub fn deinit(_: *ClientSession) void {
+    @panic("ClientSession.deinit is not implemented");
+}
+
+// Nonblocking worker service. Preserve partial input/output and command order.
+// The existing blocking serve method is not used by the fixed-worker scheduler.
+pub fn serviceTurn(self: *ClientSession, signals: ReadySignals, budget: TurnBudget) anyerror!TurnOutcome {
+    _ = .{ self, signals, budget };
+    @panic("ClientSession.serviceTurn is not implemented");
+}
+
+pub fn stream(self: *const ClientSession) std.Io.net.Stream {
+    return self._stream;
+}
+
+pub fn serve(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) void {
+    if (stop_requested.load(.acquire)) return;
+
+    self.handleConnection(stop_requested) catch |err| {
+        self._logger.err("connection: request handling failed", err, @errorReturnTrace());
+    };
+}
+
+pub fn clientState(self: *ClientSession) *ClientState {
+    return &self._state;
+}
+
+// TODO: re-implement for worker progress and backpressure
+fn handleConnection(self: *ClientSession, stop_requested: *const std.atomic.Value(bool)) !void {
+    const buffer = &self._buffer;
+    const client_state = self.clientState();
+
+    while (true) {
+        if (stop_requested.load(.acquire)) return;
+
+        if (buffer.read_pos == buffer.write_pos) {
+            buffer.read_pos = 0;
+            buffer.write_pos = 0;
+        }
+        buffer.assertValid();
+
+        if (buffer.write_pos == buffer.bytes.len and buffer.read_pos > 0) {
+            // The previous frame scopes have released all input borrowers.
+            const pending_len = buffer.write_pos - buffer.read_pos;
+            @memmove(buffer.bytes[0..pending_len], buffer.bytes[buffer.read_pos..buffer.write_pos]);
+            buffer.read_pos = 0;
+            buffer.write_pos = pending_len;
+            buffer.assertValid();
+        }
+
+        var connection_writer: ConnectionWriter = .{
+            .io = self._io,
+            .descriptor = self._stream.socket.handle,
+            .client_state = client_state,
+        };
+
+        if (buffer.write_pos == buffer.bytes.len) {
+            buffer.grow(self._allocator) catch |err| {
+                if (err == error.OutOfMemory) {
+                    self._logger.err("connection: input buffer growth failed", err, @errorReturnTrace());
+                    _ = writeResponse(self._logger, client_state.resp(), &connection_writer, .{ .error_reply = internal_error_message }, stop_requested);
+                } else {
+                    _ = writeResponse(self._logger, client_state.resp(), &connection_writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
+                }
+                return;
+            };
+        }
+
+        var data = [_][]u8{buffer.bytes[buffer.write_pos..]};
+        const bytes_read = self._io.vtable.netRead(self._io.userdata, self._stream.socket.handle, &data) catch |err| {
+            if (stop_requested.load(.acquire)) return;
+            switch (err) {
+                error.ConnectionResetByPeer => return,
+                else => return err,
+            }
+        };
+
+        if (bytes_read == 0) return;
+        // record successfully read bytes
+        client_state.recordRead(self._io, bytes_read);
+
+        buffer.write_pos = std.math.add(usize, buffer.write_pos, bytes_read) catch return error.LengthOverflow;
+        buffer.assertValid();
+
+        pending: while (buffer.read_pos < buffer.write_pos) {
+            if (stop_requested.load(.acquire)) return;
+
+            const consumed = request: {
+                var gpa: std.heap.DebugAllocator(.{}) = .init;
+                defer _ = gpa.deinit();
+
+                const allocator = gpa.allocator();
+                const outcome = request_decoder.decode(
+                    buffer.bytes[buffer.read_pos..buffer.write_pos],
+                    allocator,
+                    request_decoder.network_limits,
+                ) catch |err| {
+                    if (err == error.OutOfMemory) {
+                        self._logger.err("connection: request parsing failed", err, @errorReturnTrace());
+                        _ = writeResponse(
+                            self._logger,
+                            client_state.resp(),
+                            &connection_writer,
+                            .{ .error_reply = internal_error_message },
+                            stop_requested,
+                        );
+                    } else {
+                        _ = writeResponse(
+                            self._logger,
+                            client_state.resp(),
+                            &connection_writer,
+                            .{ .error_reply = parseErrorResponse(err) },
+                            stop_requested,
+                        );
+                    }
+                    return;
+                };
+
+                var decoded = switch (outcome) {
+                    .complete => |complete| complete,
+                    .incomplete => break :pending,
+                };
+                defer decoded.deinit(allocator);
+
+                const successful = handleCompleteFrame(
+                    self._io,
+                    self._logger,
+                    &connection_writer,
+                    self._data_store,
+                    client_state,
+                    allocator,
+                    decoded.frame,
+                    stop_requested,
+                );
+                if (!successful) return;
+
+                break :request decoded.consumed;
+            };
+
+            buffer.read_pos = std.math.add(usize, buffer.read_pos, consumed) catch return error.LengthOverflow;
+            buffer.assertValid();
+        }
+    }
+}
+
+fn handleCompleteFrame(
+    io: std.Io,
+    logger: logging.Logger,
+    writer: *ConnectionWriter,
+    data_store: *store.Store,
+    client_state: *ClientState,
+    allocator: std.mem.Allocator,
+    frame: protocol.CommandFrame,
+    stop_requested: *const std.atomic.Value(bool),
+) bool {
+    const command = commander.init(allocator, frame) catch |err| {
+        const message = initErrorResponse(err) orelse {
+            logger.err("connection: command initialization failed", err, @errorReturnTrace());
+            _ = writeResponse(logger, client_state.resp(), writer, .{ .error_reply = internal_error_message }, stop_requested);
+            return false;
+        };
+
+        return writeResponse(logger, client_state.resp(), writer, .{ .error_reply = message }, stop_requested);
+    };
+    defer command.deinit();
+
+    // record command count
+    client_state.recordDispatch(command.canonical_name);
+
+    var result = command.execute(io, data_store, client_state) catch |err| {
+        if (executeErrorResponse(err)) |message| {
+            return writeResponse(logger, client_state.resp(), writer, .{ .error_reply = message }, stop_requested);
+        }
+
+        logger.err("connection: command execution failed", err, @errorReturnTrace());
+        _ = writeResponse(logger, client_state.resp(), writer, .{ .error_reply = internal_error_message }, stop_requested);
+
+        return false;
+    };
+    defer result.deinit();
+
+    return writeResponse(logger, client_state.resp(), writer, result.value, stop_requested);
+}
 
 const ConnectionWriter = struct {
     io: std.Io,
     descriptor: std.Io.net.Socket.Handle,
-    context: *const ConnectionContext,
+    client_state: *ClientState,
     interface: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
     err: ?std.Io.net.Stream.Writer.Error = null,
 
@@ -21,7 +301,7 @@ const ConnectionWriter = struct {
             return error.WriteFailed;
         };
 
-        self.context.recordWrite(self.io, count);
+        self.client_state.recordWrite(self.io, count);
 
         return writer.consume(count);
     }
@@ -58,207 +338,6 @@ const InputBuffer = struct {
         std.debug.assert(self.write_pos <= self.bytes.len);
     }
 };
-
-/// Serves one client session using a borrowed stream.
-///
-/// The caller owns the stream and must close it after this function returns.
-/// Thread creation, shutdown, joining, and worker reaping belong outside this
-/// lower-level connection boundary.
-pub fn serve(
-    io: std.Io,
-    logger: logging.Logger,
-    connection: std.Io.net.Stream,
-    context: *const ConnectionContext,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    connection_buffer_size: usize,
-    stop_requested: *const std.atomic.Value(bool),
-) void {
-    if (stop_requested.load(.acquire)) return;
-
-    var buffer = InputBuffer.init(con_allocator, connection_buffer_size) catch |err| {
-        logger.err("connection: failed to allocate buffer", err, @errorReturnTrace());
-        return;
-    };
-    defer buffer.deinit(con_allocator);
-
-    handleConnection(io, logger, connection, context, data_store, con_allocator, &buffer, stop_requested) catch |err| {
-        logger.err("connection: request handling failed", err, @errorReturnTrace());
-    };
-}
-
-fn handleConnection(
-    io: std.Io,
-    logger: logging.Logger,
-    connection: std.Io.net.Stream,
-    context: *const ConnectionContext,
-    data_store: *store.Store,
-    con_allocator: std.mem.Allocator,
-    buffer: *InputBuffer,
-    stop_requested: *const std.atomic.Value(bool),
-) !void {
-    var client_state = ClientState.initWithConnection(context);
-    while (true) {
-        if (stop_requested.load(.acquire)) return;
-
-        if (buffer.read_pos == buffer.write_pos) {
-            buffer.read_pos = 0;
-            buffer.write_pos = 0;
-        }
-        buffer.assertValid();
-
-        if (buffer.write_pos == buffer.bytes.len and buffer.read_pos > 0) {
-            // The previous frame scopes have released all input borrowers.
-            const pending_len = buffer.write_pos - buffer.read_pos;
-            @memmove(buffer.bytes[0..pending_len], buffer.bytes[buffer.read_pos..buffer.write_pos]);
-            buffer.read_pos = 0;
-            buffer.write_pos = pending_len;
-            buffer.assertValid();
-        }
-
-        var connection_writer: ConnectionWriter = .{
-            .io = io,
-            .descriptor = connection.socket.handle,
-            .context = context,
-        };
-
-        if (buffer.write_pos == buffer.bytes.len) {
-            buffer.grow(con_allocator) catch |err| {
-                if (err == error.OutOfMemory) {
-                    logger.err("connection: input buffer growth failed", err, @errorReturnTrace());
-                    _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = internal_error_message }, stop_requested);
-                } else {
-                    _ = writeResponse(logger, client_state.resp, &connection_writer, .{ .error_reply = parseErrorResponse(err) }, stop_requested);
-                }
-                return;
-            };
-        }
-
-        var data = [_][]u8{buffer.bytes[buffer.write_pos..]};
-        const bytes_read = io.vtable.netRead(io.userdata, connection.socket.handle, &data) catch |err| {
-            if (stop_requested.load(.acquire)) return;
-            switch (err) {
-                error.ConnectionResetByPeer => return,
-                else => return err,
-            }
-        };
-
-        if (bytes_read == 0) return;
-        // record successfully read bytes
-        context.recordRead(io, bytes_read);
-
-        buffer.write_pos = std.math.add(usize, buffer.write_pos, bytes_read) catch return error.LengthOverflow;
-        buffer.assertValid();
-
-        pending: while (buffer.read_pos < buffer.write_pos) {
-            if (stop_requested.load(.acquire)) return;
-
-            const consumed = request: {
-                var gpa: std.heap.DebugAllocator(.{}) = .init;
-                defer _ = gpa.deinit();
-
-                const allocator = gpa.allocator();
-                const outcome = request_decoder.decode(
-                    buffer.bytes[buffer.read_pos..buffer.write_pos],
-                    allocator,
-                    request_decoder.network_limits,
-                ) catch |err| {
-                    if (err == error.OutOfMemory) {
-                        logger.err("connection: request parsing failed", err, @errorReturnTrace());
-                        _ = writeResponse(
-                            logger,
-                            client_state.resp,
-                            &connection_writer,
-                            .{ .error_reply = internal_error_message },
-                            stop_requested,
-                        );
-                    } else {
-                        _ = writeResponse(
-                            logger,
-                            client_state.resp,
-                            &connection_writer,
-                            .{ .error_reply = parseErrorResponse(err) },
-                            stop_requested,
-                        );
-                    }
-                    return;
-                };
-
-                var decoded = switch (outcome) {
-                    .complete => |complete| complete,
-                    .incomplete => break :pending,
-                };
-                defer decoded.deinit(allocator);
-
-                const successful = handleCompleteFrame(
-                    io,
-                    logger,
-                    &connection_writer,
-                    data_store,
-                    &client_state,
-                    allocator,
-                    decoded.frame,
-                    stop_requested,
-                );
-                if (!successful) return;
-
-                break :request decoded.consumed;
-            };
-
-            buffer.read_pos = std.math.add(usize, buffer.read_pos, consumed) catch return error.LengthOverflow;
-            buffer.assertValid();
-        }
-    }
-}
-
-fn handleCompleteFrame(
-    io: std.Io,
-    logger: logging.Logger,
-    writer: *ConnectionWriter,
-    data_store: *store.Store,
-    client_state: *ClientState,
-    allocator: std.mem.Allocator,
-    frame: protocol.CommandFrame,
-    stop_requested: *const std.atomic.Value(bool),
-) bool {
-    const command = commander.init(allocator, frame) catch |err| {
-        const message = initErrorResponse(err) orelse {
-            logger.err("connection: command initialization failed", err, @errorReturnTrace());
-            _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
-            return false;
-        };
-
-        return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);
-    };
-    defer command.deinit();
-
-    // record command count
-    if (client_state.connection_context) |context| context.recordDispatch(command.canonical_name);
-
-    var result = command.execute(io, data_store, client_state) catch |err| {
-        if (executeErrorResponse(err)) |message| {
-            if (client_state.connection_context) |context| context.recordDbAndProto(
-                client_state.db_index,
-                client_state.resp.version(),
-            );
-
-            return writeResponse(logger, client_state.resp, writer, .{ .error_reply = message }, stop_requested);
-        }
-
-        logger.err("connection: command execution failed", err, @errorReturnTrace());
-        _ = writeResponse(logger, client_state.resp, writer, .{ .error_reply = internal_error_message }, stop_requested);
-
-        return false;
-    };
-    defer result.deinit();
-
-    if (client_state.connection_context) |context| context.recordDbAndProto(
-        client_state.db_index,
-        client_state.resp.version(),
-    );
-
-    return writeResponse(logger, client_state.resp, writer, result.value, stop_requested);
-}
 
 const internal_error_message = "ERR something went wrong";
 
@@ -358,5 +437,6 @@ fn executeErrorResponse(err: anyerror) ?[]const u8 {
 }
 
 test "handler creation failures preserve the previous session dispatch" {
-    try @import("session_tests.zig").checkHandlerCreationFailures(ConnectionWriter, handleCompleteFrame);
+    const session_tests = @import("session_tests.zig");
+    try session_tests.checkHandlerCreationFailures(ConnectionWriter, handleCompleteFrame);
 }

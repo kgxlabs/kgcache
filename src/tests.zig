@@ -46,6 +46,8 @@ test {
     _ = @import("cron.zig");
     _ = @import("connection/session_tests.zig");
     _ = @import("connection/manager_tests.zig");
+    _ = @import("connection/capacity_tests.zig");
+    _ = @import("connection/worker_selector/linear_scan_tests.zig");
     _ = @import("connection/report_tests.zig");
     _ = @import("connection/context_tests.zig");
     _ = @import("logger/test_logger.zig");

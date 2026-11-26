@@ -20,6 +20,8 @@ const definitions = [_]DirectiveDefinition{
     integerDirective("port", "port", u16, 0, std.math.maxInt(u16)),
     booleanDirective("reuse-address", "reuse_address"),
     integerDirective("connection-buffer-size", "connection_buffer_size", usize, 1, std.math.maxInt(usize)),
+    integerDirective("maxclients", "max_clients", u32, 1, std.math.maxInt(u32)),
+    integerDirective("threads", "threads", u16, 1, 128),
     integerDirective("databases", "num_databases", usize, 1, @min(std.math.maxInt(u32), std.math.maxInt(usize))),
     stringDirective("dir", "dir", Config.validateDir),
     stringDirective("dbfilename", "dbfilename", Config.validateDbfilename),
@@ -376,7 +378,7 @@ test {
 test "find returns static definitions and matches names case-sensitively" {
     const testing = std.testing;
     const entries = all();
-    try testing.expectEqual(23, entries.len);
+    try testing.expectEqual(25, entries.len);
 
     for (entries, 0..) |definition, index| {
         try testing.expect(find(definition.name).? == &entries[index]);
@@ -421,6 +423,8 @@ test "single-value preparation and application agree with file parsing for every
         .{ .line = "port 7000", .value = .{ .u16_value = 7000 } },
         .{ .line = "reuse-address no", .value = .{ .boolean = false } },
         .{ .line = "connection-buffer-size 2048", .value = .{ .usize_value = 2048 } },
+        .{ .line = "maxclients 20000", .value = .{ .u32_value = 20000 } },
+        .{ .line = "threads 8", .value = .{ .u16_value = 8 } },
         .{ .line = "databases 4", .value = .{ .usize_value = 4 } },
         .{ .line = "dir data files", .value = .{ .string = "data files" } },
         .{ .line = "dbfilename state.kgc", .value = .{ .string = "state.kgc" } },
@@ -463,6 +467,8 @@ test "integer callbacks enforce every directive's boundaries and number syntax" 
     const cases = [_]struct { name: []const u8, minimum: i128, maximum: i128 }{
         .{ .name = "port", .minimum = 0, .maximum = std.math.maxInt(u16) },
         .{ .name = "connection-buffer-size", .minimum = 1, .maximum = std.math.maxInt(usize) },
+        .{ .name = "maxclients", .minimum = 1, .maximum = std.math.maxInt(u32) },
+        .{ .name = "threads", .minimum = 1, .maximum = 128 },
         .{ .name = "databases", .minimum = 1, .maximum = @min(std.math.maxInt(u32), std.math.maxInt(usize)) },
         .{ .name = "cron-interval-ms", .minimum = 1, .maximum = std.math.maxInt(i64) },
         .{ .name = "active-expire-budget-ms", .minimum = 1, .maximum = std.math.maxInt(i8) },
