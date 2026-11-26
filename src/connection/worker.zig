@@ -199,9 +199,10 @@ pub fn run(self: *ClientWorker) !void {
 
     while (self._admission.lifecycle() == .running) {
         const now_ns = std.Io.Clock.awake.now(self._io);
-        self._capacity.schedulerBoundary(now_ns);
+        self._capacity.recordSchedulerCheckpoint(now_ns);
         self._capacity.updateRecovery(now_ns);
 
+        // decide how long poller will wait
         const timeout_ms = self.nextPollTimeout(now_ns);
         if (timeout_ms == null or timeout_ms.? > 0) {
             self._capacity.setPhase(.waiting, std.Io.Clock.awake.now(self._io));
@@ -210,10 +211,11 @@ pub fn run(self: *ClientWorker) !void {
         const wait_result = self._poller.wait(&self._event_buffer, timeout_ms);
         const resumed_at_ns = std.Io.Clock.awake.now(self._io);
         self._capacity.setPhase(.processing, resumed_at_ns);
-        self._capacity.schedulerBoundary(resumed_at_ns);
-        const events = try wait_result;
+        self._capacity.recordSchedulerCheckpoint(resumed_at_ns);
 
+        const events = try wait_result;
         self.recordReadyEvents(events, resumed_at_ns);
+
         if (self._admission.lifecycle() != .running) break;
         self.processPendingWithinBudget();
         self.processReadyWithinBudget();
@@ -221,7 +223,9 @@ pub fn run(self: *ClientWorker) !void {
 }
 
 fn nextPollTimeout(self: *ClientWorker, now_ns: std.Io.Timestamp) ?time.DurationMs {
+    // if there are already work ready to be proccessed, do not wait and process them immediately.
     if (self._admission.snapshot().queued != 0 or !self._ready.isEmpty()) return 0;
+
     return timeoutUntil(self._capacity.nextUpdateAt(now_ns), now_ns);
 }
 
@@ -236,7 +240,7 @@ fn processPendingWithinBudget(self: *ClientWorker) void {
         if (self._admission.lifecycle() != .running) break;
         var pending: ?PendingSession = self._admission.takeForSetup() orelse break;
         const started_at_ns = std.Io.Clock.awake.now(self._io);
-        self._capacity.schedulerBoundary(started_at_ns);
+        self._capacity.recordSchedulerCheckpoint(started_at_ns);
         const result = self.setupSession(&pending);
         const finished_at_ns = std.Io.Clock.awake.now(self._io);
         const elapsed_ns = started_at_ns.durationTo(finished_at_ns);
@@ -270,6 +274,7 @@ fn createSession(self: *ClientWorker, entry: PendingSession) anyerror!*ClientSes
 fn recordReadyEvents(self: *ClientWorker, events: []const Poller.Interface.Event, now_ns: std.Io.Timestamp) void {
     for (events) |event| {
         switch (event) {
+            // it's purpose is to say wake up and check the state. it is already done at poller.wait.
             .worker_notified => {},
             .socket_ready => |ready| {
                 const session = self._sessions.get(ready.token) orelse continue;
@@ -282,6 +287,7 @@ fn recordReadyEvents(self: *ClientWorker, events: []const Poller.Interface.Event
             },
         }
     }
+
     self.publishReadyHead(null, now_ns);
 }
 
@@ -292,7 +298,7 @@ fn processReadyWithinBudget(self: *ClientWorker) void {
         const now_ns = std.Io.Clock.awake.now(self._io);
         const served_wait_ns = turn.ready_since_ns.durationTo(now_ns);
         self.publishReadyHead(served_wait_ns, now_ns);
-        self._capacity.schedulerBoundary(now_ns);
+        self._capacity.recordSchedulerCheckpoint(now_ns);
         const outcome = turn.session.serviceTurn(turn.signals, self._scheduling.session_turn) catch |err| {
             self.closeOwned(.{ .session = turn.session });
             self._logger.err("connection: session turn failed", err, @errorReturnTrace());
@@ -320,6 +326,9 @@ fn scheduleContinuation(self: *ClientWorker, session: *ClientSession, signals: C
     self.publishReadyHead(null, now_ns);
 }
 
+// The oldest ready timestamp tracks when the oldest waiting session became ready.
+// served_wait_ns is the wait duration for the session just picked to run.
+// Each serviced turn gives a new wait sample. Pass null when no session was picked.
 fn publishReadyHead(self: *ClientWorker, served_wait_ns: ?std.Io.Duration, now_ns: std.Io.Timestamp) void {
     self._capacity.readyChanged(self._ready.oldestTimestamp(), served_wait_ns, now_ns);
 }

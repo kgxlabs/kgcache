@@ -3,7 +3,7 @@ const testing = std.testing;
 const Lock = @import("../lock.zig");
 const CapacityCalculator = @import("capacity.zig");
 
-test "capacity scheduler boundary publishes progress without changing recovery or occupancy" {
+test "capacity scheduler checkpoint publishes progress without changing recovery or occupancy" {
     var capacity = fixture();
     capacity._state.recovery = .{
         .closed = true,
@@ -12,12 +12,12 @@ test "capacity scheduler boundary publishes progress without changing recovery o
     };
     const occupancy = capacity._state.occupancy;
 
-    capacity.schedulerBoundary(at(150));
+    capacity.recordSchedulerCheckpoint(at(150));
     try testing.expectEqual(at(150), capacity._state.last_scheduler_boundary_ns);
     try testing.expectEqualDeep(occupancy, capacity._state.occupancy);
     try expectRecovery(&capacity, true, 200, 130);
 
-    capacity.schedulerBoundary(at(160));
+    capacity.recordSchedulerCheckpoint(at(160));
     try testing.expectEqual(at(160), capacity._state.last_scheduler_boundary_ns);
 }
 

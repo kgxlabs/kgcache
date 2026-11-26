@@ -132,7 +132,7 @@ pub fn setPhase(self: *CapacityCalculator, phase: Phase, now_ns: std.Io.Timestam
     @panic("CapacityCalculator.setPhase is not implemented");
 }
 
-pub fn schedulerBoundary(self: *CapacityCalculator, now_ns: std.Io.Timestamp) void {
+pub fn recordSchedulerCheckpoint(self: *CapacityCalculator, now_ns: std.Io.Timestamp) void {
     var tx = self._lock.beginUncancelable();
     defer tx.end();
     self._state.last_scheduler_boundary_ns = now_ns;
